@@ -1,6 +1,7 @@
 import * as core from '@actions/core'
 import { SpaceAndTime } from 'sxt-nodejs-sdk'
 import { validatePositiveInt } from './validators.js'
+import { dispatch, sanitizeSchema } from '../../shared/queries.js'
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
@@ -39,11 +40,6 @@ function classifySql(sql) {
   if (trimmed.startsWith('UPDATE')) return 'dml_update'
   if (trimmed.startsWith('DELETE')) return 'dml_delete'
   return 'dql_select'
-}
-
-function sanitizeSchema(schema) {
-  if (!/^[a-zA-Z0-9_]+$/.test(schema)) throw new Error(`Invalid schema: ${schema}`)
-  return schema
 }
 
 async function getAuthToken(authUrl, authSecret) {
@@ -106,7 +102,6 @@ export async function run() {
     const filterBatchSize = validatePositiveInt(core.getInput('filter-batch-size'), 'filter-batch-size')
     const detectBatchSize = validatePositiveInt(core.getInput('detect-batch-size'), 'detect-batch-size')
 
-    // Early exit
     if (pendingFilter === 0 && pendingDetect === 0) {
       core.info('No pending emails to dispatch')
       core.setOutput('success', 'true')
@@ -115,7 +110,6 @@ export async function run() {
       return
     }
 
-    // Auth once
     core.info('Authenticating...')
     const authToken = await getAuthToken(authUrl, authSecret)
 
@@ -129,10 +123,10 @@ export async function run() {
     while (filterSlots > 0 && pendingFilter > 0) {
       const stage = 1001 + batchIndex
       await sxtQuery(apiUrl, authToken, privateKey, resource,
-        `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${stage} WHERE ID IN (SELECT ID FROM ${schema}.EMAIL_METADATA WHERE STAGE = 2 LIMIT ${filterBatchSize})`)
+        dispatch.claimFilterBatch(schema, stage, filterBatchSize))
 
       const rows = await sxtQuery(apiUrl, authToken, privateKey, resource,
-        `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${stage}`)
+        dispatch.countAtStage(schema, stage))
       const claimed = rows[0]?.CNT ?? 0
 
       if (claimed === 0) break
@@ -147,10 +141,10 @@ export async function run() {
     while (detectSlots > 0 && pendingDetect > 0) {
       const stage = 11001 + batchIndex
       await sxtQuery(apiUrl, authToken, privateKey, resource,
-        `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${stage} WHERE ID IN (SELECT em.ID FROM ${schema}.EMAIL_METADATA em WHERE em.STAGE = 3 AND NOT EXISTS (SELECT 1 FROM ${schema}.EMAIL_METADATA m2 WHERE m2.THREAD_ID = em.THREAD_ID AND m2.USER_ID = em.USER_ID AND m2.STAGE IN (1, 2)) LIMIT ${detectBatchSize})`)
+        dispatch.claimDetectBatch(schema, stage, detectBatchSize))
 
       const rows = await sxtQuery(apiUrl, authToken, privateKey, resource,
-        `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${stage}`)
+        dispatch.countAtStage(schema, stage))
       const claimed = rows[0]?.CNT ?? 0
 
       if (claimed === 0) break
@@ -184,7 +178,7 @@ export async function run() {
       } catch (err) {
         core.error(`Filter trigger failed for stage ${batch.stage}: ${err.message}`)
         await sxtQuery(apiUrl, authToken, privateKey, resource,
-          `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 2 WHERE STAGE = ${batch.stage}`)
+          dispatch.resetClaimedEmails(schema, batch.stage, 2))
       }
       await sleep(100)
     }
@@ -206,7 +200,7 @@ export async function run() {
       } catch (err) {
         core.error(`Detect trigger failed for stage ${batch.stage}: ${err.message}`)
         await sxtQuery(apiUrl, authToken, privateKey, resource,
-          `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 3 WHERE STAGE = ${batch.stage}`)
+          dispatch.resetClaimedEmails(schema, batch.stage, 3))
       }
       await sleep(100)
     }
