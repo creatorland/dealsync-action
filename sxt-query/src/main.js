@@ -92,6 +92,7 @@ export async function run() {
       body: JSON.stringify({
         sqlText: sql,
         biscuits: [biscuit],
+        resources: [resource],
       }),
     })
     const result = await sqlResponse.json()
