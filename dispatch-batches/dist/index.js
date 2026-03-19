@@ -41251,25 +41251,21 @@ async function run() {
     let callIndex = 1;
     let dispatchedFilter = 0;
     let dispatchedDetect = 0;
+    const processorName = core.getInput("processor-name") || "Dealsync Processor v2";
     for (const batch of filterBatches) {
       try {
-        const resp = await fetch(w3RpcUrl, {
+        const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
+        const resp = await fetch(triggerUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            jsonrpc: "2.0",
-            method: "w3_triggerWorkflow",
-            params: {
-              workflowName: "Dealsync Processor v2",
-              body: { batch_type: "filter", transition_stage: String(batch.stage), reset_stage: "2" }
-            },
-            id: callIndex++
+            inputs: { batch_type: "filter", transition_stage: String(batch.stage), reset_stage: "2" }
           })
         });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
         const result = await resp.json();
-        if (result.error) throw new Error(result.error.message);
         dispatchedFilter++;
-        core.info(`Triggered filter processor: stage=${batch.stage}, hash=${result.result?.triggerHash}`);
+        core.info(`Triggered filter processor: stage=${batch.stage}, hash=${result.triggerHash}`);
       } catch (err) {
         core.error(`Filter trigger failed for stage ${batch.stage}: ${err.message}`);
         await sxtQuery(
@@ -41284,23 +41280,18 @@ async function run() {
     }
     for (const batch of detectBatches) {
       try {
-        const resp = await fetch(w3RpcUrl, {
+        const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
+        const resp = await fetch(triggerUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            jsonrpc: "2.0",
-            method: "w3_triggerWorkflow",
-            params: {
-              workflowName: "Dealsync Processor v2",
-              body: { batch_type: "detection", transition_stage: String(batch.stage), reset_stage: "3" }
-            },
-            id: callIndex++
+            inputs: { batch_type: "detection", transition_stage: String(batch.stage), reset_stage: "3" }
           })
         });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
         const result = await resp.json();
-        if (result.error) throw new Error(result.error.message);
         dispatchedDetect++;
-        core.info(`Triggered detect processor: stage=${batch.stage}, hash=${result.result?.triggerHash}`);
+        core.info(`Triggered detect processor: stage=${batch.stage}, hash=${result.triggerHash}`);
       } catch (err) {
         core.error(`Detect trigger failed for stage ${batch.stage}: ${err.message}`);
         await sxtQuery(
