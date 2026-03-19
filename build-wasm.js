@@ -1,7 +1,7 @@
 import { build } from 'esbuild'
 import { wasmLoader } from 'esbuild-plugin-wasm'
 
-const actions = ['sxt-query', 'dispatch-batches', 'fetch-email-content']
+const actions = ['sxt-query', 'dispatch-batches']
 
 for (const action of actions) {
   await build({
