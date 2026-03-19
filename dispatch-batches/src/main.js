@@ -174,7 +174,7 @@ export async function run() {
             jsonrpc: '2.0',
             method: 'w3_triggerWorkflow',
             params: {
-              workflowName: 'Dealsync Processor',
+              workflowName: 'Dealsync Processor v2',
               body: { batch_type: 'filter', transition_stage: String(batch.stage), reset_stage: '2' },
             },
             id: callIndex++,
@@ -201,7 +201,7 @@ export async function run() {
             jsonrpc: '2.0',
             method: 'w3_triggerWorkflow',
             params: {
-              workflowName: 'Dealsync Processor',
+              workflowName: 'Dealsync Processor v2',
               body: { batch_type: 'detection', transition_stage: String(batch.stage), reset_stage: '3' },
             },
             id: callIndex++,
