@@ -1,0 +1,32 @@
+name: SxT Query
+description: Auth + biscuit generation + SQL execution in one step
+inputs:
+  auth-url:
+    description: 'SxT auth proxy URL'
+    required: true
+  auth-secret:
+    description: 'Shared secret for auth proxy'
+    required: true
+  api-url:
+    description: 'SxT API base URL'
+    required: true
+  private-key:
+    description: 'SxT private key for biscuit generation'
+    required: true
+  sql:
+    description: 'SQL statement to execute'
+    required: true
+  resource:
+    description: 'Table name for biscuit scope (e.g., schema.table)'
+    required: true
+  extract-outputs:
+    description: 'Comma-separated field names to extract from response'
+    required: false
+outputs:
+  success:
+    description: 'Whether query succeeded'
+  response:
+    description: 'Query response JSON'
+runs:
+  using: node24
+  main: dist/index.js
