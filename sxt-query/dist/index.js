@@ -53701,13 +53701,6 @@ class SpaceAndTime {
     }
 }
 
-function validatePositiveInt(value, name) {
-  const n = parseInt(value, 10);
-  if (isNaN(n) || n < 0)
-    throw new Error(`${name} must be non-negative integer, got: ${value}`)
-  return n
-}
-
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
@@ -53720,7 +53713,9 @@ async function fetchWithRetry(url, options, maxRetries = 3) {
       if (!response.ok) {
         const body = await response.text();
         if (attempt < maxRetries && [429, 500, 502, 503, 504].includes(response.status)) {
-          await sleep(Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 30000));
+          const delay = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 30000);
+          coreExports.warning(`SxT ${response.status}, retrying in ${Math.round(delay)}ms (attempt ${attempt + 1}/${maxRetries})`);
+          await sleep(delay);
           continue
         }
         throw new Error(`HTTP ${response.status}: ${body}`)
@@ -53729,7 +53724,8 @@ async function fetchWithRetry(url, options, maxRetries = 3) {
     } catch (err) {
       lastError = err;
       if (attempt < maxRetries && !err.message?.startsWith('HTTP ')) {
-        await sleep(Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 30000));
+        const delay = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 30000);
+        await sleep(delay);
         continue
       }
       throw err
@@ -53747,191 +53743,78 @@ function classifySql(sql) {
   return 'dql_select'
 }
 
-function sanitizeSchema(schema) {
-  if (!/^[a-zA-Z0-9_]+$/.test(schema)) throw new Error(`Invalid schema: ${schema}`)
-  return schema
-}
-
-async function getAuthToken(authUrl, authSecret) {
-  const resp = await fetchWithRetry(authUrl, {
-    method: 'GET',
-    headers: { 'x-shared-secret': authSecret },
-  });
-  const data = await resp.json();
-  return data.data || data.accessToken || data
-}
-
-function generateBiscuit(privateKey, operation, resource) {
-  const sxt = new SpaceAndTime();
-  const auth = sxt.Authorization();
-  const result = auth.CreateBiscuitToken(
-    [{ operation, resource: resource.toLowerCase() }],
-    privateKey,
-  );
-  return result.data[0]
-}
-
-async function executeSql(apiUrl, token, biscuit, resource, sql) {
-  const resp = await fetchWithRetry(`${apiUrl}/v1/sql`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      sqlText: sql,
-      biscuits: [biscuit],
-      resources: [resource.toLowerCase()],
-    }),
-  });
-  return resp.json()
-}
-
-async function sxtQuery(apiUrl, authToken, privateKey, resource, sql) {
-  const operation = classifySql(sql);
-  const biscuit = generateBiscuit(privateKey, operation, resource);
-  return executeSql(apiUrl, authToken, biscuit, resource, sql)
-}
-
 async function run() {
   try {
     const authUrl = coreExports.getInput('auth-url');
     const authSecret = coreExports.getInput('auth-secret');
-    const apiUrl = coreExports.getInput('sxt-api-url');
+    const apiUrl = coreExports.getInput('api-url');
     const privateKey = coreExports.getInput('private-key');
-    const schema = sanitizeSchema(coreExports.getInput('sxt-schema'));
-    const w3RpcUrl = coreExports.getInput('w3-rpc-url');
-    const resource = `${schema}.EMAIL_METADATA`;
+    const sql = coreExports.getInput('sql');
+    const resource = coreExports.getInput('resource');
+    const extractOutputs = coreExports.getInput('extract-outputs');
 
-    const activeFilter = validatePositiveInt(coreExports.getInput('active-filter'), 'active-filter');
-    const activeDetect = validatePositiveInt(coreExports.getInput('active-detect'), 'active-detect');
-    const pendingFilter = validatePositiveInt(coreExports.getInput('pending-filter'), 'pending-filter');
-    const pendingDetect = validatePositiveInt(coreExports.getInput('pending-detect'), 'pending-detect');
-    const maxFilter = validatePositiveInt(coreExports.getInput('max-filter'), 'max-filter');
-    const maxDetect = validatePositiveInt(coreExports.getInput('max-detect'), 'max-detect');
-    const filterBatchSize = validatePositiveInt(coreExports.getInput('filter-batch-size'), 'filter-batch-size');
-    const detectBatchSize = validatePositiveInt(coreExports.getInput('detect-batch-size'), 'detect-batch-size');
-
-    // Early exit
-    if (pendingFilter === 0 && pendingDetect === 0) {
-      coreExports.info('No pending emails to dispatch');
-      coreExports.setOutput('success', 'true');
-      coreExports.setOutput('dispatched_filter_count', '0');
-      coreExports.setOutput('dispatched_detect_count', '0');
-      return
+    // 1. Auth — GET proxy with shared secret
+    coreExports.info('Authenticating via SxT proxy...');
+    const authResponse = await fetchWithRetry(authUrl, {
+      method: 'GET',
+      headers: { 'x-shared-secret': authSecret },
+    });
+    const authData = await authResponse.json();
+    const token = authData.data || authData.accessToken || authData;
+    if (!token || typeof token !== 'string') {
+      throw new Error(`Auth failed: unexpected response format: ${JSON.stringify(authData).substring(0, 200)}`)
     }
+    coreExports.info('Auth successful');
 
-    // Auth once
-    coreExports.info('Authenticating...');
-    const authToken = await getAuthToken(authUrl, authSecret);
-
-    let filterSlots = maxFilter - activeFilter;
-    let detectSlots = maxDetect - activeDetect;
-    const filterBatches = [];
-    const detectBatches = [];
-
-    // Claim filter batches
-    let batchIndex = 0;
-    while (filterSlots > 0 && pendingFilter > 0) {
-      const stage = 1001 + batchIndex;
-      await sxtQuery(apiUrl, authToken, privateKey, resource,
-        `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${stage} WHERE ID IN (SELECT ID FROM ${schema}.EMAIL_METADATA WHERE STAGE = 2 LIMIT ${filterBatchSize})`);
-
-      const rows = await sxtQuery(apiUrl, authToken, privateKey, resource,
-        `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${stage}`);
-      const claimed = rows[0]?.CNT ?? 0;
-
-      if (claimed === 0) break
-      filterBatches.push({ stage, count: claimed });
-      filterSlots -= claimed;
-      batchIndex++;
-      coreExports.info(`Filter batch: stage=${stage}, claimed=${claimed}`);
+    // 2. Generate biscuit using SDK (resource must be lowercase per SxT convention)
+    const operation = classifySql(sql);
+    const resourceLower = resource.toLowerCase();
+    coreExports.info(`Generating biscuit for ${operation} on ${resourceLower}`);
+    const sxt = new SpaceAndTime();
+    const authorization = sxt.Authorization();
+    const biscuitResult = authorization.CreateBiscuitToken(
+      [{ operation, resource: resourceLower }],
+      privateKey,
+    );
+    if (!biscuitResult.data || !biscuitResult.data[0]) {
+      throw new Error(`Biscuit generation failed: ${JSON.stringify(biscuitResult)}`)
     }
+    const biscuit = biscuitResult.data[0];
+    coreExports.info('Biscuit generated');
 
-    // Claim detection batches
-    batchIndex = 0;
-    while (detectSlots > 0 && pendingDetect > 0) {
-      const stage = 11001 + batchIndex;
-      await sxtQuery(apiUrl, authToken, privateKey, resource,
-        `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${stage} WHERE ID IN (SELECT em.ID FROM ${schema}.EMAIL_METADATA em WHERE em.STAGE = 3 AND NOT EXISTS (SELECT 1 FROM ${schema}.EMAIL_METADATA m2 WHERE m2.THREAD_ID = em.THREAD_ID AND m2.USER_ID = em.USER_ID AND m2.STAGE IN (1, 2)) LIMIT ${detectBatchSize})`);
+    // 3. Execute SQL
+    coreExports.info(`Executing: ${sql.substring(0, 100)}...`);
+    const sqlResponse = await fetchWithRetry(`${apiUrl}/v1/sql`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        sqlText: sql,
+        biscuits: [biscuit],
+        resources: [resourceLower],
+      }),
+    });
+    const result = await sqlResponse.json();
+    coreExports.info(`Query returned ${Array.isArray(result) ? result.length : 0} rows`);
 
-      const rows = await sxtQuery(apiUrl, authToken, privateKey, resource,
-        `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${stage}`);
-      const claimed = rows[0]?.CNT ?? 0;
-
-      if (claimed === 0) break
-      detectBatches.push({ stage, count: claimed });
-      detectSlots -= claimed;
-      batchIndex++;
-      coreExports.info(`Detect batch: stage=${stage}, claimed=${claimed}`);
-    }
-
-    // Trigger processors
-    let callIndex = 1;
-    let dispatchedFilter = 0;
-    let dispatchedDetect = 0;
-
-    for (const batch of filterBatches) {
-      try {
-        const resp = await fetch(w3RpcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            method: 'w3_triggerWorkflow',
-            params: {
-              workflowName: 'Dealsync Processor',
-              body: { batch_type: 'filter', transition_stage: String(batch.stage), reset_stage: '2' },
-            },
-            id: callIndex++,
-          }),
-        });
-        const result = await resp.json();
-        if (result.error) throw new Error(result.error.message)
-        dispatchedFilter++;
-        coreExports.info(`Triggered filter processor: stage=${batch.stage}, hash=${result.result?.triggerHash}`);
-      } catch (err) {
-        coreExports.error(`Filter trigger failed for stage ${batch.stage}: ${err.message}`);
-        await sxtQuery(apiUrl, authToken, privateKey, resource,
-          `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 2 WHERE STAGE = ${batch.stage}`);
+    // 4. Set outputs
+    if (extractOutputs && Array.isArray(result) && result.length > 0) {
+      const row = result[0]; // Unwrap single-element array
+      for (const field of extractOutputs.split(',').map((f) => f.trim())) {
+        if (row[field] !== undefined) {
+          coreExports.setOutput(field, String(row[field]));
+        }
       }
-      await sleep(100);
     }
 
-    for (const batch of detectBatches) {
-      try {
-        const resp = await fetch(w3RpcUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            method: 'w3_triggerWorkflow',
-            params: {
-              workflowName: 'Dealsync Processor',
-              body: { batch_type: 'detection', transition_stage: String(batch.stage), reset_stage: '3' },
-            },
-            id: callIndex++,
-          }),
-        });
-        const result = await resp.json();
-        if (result.error) throw new Error(result.error.message)
-        dispatchedDetect++;
-        coreExports.info(`Triggered detect processor: stage=${batch.stage}, hash=${result.result?.triggerHash}`);
-      } catch (err) {
-        coreExports.error(`Detect trigger failed for stage ${batch.stage}: ${err.message}`);
-        await sxtQuery(apiUrl, authToken, privateKey, resource,
-          `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 3 WHERE STAGE = ${batch.stage}`);
-      }
-      await sleep(100);
-    }
-
+    coreExports.setOutput('response', JSON.stringify(result));
     coreExports.setOutput('success', 'true');
-    coreExports.setOutput('dispatched_filter_count', String(dispatchedFilter));
-    coreExports.setOutput('dispatched_detect_count', String(dispatchedDetect));
   } catch (error) {
     coreExports.setOutput('success', 'false');
-    coreExports.setOutput('dispatched_filter_count', '0');
-    coreExports.setOutput('dispatched_detect_count', '0');
+    coreExports.setOutput('response', '[]');
+    coreExports.error(error.message);
     coreExports.setFailed(error.message);
   }
 }
