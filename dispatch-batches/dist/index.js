@@ -41251,7 +41251,7 @@ async function run() {
     let callIndex = 1;
     let dispatchedFilter = 0;
     let dispatchedDetect = 0;
-    const processorName = core.getInput("processor-name") || "Dealsync Processor v2";
+    const processorName = core.getInput("processor-name") || "Dealsync Processor v3";
     for (const batch of filterBatches) {
       try {
         const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
