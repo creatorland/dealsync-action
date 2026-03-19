@@ -27500,8 +27500,23 @@ async function run() {
       }
     }
 
-    const headers = inputStore.headers;
+    const headers = inputStore.headers || {};
     const body = bodyIsJson ? JSON.stringify(inputStore.body) : inputStore.body;
+
+    // Auto-set Content-Type for JSON bodies if not already set
+    if (body && method !== 'GET' && method !== 'HEAD') {
+      const hasContentType = Object.keys(headers).some(
+        (k) => k.toLowerCase() === 'content-type',
+      );
+      if (!hasContentType) {
+        try {
+          JSON.parse(typeof body === 'string' ? body : JSON.stringify(body));
+          headers['Content-Type'] = 'application/json';
+        } catch {
+          // Not JSON, let fetch use default
+        }
+      }
+    }
 
     coreExports.info(`${method} ${url}`);
 
