@@ -41094,28 +41094,28 @@ function validatePositiveInt(value, name) {
 
 // shared/queries.js
 var dispatch = {
-  /** Atomically claim stage-2 emails into a filter transition stage */
-  claimFilterBatch: (schema, transitionStage, batchSize) => `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${transitionStage}
-    WHERE ID IN (
-      SELECT ID FROM ${schema}.EMAIL_METADATA WHERE STAGE = 2 LIMIT ${batchSize}
+  /** Atomically claim stage-2 deal_states into a filter transition stage */
+  claimFilterBatch: (schema, transitionStage, batchSize) => `UPDATE ${schema}.DEAL_STATES SET STAGE = ${transitionStage}
+    WHERE EMAIL_METADATA_ID IN (
+      SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STAGE = 2 LIMIT ${batchSize}
     )`,
-  /** Atomically claim stage-3 emails into a detect transition stage (with thread-completeness check) */
-  claimDetectBatch: (schema, transitionStage, batchSize) => `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${transitionStage}
-    WHERE ID IN (
-      SELECT em.ID FROM ${schema}.EMAIL_METADATA em
-      WHERE em.STAGE = 3
+  /** Atomically claim stage-3 deal_states into a detect transition stage (with thread-completeness check) */
+  claimDetectBatch: (schema, transitionStage, batchSize) => `UPDATE ${schema}.DEAL_STATES SET STAGE = ${transitionStage}
+    WHERE EMAIL_METADATA_ID IN (
+      SELECT ds.EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES ds
+      WHERE ds.STAGE = 3
         AND NOT EXISTS (
-          SELECT 1 FROM ${schema}.EMAIL_METADATA m2
-          WHERE m2.THREAD_ID = em.THREAD_ID
-            AND m2.USER_ID = em.USER_ID
-            AND m2.STAGE IN (1, 2)
+          SELECT 1 FROM ${schema}.DEAL_STATES ds2
+          WHERE ds2.THREAD_ID = ds.THREAD_ID
+            AND ds2.USER_ID = ds.USER_ID
+            AND ds2.STAGE IN (1, 2)
         )
       LIMIT ${batchSize}
     )`,
-  /** Count emails at a transition stage (verify claim) */
-  countAtStage: (schema, stage) => `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${stage}`,
-  /** Reset claimed emails back to original stage on trigger failure */
-  resetClaimedEmails: (schema, transitionStage, resetStage) => `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${resetStage} WHERE STAGE = ${transitionStage}`
+  /** Count deal_states at a transition stage (verify claim) */
+  countAtStage: (schema, stage) => `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE STAGE = ${stage}`,
+  /** Reset claimed deal_states back to original stage on trigger failure */
+  resetClaimedEmails: (schema, transitionStage, resetStage) => `UPDATE ${schema}.DEAL_STATES SET STAGE = ${resetStage} WHERE STAGE = ${transitionStage}`
 };
 function sanitizeSchema(schema) {
   if (!/^[a-zA-Z0-9_]+$/.test(schema)) {

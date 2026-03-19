@@ -58,12 +58,12 @@ export async function run() {
 
     for (const [userId, rows] of Object.entries(userGroups)) {
       const messageIds = rows.map((r) => r.MESSAGE_ID)
-      // USER_REPORT_ID in dealsync_stg_v1 IS the syncStateId from email_core
-      const syncStateId = rows[0]?.USER_REPORT_ID || ''
+      // SYNC_STATE_ID in dealsync_stg_v1 IS the syncStateId from email_core
+      const syncStateId = rows[0]?.SYNC_STATE_ID || ''
 
       if (!syncStateId) {
-        core.warning(`No USER_REPORT_ID for user ${userId}, skipping`)
-        failedIds.push(...rows.map((r) => r.ID))
+        core.warning(`No SYNC_STATE_ID for user ${userId}, skipping`)
+        failedIds.push(...rows.map((r) => r.EMAIL_METADATA_ID))
         continue
       }
 
@@ -89,11 +89,11 @@ export async function run() {
       for (const row of rows) {
         const content = contentByMessageId[row.MESSAGE_ID]
         if (!content) {
-          failedIds.push(row.ID)
+          failedIds.push(row.EMAIL_METADATA_ID)
           continue
         }
         allEmails.push({
-          id: row.ID,
+          id: row.EMAIL_METADATA_ID,
           messageId: row.MESSAGE_ID,
           userId: row.USER_ID,
           threadId: row.THREAD_ID || undefined,

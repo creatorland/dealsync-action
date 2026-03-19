@@ -202,7 +202,7 @@ export async function run() {
         // d. Update EMAIL_METADATA stages
         if (threadEmails.length > 0) {
           const newStage = resolveStage(thread)
-          const sqlQuotedIds = toSqlIdList(threadEmails.map((e) => e.ID))
+          const sqlQuotedIds = toSqlIdList(threadEmails.map((e) => e.EMAIL_METADATA_ID))
 
           if (newStage === 4) {
             await executeSql(sxtApiUrl, accessToken, biscuit,

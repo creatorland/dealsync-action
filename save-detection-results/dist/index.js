@@ -27295,7 +27295,8 @@ function tryDecrypt(value, key) {
 /**
  * Shared SQL queries for Dealsync W3 workflow actions.
  *
- * All queries use UPPERCASE column names (SxT convention).
+ * All queries target DEAL_STATES (not EMAIL_METADATA).
+ * All column names UPPERCASE (SxT convention).
  * Schema is passed as a parameter — never hardcoded.
  * IDs must be sanitized before interpolation.
  */
@@ -27306,31 +27307,31 @@ function tryDecrypt(value, key) {
 // ============================================================
 
 const detection = {
-  /** Fetch metadata + AI context for emails at a transition stage (detection) */
+  /** Fetch deal_states + AI context for detection */
   fetchMetadataWithContext: (schema, transitionStage) =>
-    `SELECT em.ID, em.MESSAGE_ID, em.USER_ID, em.THREAD_ID, em.USER_REPORT_ID,
+    `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID,
       latest_eval.AI_SUMMARY AS PREVIOUS_AI_SUMMARY,
       d.ID AS EXISTING_DEAL_ID
-    FROM ${schema}.EMAIL_METADATA em
+    FROM ${schema}.DEAL_STATES ds
     LEFT JOIN (
       SELECT THREAD_ID, AI_SUMMARY,
         ROW_NUMBER() OVER (PARTITION BY THREAD_ID ORDER BY UPDATED_AT DESC) AS RN
       FROM ${schema}.EMAIL_THREAD_EVALUATIONS
-    ) latest_eval ON latest_eval.THREAD_ID = em.THREAD_ID AND latest_eval.RN = 1
-    LEFT JOIN ${schema}.DEALS d ON d.THREAD_ID = em.THREAD_ID AND d.USER_ID = em.USER_ID
-    WHERE em.STAGE = ${transitionStage}`,
+    ) latest_eval ON latest_eval.THREAD_ID = ds.THREAD_ID AND latest_eval.RN = 1
+    LEFT JOIN ${schema}.DEALS d ON d.THREAD_ID = ds.THREAD_ID AND d.USER_ID = ds.USER_ID
+    WHERE ds.STAGE = ${transitionStage}`,
 
-  /** Move deal emails to stage 4 */
+  /** Move deal deal_states to stage 4 */
   updateDeals: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 4 WHERE ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STAGE = 4 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 
-  /** Move non-deal emails to stage 106 */
+  /** Move non-deal deal_states to stage 106 */
   updateRejected: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 106 WHERE ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STAGE = 106 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 
-  /** Move non-English emails to stage 107 */
+  /** Move non-English deal_states to stage 107 */
   updateNonEnglish: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 107 WHERE ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STAGE = 107 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 };
 
 // ============================================================
@@ -27338,51 +27339,42 @@ const detection = {
 // ============================================================
 
 const saveResults = {
-  /** Insert AI evaluation audit record */
   insertAudit: (schema, { id, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation }) =>
     `INSERT INTO ${schema}.AI_EVALUATION_AUDITS
       (ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT, UPDATED_AT)
     VALUES
       ('${id}', ${threadCount}, ${emailCount}, ${cost}, ${inputTokens}, ${outputTokens}, '${model}', '${evaluation}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 
-  /** Delete existing thread evaluation (for upsert) */
   deleteThreadEvaluation: (schema, threadId) =>
     `DELETE FROM ${schema}.EMAIL_THREAD_EVALUATIONS WHERE THREAD_ID = '${threadId}'`,
 
-  /** Insert thread evaluation */
   insertThreadEvaluation: (schema, { id, threadId, auditId, category, summary, isDeal, likelyScam, score }) =>
     `INSERT INTO ${schema}.EMAIL_THREAD_EVALUATIONS
       (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT)
     VALUES
       ('${id}', '${threadId}', '${auditId}', '${category}', '${summary}', ${isDeal}, ${likelyScam}, ${score}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 
-  /** Delete existing contact by email (for upsert) */
   deleteContact: (schema, email) =>
     `DELETE FROM ${schema}.CONTACTS WHERE EMAIL = '${email}'`,
 
-  /** Insert contact */
   insertContact: (schema, { id, email, name, company, title }) =>
     `INSERT INTO ${schema}.CONTACTS
       (ID, EMAIL, NAME, COMPANY_NAME, TITLE, CREATED_AT, UPDATED_AT)
     VALUES
       ('${id}', '${email}', '${name}', '${company}', '${title}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 
-  /** Delete existing deal (for upsert) */
   deleteDeal: (schema, threadId, userId) =>
     `DELETE FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}' AND USER_ID = '${userId}'`,
 
-  /** Insert deal */
   insertDeal: (schema, { id, userId, threadId, evalId, dealName, dealType, category, value, currency, brand }) =>
     `INSERT INTO ${schema}.DEALS
       (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT)
     VALUES
       ('${id}', '${userId}', '${threadId}', '${evalId}', '${dealName}', '${dealType}', '${category}', ${value}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 
-  /** Delete existing deal-contact relationship (for upsert) */
   deleteDealContact: (schema, dealId, contactId) =>
     `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID = '${dealId}' AND CONTACT_ID = '${contactId}'`,
 
-  /** Insert deal-contact relationship */
   insertDealContact: (schema, { id, dealId, contactId }) =>
     `INSERT INTO ${schema}.DEAL_CONTACTS
       (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, CREATED_AT, UPDATED_AT)
@@ -27394,7 +27386,6 @@ const saveResults = {
 // UTILITIES
 // ============================================================
 
-/** Sanitize an ID for safe SQL interpolation */
 function sanitizeId(id) {
   if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
     throw new Error(`Invalid ID format: ${id}`)
@@ -27402,17 +27393,14 @@ function sanitizeId(id) {
   return id
 }
 
-/** Escape a string for SQL single-quote interpolation */
 function sanitizeString(s) {
   return (s || '').replace(/'/g, "''")
 }
 
-/** Format IDs as SQL-quoted comma-separated list for IN clauses */
 function toSqlIdList(ids) {
   return ids.map((id) => `'${sanitizeId(id)}'`).join(',')
 }
 
-/** Validate schema name */
 function sanitizeSchema(schema) {
   if (!/^[a-zA-Z0-9_]+$/.test(schema)) {
     throw new Error(`Invalid schema: ${schema}`)
@@ -27610,7 +27598,7 @@ async function run() {
         // d. Update EMAIL_METADATA stages
         if (threadEmails.length > 0) {
           const newStage = resolveStage(thread);
-          const sqlQuotedIds = toSqlIdList(threadEmails.map((e) => e.ID));
+          const sqlQuotedIds = toSqlIdList(threadEmails.map((e) => e.EMAIL_METADATA_ID));
 
           if (newStage === 4) {
             await executeSql(sxtApiUrl, accessToken, biscuit,
