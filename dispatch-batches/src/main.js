@@ -165,7 +165,7 @@ export async function run() {
     let dispatchedFilter = 0
     let dispatchedDetect = 0
 
-    const processorName = core.getInput('processor-name') || 'Dealsync Processor v2'
+    const processorName = core.getInput('processor-name') || 'Dealsync Processor v3'
 
     for (const batch of filterBatches) {
       try {

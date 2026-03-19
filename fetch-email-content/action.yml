@@ -5,11 +5,23 @@ inputs:
     description: 'JSON array of SxT email metadata rows'
     required: true
   content-fetcher-url:
-    description: 'Content fetcher base URL (HTTPS)'
+    description: 'Content fetcher base URL'
     required: true
-  fields:
-    description: 'Comma-separated content fetcher fields (used for response filtering)'
-    required: false
+  auth-url:
+    description: 'SxT auth proxy URL (for sync state lookup)'
+    required: true
+  auth-secret:
+    description: 'SxT auth proxy shared secret'
+    required: true
+  api-url:
+    description: 'SxT API URL (for sync state lookup)'
+    required: true
+  email-core-private-key:
+    description: 'Private key for email_core_staging schema'
+    required: true
+  email-core-schema:
+    description: 'email_core schema name'
+    required: true
 outputs:
   success:
     description: 'Whether fetching succeeded'
