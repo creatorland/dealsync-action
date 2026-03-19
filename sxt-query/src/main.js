@@ -66,13 +66,14 @@ export async function run() {
     }
     core.info('Auth successful')
 
-    // 2. Generate biscuit using SDK
+    // 2. Generate biscuit using SDK (resource must be lowercase per SxT convention)
     const operation = classifySql(sql)
-    core.info(`Generating biscuit for ${operation} on ${resource}`)
+    const resourceLower = resource.toLowerCase()
+    core.info(`Generating biscuit for ${operation} on ${resourceLower}`)
     const sxt = new SpaceAndTime()
     const authorization = sxt.Authorization()
     const biscuitResult = authorization.CreateBiscuitToken(
-      [{ operation, resource }],
+      [{ operation, resource: resourceLower }],
       privateKey,
     )
     if (!biscuitResult.data || !biscuitResult.data[0]) {
@@ -92,7 +93,7 @@ export async function run() {
       body: JSON.stringify({
         sqlText: sql,
         biscuits: [biscuit],
-        resources: [resource],
+        resources: [resourceLower],
       }),
     })
     const result = await sqlResponse.json()
