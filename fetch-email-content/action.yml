@@ -1,0 +1,22 @@
+name: Fetch Email Content
+description: Fetch email content from content fetcher, grouped by user
+inputs:
+  metadata:
+    description: 'JSON array of SxT email metadata rows'
+    required: true
+  content-fetcher-url:
+    description: 'Content fetcher base URL (HTTPS)'
+    required: true
+  fields:
+    description: 'Comma-separated content fetcher fields (used for response filtering)'
+    required: false
+outputs:
+  success:
+    description: 'Whether fetching succeeded'
+  emails:
+    description: 'JSON array of EmailContent objects (NOT encrypted)'
+  failed_ids:
+    description: 'SQL-quoted comma-separated IDs with no content (stage 666)'
+runs:
+  using: node24
+  main: dist/index.js

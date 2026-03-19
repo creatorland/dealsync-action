@@ -1,0 +1,58 @@
+name: Dispatch Batches
+description: Claim emails into transition stages and trigger processor workflows
+inputs:
+  sxt-api-url:
+    description: 'SxT API base URL'
+    required: true
+  sxt-schema:
+    description: 'SxT schema prefix'
+    required: true
+  sxt-access-token:
+    description: 'SxT JWT access token (encrypted)'
+    required: true
+  sxt-biscuit-select:
+    description: 'SxT SELECT biscuit (encrypted)'
+    required: true
+  sxt-biscuit-dml:
+    description: 'SxT DML biscuit (encrypted)'
+    required: true
+  w3-rpc-url:
+    description: 'W3 node RPC URL'
+    required: true
+  active-filter:
+    description: 'Current active filter transition count'
+    required: true
+  active-detect:
+    description: 'Current active detection transition count'
+    required: true
+  pending-filter:
+    description: 'Pending stage-2 email count'
+    required: true
+  pending-detect:
+    description: 'Pending stage-3 email count'
+    required: true
+  max-filter:
+    description: 'Max filter concurrency'
+    required: true
+  max-detect:
+    description: 'Max detection concurrency'
+    required: true
+  filter-batch-size:
+    description: 'Emails per filter batch'
+    required: true
+  detect-batch-size:
+    description: 'Emails per detection batch'
+    required: true
+  encryption-key:
+    description: 'AES-256-GCM key'
+    required: true
+outputs:
+  success:
+    description: 'Whether dispatching succeeded'
+  dispatched_filter_count:
+    description: 'Number of filter batches dispatched'
+  dispatched_detect_count:
+    description: 'Number of detection batches dispatched'
+runs:
+  using: node24
+  main: dist/index.js

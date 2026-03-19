@@ -1,0 +1,5 @@
+{
+  "headers": ["list-id", "precedence", "x-mailing-list"],
+  "values": ["auto_reply", "bulk"],
+  "tools": ["activecampaign", "constantcontact", "hubspot", "mailchimp", "sendgrid"]
+}

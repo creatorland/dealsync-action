@@ -1,0 +1,46 @@
+name: Save Detection Results
+description: Parse AI output and write to SxT (deals, contacts, evaluations, audits)
+inputs:
+  sxt-api-url:
+    description: 'SxT API base URL'
+    required: true
+  sxt-schema:
+    description: 'SxT schema prefix'
+    required: true
+  sxt-user-id:
+    description: 'SxT auth user ID'
+    required: true
+  sxt-password:
+    description: 'SxT auth password'
+    required: true
+  ai-output:
+    description: 'AI classification JSON (AIClassification schema)'
+    required: true
+  ai-model:
+    description: 'Model that produced the output'
+    required: true
+  ai-prompt-tokens:
+    description: 'Prompt token count'
+    required: true
+  ai-completion-tokens:
+    description: 'Completion token count'
+    required: true
+  metadata:
+    description: 'Original SxT email metadata JSON for ID mapping'
+    required: true
+  transition-stage:
+    description: 'Transition stage to update from'
+    required: true
+  encryption-key:
+    description: 'AES-256-GCM key'
+    required: true
+outputs:
+  success:
+    description: 'Whether saving succeeded'
+  deals_created:
+    description: 'Number of deals created/updated'
+  emails_classified:
+    description: 'Number of emails with stage updated'
+runs:
+  using: node24
+  main: dist/index.js

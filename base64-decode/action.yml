@@ -1,0 +1,39 @@
+name: Base64 Decode
+description: Decode base64url-encoded fields in JSON data
+author: GitHub Actions
+
+inputs:
+  input:
+    description: JSON string (array of objects) to decode
+    required: false
+  input-file:
+    description: Path to JSON file (array of objects) - alternative to input
+    required: false
+  fields:
+    description: Comma-separated field names to decode
+    required: true
+  limit:
+    description: Maximum number of rows to process (0 for no limit)
+    required: false
+    default: '0'
+  output-fields:
+    description: Comma-separated fields to keep in output (omit for all)
+    required: false
+  select-keys:
+    description: >-
+      Extract specific keys from decoded JSON arrays of {name, value} objects.
+      Format: FIELD:key1,key2;FIELD2:key3
+    required: false
+  encryption-key:
+    description: AES-256-GCM key - encrypts output when provided
+    required: false
+
+outputs:
+  result:
+    description: Decoded JSON string (encrypted if encryption-key provided)
+  encrypted:
+    description: Whether result output is encrypted (true/false)
+
+runs:
+  using: node24
+  main: dist/index.js

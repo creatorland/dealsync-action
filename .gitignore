@@ -1,0 +1,3 @@
+# Override root .gitignore — test files and dist bundles are source code in actions/
+!specs/**/*.test.js
+!*/dist/

@@ -1,0 +1,16 @@
+name: Build AI Prompt
+description: Construct classification prompt from email content with incremental context
+inputs:
+  emails:
+    description: 'JSON array of EmailContent objects (from fetch-email-content)'
+    required: true
+outputs:
+  success:
+    description: 'Whether prompt building succeeded'
+  system-prompt:
+    description: 'The constructed system prompt (structural template + classification instructions)'
+  user-prompt:
+    description: 'The formatted thread data for the user message'
+runs:
+  using: node24
+  main: dist/index.js

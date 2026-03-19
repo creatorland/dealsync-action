@@ -1,0 +1,66 @@
+name: HTTP Request
+description: Make HTTP requests with retry, encryption, and SxT array unwrapping
+inputs:
+  url:
+    description: 'Target URL'
+    required: true
+  method:
+    description: 'HTTP method'
+    required: false
+    default: 'GET'
+  headers:
+    description: 'JSON string of headers'
+    required: false
+  body:
+    description: 'Request body'
+    required: false
+  max-retries:
+    description: 'Max retry attempts'
+    required: false
+    default: '3'
+  retry-delay-ms:
+    description: 'Base delay in ms'
+    required: false
+    default: '1000'
+  retry-on-status:
+    description: 'Comma-separated status codes that trigger retry'
+    required: false
+    default: '429,500,502,503,504'
+  retry-backoff:
+    description: 'Backoff strategy: exponential or linear'
+    required: false
+    default: 'exponential'
+  decrypt-inputs:
+    description: 'Comma-separated dot-notation paths to decrypt'
+    required: false
+  extract-outputs:
+    description: 'Comma-separated field names to extract from JSON response'
+    required: false
+  encrypt-outputs:
+    description: 'Comma-separated output names to encrypt'
+    required: false
+  encryption-key:
+    description: 'AES-256-GCM encryption key'
+    required: false
+  decode-fields:
+    description: 'Comma-separated fields to base64-decode'
+    required: false
+  output-fields:
+    description: 'Comma-separated fields to include in response'
+    required: false
+  select-keys:
+    description: 'Filter response object keys'
+    required: false
+  limit:
+    description: 'Limit array response length'
+    required: false
+outputs:
+  success:
+    description: 'Whether the request succeeded'
+  status-code:
+    description: 'HTTP status code'
+  response:
+    description: 'Response body or processed output'
+runs:
+  using: node24
+  main: dist/index.js
