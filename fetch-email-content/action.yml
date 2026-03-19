@@ -1,32 +1,17 @@
 name: Fetch Email Content
-description: Fetch email content from content fetcher, grouped by user
+description: Fetch email content from content fetcher, grouped by user. Uses USER_REPORT_ID as syncStateId.
 inputs:
   metadata:
-    description: 'JSON array of SxT email metadata rows'
+    description: 'JSON array of SxT email metadata rows (must include USER_REPORT_ID)'
     required: true
   content-fetcher-url:
     description: 'Content fetcher base URL'
-    required: true
-  auth-url:
-    description: 'SxT auth proxy URL (for sync state lookup)'
-    required: true
-  auth-secret:
-    description: 'SxT auth proxy shared secret'
-    required: true
-  api-url:
-    description: 'SxT API URL (for sync state lookup)'
-    required: true
-  email-core-private-key:
-    description: 'Private key for email_core_staging schema'
-    required: true
-  email-core-schema:
-    description: 'email_core schema name'
     required: true
 outputs:
   success:
     description: 'Whether fetching succeeded'
   emails:
-    description: 'JSON array of EmailContent objects (NOT encrypted)'
+    description: 'JSON array of EmailContent objects'
   failed_ids:
     description: 'SQL-quoted comma-separated IDs with no content (stage 666)'
 runs:

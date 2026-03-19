@@ -18,11 +18,11 @@ async function fetchWithRetry(url, options, maxRetries = 3) {
           await sleep(1000 * Math.pow(2, attempt))
           continue
         }
-        throw new Error(`HTTP ${response.status}: ${await response.text()}`)
+        throw new Error(`Content fetcher HTTP ${response.status}: ${await response.text()}`)
       }
       return response
     } catch (err) {
-      if (attempt < maxRetries && !err.message?.startsWith('HTTP ')) {
+      if (attempt < maxRetries && !err.message?.includes('Content fetcher HTTP')) {
         await sleep(1000 * Math.pow(2, attempt))
         continue
       }
@@ -31,49 +31,10 @@ async function fetchWithRetry(url, options, maxRetries = 3) {
   }
 }
 
-async function getSyncStateForUser(authUrl, authSecret, apiUrl, privateKey, schema, userId) {
-  // Dynamic import for WASM
-  const { SpaceAndTime } = await import('sxt-nodejs-sdk')
-
-  // Auth
-  const authResp = await fetch(authUrl, {
-    method: 'GET',
-    headers: { 'x-shared-secret': authSecret },
-  })
-  const token = (await authResp.json()).data
-
-  // Generate biscuit
-  const sxt = new SpaceAndTime()
-  const auth = sxt.Authorization()
-  const resource = `${schema}.sync_states`
-  const biscuit = auth.CreateBiscuitToken(
-    [{ operation: 'dql_select', resource }],
-    privateKey,
-  )
-
-  // Query most recent completed sync state for user
-  const sqlResp = await fetch(`${apiUrl}/v1/sql`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sqlText: `SELECT ID FROM ${schema.toUpperCase()}.SYNC_STATES WHERE USER_ID = '${userId}' ORDER BY CREATED_AT DESC LIMIT 1`,
-      biscuits: [biscuit.data[0]],
-      resources: [resource],
-    }),
-  })
-  const rows = await sqlResp.json()
-  return rows[0]?.ID || ''
-}
-
 export async function run() {
   try {
     const metadataJson = core.getInput('metadata')
     const contentFetcherUrl = core.getInput('content-fetcher-url')
-    const authUrl = core.getInput('auth-url')
-    const authSecret = core.getInput('auth-secret')
-    const apiUrl = core.getInput('api-url')
-    const emailCoreKey = core.getInput('email-core-private-key')
-    const emailCoreSchema = core.getInput('email-core-schema')
 
     if (!metadataJson || metadataJson === '[]') {
       core.setOutput('emails', '[]')
@@ -97,18 +58,16 @@ export async function run() {
 
     for (const [userId, rows] of Object.entries(userGroups)) {
       const messageIds = rows.map((r) => r.MESSAGE_ID)
+      // USER_REPORT_ID in dealsync_stg_v1 IS the syncStateId from email_core
+      const syncStateId = rows[0]?.USER_REPORT_ID || ''
 
-      // Get syncStateId from email_core
-      core.info(`Looking up sync state for user ${userId}`)
-      const syncStateId = await getSyncStateForUser(
-        authUrl, authSecret, apiUrl, emailCoreKey, emailCoreSchema, userId,
-      )
       if (!syncStateId) {
-        core.warning(`No sync state found for user ${userId}, skipping`)
+        core.warning(`No USER_REPORT_ID for user ${userId}, skipping`)
         failedIds.push(...rows.map((r) => r.ID))
         continue
       }
-      core.info(`Using syncStateId: ${syncStateId}`)
+
+      core.info(`Fetching content for ${messageIds.length} emails, user=${userId}, syncState=${syncStateId}`)
 
       const response = await fetchWithRetry(
         `${contentFetcherUrl}/email-content/fetch`,

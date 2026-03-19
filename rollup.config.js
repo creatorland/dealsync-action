@@ -18,11 +18,12 @@ function entry(input, output) {
 }
 
 // Pure JS actions — bundled by Rollup
-// WASM actions (sxt-query, dispatch-batches, fetch-email-content) — built by esbuild via build-wasm.js
+// WASM actions (sxt-query, dispatch-batches) — built by esbuild via build-wasm.js
 export default [
   entry('http/src/index.js', 'http/dist/index.js'),
   entry('base64-decode/src/index.js', 'base64-decode/dist/index.js'),
   entry('filter-emails/src/index.js', 'filter-emails/dist/index.js'),
+  entry('fetch-email-content/src/index.js', 'fetch-email-content/dist/index.js'),
   entry('build-ai-prompt/src/index.js', 'build-ai-prompt/dist/index.js'),
   entry('save-detection-results/src/index.js', 'save-detection-results/dist/index.js'),
 ]
