@@ -3,26 +3,18 @@ import * as crypto from 'crypto'
 import * as core from '@actions/core'
 
 import { decryptValue, tryDecrypt } from '../../shared/crypto.js'
+import {
+  saveResults,
+  detection,
+  sanitizeId,
+  sanitizeString,
+  sanitizeSchema,
+  toSqlIdList,
+} from '../../shared/queries.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function sanitizeId(id) {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid ID: ${id}`)
-  return id
-}
-
-function sanitizeString(s) {
-  return (s || '').replace(/'/g, "''")
-}
-
-function sanitizeSchema(schema) {
-  if (!/^[a-zA-Z0-9_]+$/.test(schema)) {
-    throw new Error(`Invalid schema: ${schema}`)
-  }
-  return schema
-}
 
 async function executeSql(sxtApiUrl, accessToken, biscuit, sqlText) {
   const resp = await fetch(`${sxtApiUrl}/v1/sql`, {
@@ -37,49 +29,21 @@ async function executeSql(sxtApiUrl, accessToken, biscuit, sqlText) {
   return resp.json()
 }
 
-// ---------------------------------------------------------------------------
-// SxT Auth
-// ---------------------------------------------------------------------------
-
-async function authenticate(sxtApiUrl, userId, password) {
-  const loginResp = await fetch(`${sxtApiUrl}/v1/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userId, password }),
+async function authenticate(sxtApiUrl, authUrl, authSecret) {
+  const resp = await fetch(authUrl, {
+    method: 'GET',
+    headers: { 'x-shared-secret': authSecret },
   })
-  if (!loginResp.ok) {
-    throw new Error(`SxT auth login ${loginResp.status}: ${await loginResp.text()}`)
-  }
-  const loginData = (await loginResp.json())[0]
-  const accessToken = loginData.ACCESSTOKEN
-  const sessionId = loginData.SESSIONID
-
-  const biscuitResp = await fetch(
-    `${sxtApiUrl}/v1/biscuits/generated/dealsync-dml`,
-    { headers: { sessionId } },
-  )
-  if (!biscuitResp.ok) {
-    throw new Error(`SxT biscuit ${biscuitResp.status}: ${await biscuitResp.text()}`)
-  }
-  const biscuitData = (await biscuitResp.json())[0]
-  const biscuit = biscuitData.BISCUIT
-
-  return { accessToken, biscuit }
+  if (!resp.ok) throw new Error(`Auth failed: ${resp.status}`)
+  const data = await resp.json()
+  return data.data || data.accessToken || data
 }
-
-// ---------------------------------------------------------------------------
-// Decrypt helper – tries to decrypt; if encryption-key is empty, returns raw
-// ---------------------------------------------------------------------------
 
 function decryptInput(value, encryptionKey) {
   if (!encryptionKey) return value
   const decrypted = tryDecrypt(value, encryptionKey)
   return decrypted !== null ? decrypted : value
 }
-
-// ---------------------------------------------------------------------------
-// Stage mapping
-// ---------------------------------------------------------------------------
 
 function resolveStage(thread) {
   if (thread.language && thread.language.toLowerCase() !== 'en') return 107
@@ -95,28 +59,20 @@ export async function run() {
   try {
     const encryptionKey = core.getInput('encryption-key')
 
-    // Read and optionally decrypt inputs
     const sxtApiUrl = core.getInput('sxt-api-url')
     const schema = sanitizeSchema(core.getInput('sxt-schema'))
-    const sxtUserId = decryptInput(core.getInput('sxt-user-id'), encryptionKey)
-    const sxtPassword = decryptInput(
-      core.getInput('sxt-password'),
-      encryptionKey,
-    )
+    const authUrl = core.getInput('sxt-auth-url')
+    const authSecret = decryptInput(core.getInput('sxt-auth-secret'), encryptionKey)
 
     const aiOutputRaw = decryptInput(core.getInput('ai-output'), encryptionKey)
     const aiModel = sanitizeString(core.getInput('ai-model'))
     const aiPromptTokens = parseInt(core.getInput('ai-prompt-tokens'), 10) || 0
-    const aiCompletionTokens =
-      parseInt(core.getInput('ai-completion-tokens'), 10) || 0
+    const aiCompletionTokens = parseInt(core.getInput('ai-completion-tokens'), 10) || 0
     const metadataRaw = decryptInput(core.getInput('metadata'), encryptionKey)
-    const transitionStage = core.getInput('transition-stage')
 
-    // Parse JSON inputs
     const aiOutput = JSON.parse(aiOutputRaw)
     const metadata = JSON.parse(metadataRaw)
 
-    // Build metadata lookup: thread_id -> array of email metadata rows
     const metadataByThread = {}
     for (const row of metadata) {
       const tid = row.THREAD_ID
@@ -124,7 +80,6 @@ export async function run() {
       metadataByThread[tid].push(row)
     }
 
-    // Handle empty threads
     const threads = aiOutput.threads || []
     if (threads.length === 0) {
       core.info('No threads to process')
@@ -134,12 +89,11 @@ export async function run() {
       return
     }
 
-    // Re-authenticate to SxT for fresh tokens
-    const { accessToken, biscuit } = await authenticate(
-      sxtApiUrl,
-      sxtUserId,
-      sxtPassword,
-    )
+    // Auth via proxy
+    const accessToken = await authenticate(sxtApiUrl, authUrl, authSecret)
+    // TODO: generate biscuit with sxt-nodejs-sdk instead of fetching pre-generated
+    // For now this action needs to be refactored to use sxt-nodejs-sdk like dispatch-batches
+    const biscuit = '' // placeholder — will be addressed when this action is deployed
 
     let dealsCreated = 0
     let emailsClassified = 0
@@ -152,124 +106,118 @@ export async function run() {
         const threadId = sanitizeId(thread.thread_id)
         const threadEmails = metadataByThread[threadId] || []
         const emailCount = threadEmails.length
-        const userId =
-          threadEmails.length > 0 ? sanitizeId(threadEmails[0].USER_ID) : ''
+        const userId = threadEmails.length > 0 ? sanitizeId(threadEmails[0].USER_ID) : ''
 
-        // ----- a. INSERT AI_EVALUATION_AUDITS -----
+        // a. INSERT AI_EVALUATION_AUDITS
         const auditId = crypto.randomUUID()
-        const rawJson = sanitizeString(
-          JSON.stringify(thread).substring(0, 6400),
-        )
-        await executeSql(
-          sxtApiUrl,
-          accessToken,
-          biscuit,
-          `INSERT INTO ${schema}.AI_EVALUATION_AUDITS (ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT, UPDATED_AT) VALUES ('${auditId}', ${threads.length}, ${emailCount}, ${inferenceCost}, ${aiPromptTokens}, ${aiCompletionTokens}, '${aiModel}', '${rawJson}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        )
+        const rawJson = sanitizeString(JSON.stringify(thread).substring(0, 6400))
+        await executeSql(sxtApiUrl, accessToken, biscuit,
+          saveResults.insertAudit(schema, {
+            id: auditId,
+            threadCount: threads.length,
+            emailCount,
+            cost: inferenceCost,
+            inputTokens: aiPromptTokens,
+            outputTokens: aiCompletionTokens,
+            model: aiModel,
+            evaluation: rawJson,
+          }))
 
-        // ----- b. DELETE + INSERT EMAIL_THREAD_EVALUATIONS -----
+        // b. DELETE + INSERT EMAIL_THREAD_EVALUATIONS
         const evalId = crypto.randomUUID()
         const category = sanitizeString(thread.category || '')
         const aiSummary = sanitizeString(thread.ai_summary || '')
         const isDeal = thread.is_deal ? 'true' : 'false'
-        const isLikelyScam =
-          (thread.category || '').toLowerCase() === 'likely_scam'
-            ? 'true'
-            : 'false'
+        const isLikelyScam = (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'
         const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0
 
-        await executeSql(
-          sxtApiUrl,
-          accessToken,
-          biscuit,
-          `DELETE FROM ${schema}.EMAIL_THREAD_EVALUATIONS WHERE THREAD_ID = '${threadId}'`,
-        )
-        await executeSql(
-          sxtApiUrl,
-          accessToken,
-          biscuit,
-          `INSERT INTO ${schema}.EMAIL_THREAD_EVALUATIONS (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT) VALUES ('${evalId}', '${threadId}', '${auditId}', '${category}', '${aiSummary}', ${isDeal}, ${isLikelyScam}, ${aiScore}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        )
+        await executeSql(sxtApiUrl, accessToken, biscuit,
+          saveResults.deleteThreadEvaluation(schema, threadId))
+        await executeSql(sxtApiUrl, accessToken, biscuit,
+          saveResults.insertThreadEvaluation(schema, {
+            id: evalId,
+            threadId,
+            auditId,
+            category,
+            summary: aiSummary,
+            isDeal,
+            likelyScam: isLikelyScam,
+            score: aiScore,
+          }))
 
-        // ----- c. If is_deal and main_contact exists -----
+        // c. If is_deal and main_contact exists
         if (thread.is_deal && thread.main_contact) {
           const contact = thread.main_contact
           const contactEmail = sanitizeString(contact.email || '')
           const contactName = sanitizeString(contact.name || '')
           const contactCompany = sanitizeString(contact.company || '')
-          const contactRole = sanitizeString(contact.role || '')
+          const contactTitle = sanitizeString(contact.title || '')
           const contactId = crypto.randomUUID()
 
-          // DELETE + INSERT CONTACTS (keyed by email)
-          await executeSql(
-            sxtApiUrl,
-            accessToken,
-            biscuit,
-            `DELETE FROM ${schema}.CONTACTS WHERE EMAIL = '${contactEmail}'`,
-          )
-          await executeSql(
-            sxtApiUrl,
-            accessToken,
-            biscuit,
-            `INSERT INTO ${schema}.CONTACTS (ID, EMAIL, NAME, COMPANY, ROLE, CREATED_AT, UPDATED_AT) VALUES ('${contactId}', '${contactEmail}', '${contactName}', '${contactCompany}', '${contactRole}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-          )
+          await executeSql(sxtApiUrl, accessToken, biscuit,
+            saveResults.deleteContact(schema, contactEmail))
+          await executeSql(sxtApiUrl, accessToken, biscuit,
+            saveResults.insertContact(schema, {
+              id: contactId,
+              email: contactEmail,
+              name: contactName,
+              company: contactCompany,
+              title: contactTitle,
+            }))
 
-          // DELETE + INSERT DEALS (keyed by thread_id + user_id)
           const dealId = crypto.randomUUID()
-          const dealTitle = sanitizeString(thread.deal_title || thread.ai_summary || '')
-          const dealValue = typeof thread.deal_value === 'number' ? thread.deal_value : 0
+          const dealName = sanitizeString(thread.deal_name || '')
+          const dealType = sanitizeString(thread.deal_type || '')
+          const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0
+          const currency = sanitizeString(thread.currency || 'USD')
 
-          await executeSql(
-            sxtApiUrl,
-            accessToken,
-            biscuit,
-            `DELETE FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}' AND USER_ID = '${userId}'`,
-          )
-          await executeSql(
-            sxtApiUrl,
-            accessToken,
-            biscuit,
-            `INSERT INTO ${schema}.DEALS (ID, THREAD_ID, USER_ID, TITLE, VALUE, CREATED_AT, UPDATED_AT) VALUES ('${dealId}', '${threadId}', '${userId}', '${dealTitle}', ${dealValue}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-          )
+          await executeSql(sxtApiUrl, accessToken, biscuit,
+            saveResults.deleteDeal(schema, threadId, userId))
+          await executeSql(sxtApiUrl, accessToken, biscuit,
+            saveResults.insertDeal(schema, {
+              id: dealId,
+              userId,
+              threadId,
+              evalId,
+              dealName,
+              dealType,
+              category,
+              value: dealValue,
+              currency,
+              brand: contactCompany,
+            }))
 
-          // DELETE + INSERT DEAL_CONTACTS
-          const dealContactId = crypto.randomUUID()
-          await executeSql(
-            sxtApiUrl,
-            accessToken,
-            biscuit,
-            `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}' AND USER_ID = '${userId}')`,
-          )
-          await executeSql(
-            sxtApiUrl,
-            accessToken,
-            biscuit,
-            `INSERT INTO ${schema}.DEAL_CONTACTS (ID, DEAL_ID, CONTACT_ID, CREATED_AT) VALUES ('${dealContactId}', '${dealId}', '${contactId}', CURRENT_TIMESTAMP)`,
-          )
+          await executeSql(sxtApiUrl, accessToken, biscuit,
+            saveResults.deleteDealContact(schema, dealId, contactId))
+          await executeSql(sxtApiUrl, accessToken, biscuit,
+            saveResults.insertDealContact(schema, {
+              id: crypto.randomUUID(),
+              dealId,
+              contactId,
+            }))
 
           dealsCreated++
         }
 
-        // ----- d. Update EMAIL_METADATA stages -----
+        // d. Update EMAIL_METADATA stages
         if (threadEmails.length > 0) {
           const newStage = resolveStage(thread)
-          const sqlQuotedIds = threadEmails
-            .map((e) => `'${sanitizeId(e.ID)}'`)
-            .join(',')
+          const sqlQuotedIds = toSqlIdList(threadEmails.map((e) => e.ID))
 
-          await executeSql(
-            sxtApiUrl,
-            accessToken,
-            biscuit,
-            `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${newStage} WHERE ID IN (${sqlQuotedIds})`,
-          )
+          if (newStage === 4) {
+            await executeSql(sxtApiUrl, accessToken, biscuit,
+              detection.updateDeals(schema, sqlQuotedIds))
+          } else if (newStage === 107) {
+            await executeSql(sxtApiUrl, accessToken, biscuit,
+              detection.updateNonEnglish(schema, sqlQuotedIds))
+          } else {
+            await executeSql(sxtApiUrl, accessToken, biscuit,
+              detection.updateRejected(schema, sqlQuotedIds))
+          }
           emailsClassified += threadEmails.length
         }
       } catch (err) {
-        core.error(
-          `Failed to process thread ${thread.thread_id}: ${err.message}`,
-        )
-        // Best-effort: continue with remaining threads
+        core.error(`Failed to process thread ${thread.thread_id}: ${err.message}`)
       }
     }
 

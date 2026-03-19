@@ -6150,12 +6150,12 @@ var require_dispatcher_base = __commonJS({
           this[kInterceptedDispatch] = this[kDispatch];
           return this[kDispatch](opts, handler);
         }
-        let dispatch = this[kDispatch].bind(this);
+        let dispatch2 = this[kDispatch].bind(this);
         for (let i = this[kInterceptors].length - 1; i >= 0; i--) {
-          dispatch = this[kInterceptors][i](dispatch);
+          dispatch2 = this[kInterceptors][i](dispatch2);
         }
-        this[kInterceptedDispatch] = dispatch;
-        return dispatch(opts, handler);
+        this[kInterceptedDispatch] = dispatch2;
+        return dispatch2(opts, handler);
       }
       dispatch(opts, handler) {
         if (!handler || typeof handler !== "object") {
@@ -6705,12 +6705,12 @@ var require_RedirectHandler = __commonJS({
       }
     };
     var RedirectHandler = class {
-      constructor(dispatch, maxRedirections, opts, handler) {
+      constructor(dispatch2, maxRedirections, opts, handler) {
         if (maxRedirections != null && (!Number.isInteger(maxRedirections) || maxRedirections < 0)) {
           throw new InvalidArgumentError("maxRedirections must be a positive number");
         }
         util3.validateHandler(handler, opts.method, opts.upgrade);
-        this.dispatch = dispatch;
+        this.dispatch = dispatch2;
         this.location = null;
         this.abort = null;
         this.opts = { ...opts, maxRedirections: 0 };
@@ -6838,15 +6838,15 @@ var require_redirectInterceptor = __commonJS({
     "use strict";
     var RedirectHandler = require_RedirectHandler();
     function createRedirectInterceptor({ maxRedirections: defaultMaxRedirections }) {
-      return (dispatch) => {
+      return (dispatch2) => {
         return function Intercept(opts, handler) {
           const { maxRedirections = defaultMaxRedirections } = opts;
           if (!maxRedirections) {
-            return dispatch(opts, handler);
+            return dispatch2(opts, handler);
           }
-          const redirectHandler = new RedirectHandler(dispatch, maxRedirections, opts, handler);
+          const redirectHandler = new RedirectHandler(dispatch2, maxRedirections, opts, handler);
           opts = { ...opts, maxRedirections: 0 };
-          return dispatch(opts, redirectHandler);
+          return dispatch2(opts, redirectHandler);
         };
       };
     }
@@ -10449,11 +10449,11 @@ var require_mock_utils = __commonJS({
       return newMockDispatch;
     }
     function deleteMockDispatch(mockDispatches, key) {
-      const index = mockDispatches.findIndex((dispatch) => {
-        if (!dispatch.consumed) {
+      const index = mockDispatches.findIndex((dispatch2) => {
+        if (!dispatch2.consumed) {
           return false;
         }
-        return matchKey(dispatch, key);
+        return matchKey(dispatch2, key);
       });
       if (index !== -1) {
         mockDispatches.splice(index, 1);
@@ -10533,7 +10533,7 @@ var require_mock_utils = __commonJS({
       const agent = this[kMockAgent];
       const origin2 = this[kOrigin];
       const originalDispatch = this[kOriginalDispatch];
-      return function dispatch(opts, handler) {
+      return function dispatch2(opts, handler) {
         if (agent.isMockActive) {
           try {
             mockDispatch.call(this, opts, handler);
@@ -11048,7 +11048,7 @@ var require_mock_agent = __commonJS({
       }
       pendingInterceptors() {
         const mockAgentClients = this[kClients];
-        return Array.from(mockAgentClients.entries()).flatMap(([origin2, scope]) => scope.deref()[kDispatches].map((dispatch) => ({ ...dispatch, origin: origin2 }))).filter(({ pending }) => pending);
+        return Array.from(mockAgentClients.entries()).flatMap(([origin2, scope]) => scope.deref()[kDispatches].map((dispatch2) => ({ ...dispatch2, origin: origin2 }))).filter(({ pending }) => pending);
       }
       assertNoPendingInterceptors({ pendingInterceptorsFormatter = new PendingInterceptorsFormatter() } = {}) {
         const pending = this.pendingInterceptors();
@@ -13750,7 +13750,7 @@ var require_fetch = __commonJS({
         })();
       }
       try {
-        const { body, status, statusText, headersList, socket } = await dispatch({ body: requestBody });
+        const { body, status, statusText, headersList, socket } = await dispatch2({ body: requestBody });
         if (socket) {
           response = makeResponse({ status, statusText, headersList, socket });
         } else {
@@ -13851,7 +13851,7 @@ var require_fetch = __commonJS({
         fetchParams.controller.connection.destroy();
       }
       return response;
-      async function dispatch({ body }) {
+      async function dispatch2({ body }) {
         const url2 = requestCurrentURL(request);
         const agent = fetchParams.controller.dispatcher;
         return new Promise((resolve, reject) => agent.dispatch(
@@ -41092,6 +41092,38 @@ function validatePositiveInt(value, name) {
   return n;
 }
 
+// shared/queries.js
+var dispatch = {
+  /** Atomically claim stage-2 emails into a filter transition stage */
+  claimFilterBatch: (schema, transitionStage, batchSize) => `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${transitionStage}
+    WHERE ID IN (
+      SELECT ID FROM ${schema}.EMAIL_METADATA WHERE STAGE = 2 LIMIT ${batchSize}
+    )`,
+  /** Atomically claim stage-3 emails into a detect transition stage (with thread-completeness check) */
+  claimDetectBatch: (schema, transitionStage, batchSize) => `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${transitionStage}
+    WHERE ID IN (
+      SELECT em.ID FROM ${schema}.EMAIL_METADATA em
+      WHERE em.STAGE = 3
+        AND NOT EXISTS (
+          SELECT 1 FROM ${schema}.EMAIL_METADATA m2
+          WHERE m2.THREAD_ID = em.THREAD_ID
+            AND m2.USER_ID = em.USER_ID
+            AND m2.STAGE IN (1, 2)
+        )
+      LIMIT ${batchSize}
+    )`,
+  /** Count emails at a transition stage (verify claim) */
+  countAtStage: (schema, stage) => `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${stage}`,
+  /** Reset claimed emails back to original stage on trigger failure */
+  resetClaimedEmails: (schema, transitionStage, resetStage) => `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${resetStage} WHERE STAGE = ${transitionStage}`
+};
+function sanitizeSchema(schema) {
+  if (!/^[a-zA-Z0-9_]+$/.test(schema)) {
+    throw new Error(`Invalid schema: ${schema}`);
+  }
+  return schema;
+}
+
 // dispatch-batches/src/main.js
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -41128,10 +41160,6 @@ function classifySql(sql) {
   if (trimmed.startsWith("UPDATE")) return "dml_update";
   if (trimmed.startsWith("DELETE")) return "dml_delete";
   return "dql_select";
-}
-function sanitizeSchema(schema) {
-  if (!/^[a-zA-Z0-9_]+$/.test(schema)) throw new Error(`Invalid schema: ${schema}`);
-  return schema;
 }
 async function getAuthToken(authUrl, authSecret) {
   const resp = await fetchWithRetry(authUrl, {
@@ -41208,14 +41236,14 @@ async function run() {
         authToken,
         privateKey,
         resource,
-        `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${stage} WHERE ID IN (SELECT ID FROM ${schema}.EMAIL_METADATA WHERE STAGE = 2 LIMIT ${filterBatchSize})`
+        dispatch.claimFilterBatch(schema, stage, filterBatchSize)
       );
       const rows = await sxtQuery(
         apiUrl,
         authToken,
         privateKey,
         resource,
-        `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${stage}`
+        dispatch.countAtStage(schema, stage)
       );
       const claimed = rows[0]?.CNT ?? 0;
       if (claimed === 0) break;
@@ -41232,14 +41260,14 @@ async function run() {
         authToken,
         privateKey,
         resource,
-        `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${stage} WHERE ID IN (SELECT em.ID FROM ${schema}.EMAIL_METADATA em WHERE em.STAGE = 3 AND NOT EXISTS (SELECT 1 FROM ${schema}.EMAIL_METADATA m2 WHERE m2.THREAD_ID = em.THREAD_ID AND m2.USER_ID = em.USER_ID AND m2.STAGE IN (1, 2)) LIMIT ${detectBatchSize})`
+        dispatch.claimDetectBatch(schema, stage, detectBatchSize)
       );
       const rows = await sxtQuery(
         apiUrl,
         authToken,
         privateKey,
         resource,
-        `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${stage}`
+        dispatch.countAtStage(schema, stage)
       );
       const claimed = rows[0]?.CNT ?? 0;
       if (claimed === 0) break;
@@ -41273,7 +41301,7 @@ async function run() {
           authToken,
           privateKey,
           resource,
-          `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 2 WHERE STAGE = ${batch.stage}`
+          dispatch.resetClaimedEmails(schema, batch.stage, 2)
         );
       }
       await sleep(100);
@@ -41299,7 +41327,7 @@ async function run() {
           authToken,
           privateKey,
           resource,
-          `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 3 WHERE STAGE = ${batch.stage}`
+          dispatch.resetClaimedEmails(schema, batch.stage, 3)
         );
       }
       await sleep(100);
