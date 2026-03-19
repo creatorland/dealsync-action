@@ -1,248 +1,112 @@
 import * as core from '@actions/core'
-
-import { decryptValue } from '../../shared/crypto.js'
+import { SpaceAndTime } from 'sxt-nodejs-sdk'
 import { validatePositiveInt } from './validators.js'
 
-async function executeSql(sxtApiUrl, accessToken, biscuit, sqlText) {
-  const resp = await fetch(`${sxtApiUrl}/v1/sql`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ sqlText, biscuits: [biscuit] }),
-  })
-  if (!resp.ok) throw new Error(`SxT ${resp.status}: ${await resp.text()}`)
-  return resp.json()
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+async function fetchWithRetry(url, options, maxRetries = 3) {
+  let lastError
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, options)
+      if (!response.ok) {
+        const body = await response.text()
+        if (attempt < maxRetries && [429, 500, 502, 503, 504].includes(response.status)) {
+          await sleep(Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 30000))
+          continue
+        }
+        throw new Error(`HTTP ${response.status}: ${body}`)
+      }
+      return response
+    } catch (err) {
+      lastError = err
+      if (attempt < maxRetries && !err.message?.startsWith('HTTP ')) {
+        await sleep(Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 30000))
+        continue
+      }
+      throw err
+    }
+  }
+  throw lastError
+}
+
+function classifySql(sql) {
+  const trimmed = sql.trim().toUpperCase()
+  if (trimmed.startsWith('SELECT')) return 'dql_select'
+  if (trimmed.startsWith('INSERT')) return 'dml_insert'
+  if (trimmed.startsWith('UPDATE')) return 'dml_update'
+  if (trimmed.startsWith('DELETE')) return 'dml_delete'
+  return 'dql_select'
 }
 
 function sanitizeSchema(schema) {
-  if (!/^[a-zA-Z0-9_]+$/.test(schema)) {
-    throw new Error(`Invalid schema: ${schema}`)
-  }
+  if (!/^[a-zA-Z0-9_]+$/.test(schema)) throw new Error(`Invalid schema: ${schema}`)
   return schema
 }
 
-async function claimFilterBatch(
-  sxtApiUrl,
-  accessToken,
-  biscuitDml,
-  biscuitSelect,
-  schema,
-  transitionStage,
-  batchSize,
-) {
-  // Atomic claim: move stage-2 emails into transition stage
-  await executeSql(
-    sxtApiUrl,
-    accessToken,
-    biscuitDml,
-    `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${transitionStage} WHERE ID IN (SELECT ID FROM ${schema}.EMAIL_METADATA WHERE STAGE = 2 LIMIT ${batchSize})`,
-  )
-
-  // Verify how many were claimed
-  const rows = await executeSql(
-    sxtApiUrl,
-    accessToken,
-    biscuitSelect,
-    `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${transitionStage}`,
-  )
-  return rows[0]?.CNT ?? 0
+async function getAuthToken(authUrl, authSecret) {
+  const resp = await fetchWithRetry(authUrl, {
+    method: 'GET',
+    headers: { 'x-shared-secret': authSecret },
+  })
+  const data = await resp.json()
+  return data.data || data.accessToken || data
 }
 
-async function claimDetectBatch(
-  sxtApiUrl,
-  accessToken,
-  biscuitDml,
-  biscuitSelect,
-  schema,
-  transitionStage,
-  batchSize,
-) {
-  // Atomic claim with thread-completeness check
-  await executeSql(
-    sxtApiUrl,
-    accessToken,
-    biscuitDml,
-    `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${transitionStage} WHERE ID IN (SELECT em.ID FROM ${schema}.EMAIL_METADATA em WHERE em.STAGE = 3 AND NOT EXISTS (SELECT 1 FROM ${schema}.EMAIL_METADATA m2 WHERE m2.THREAD_ID = em.THREAD_ID AND m2.USER_ID = em.USER_ID AND m2.STAGE IN (1, 2)) LIMIT ${batchSize})`,
+function generateBiscuit(privateKey, operation, resource) {
+  const sxt = new SpaceAndTime()
+  const auth = sxt.Authorization()
+  const result = auth.CreateBiscuitToken(
+    [{ operation, resource: resource.toLowerCase() }],
+    privateKey,
   )
-
-  // Verify how many were claimed
-  const rows = await executeSql(
-    sxtApiUrl,
-    accessToken,
-    biscuitSelect,
-    `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${transitionStage}`,
-  )
-  return rows[0]?.CNT ?? 0
+  return result.data[0]
 }
 
-async function writeDispatchLog(
-  sxtApiUrl,
-  accessToken,
-  biscuitDml,
-  schema,
-  transitionStage,
-  batchType,
-) {
-  await executeSql(
-    sxtApiUrl,
-    accessToken,
-    biscuitDml,
-    `DELETE FROM ${schema}.DISPATCH_LOG WHERE TRANSITION_STAGE = ${transitionStage}`,
-  )
-  await executeSql(
-    sxtApiUrl,
-    accessToken,
-    biscuitDml,
-    `INSERT INTO ${schema}.DISPATCH_LOG (TRANSITION_STAGE, TRIGGER_HASH, BATCH_TYPE, CREATED_AT) VALUES (${transitionStage}, '', '${batchType}', CURRENT_TIMESTAMP)`,
-  )
-}
-
-async function triggerWorkflow(
-  w3RpcUrl,
-  callIndex,
-  batchType,
-  transitionStage,
-  resetStage,
-  previousTriggerHash,
-) {
-  const resp = await fetch(w3RpcUrl, {
+async function executeSql(apiUrl, token, biscuit, resource, sql) {
+  const resp = await fetchWithRetry(`${apiUrl}/v1/sql`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
     body: JSON.stringify({
-      jsonrpc: '2.0',
-      method: 'w3_triggerWorkflow',
-      params: {
-        workflowName: 'dealsync-processor',
-        body: {
-          batch_type: batchType,
-          transition_stage: String(transitionStage),
-          reset_stage: resetStage,
-          previous_trigger_hash: previousTriggerHash,
-        },
-      },
-      id: callIndex,
+      sqlText: sql,
+      biscuits: [biscuit],
+      resources: [resource.toLowerCase()],
     }),
   })
-
-  const result = await resp.json()
-  if (result.error) {
-    throw new Error(
-      `W3 RPC error ${result.error.code}: ${result.error.message}`,
-    )
-  }
-  return result.result.triggerHash
+  return resp.json()
 }
 
-async function lookupPreviousTriggerHash(
-  sxtApiUrl,
-  accessToken,
-  biscuitSelect,
-  schema,
-  transitionStage,
-) {
-  const rows = await executeSql(
-    sxtApiUrl,
-    accessToken,
-    biscuitSelect,
-    `SELECT TRIGGER_HASH FROM ${schema}.DISPATCH_LOG WHERE TRANSITION_STAGE = ${transitionStage}`,
-  )
-  return rows[0]?.TRIGGER_HASH || ''
-}
-
-async function resetClaimedEmails(
-  sxtApiUrl,
-  accessToken,
-  biscuitDml,
-  schema,
-  transitionStage,
-  resetStage,
-) {
-  await executeSql(
-    sxtApiUrl,
-    accessToken,
-    biscuitDml,
-    `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${resetStage} WHERE STAGE = ${transitionStage}`,
-  )
-}
-
-async function updateDispatchLogHash(
-  sxtApiUrl,
-  accessToken,
-  biscuitDml,
-  schema,
-  transitionStage,
-  triggerHash,
-) {
-  await executeSql(
-    sxtApiUrl,
-    accessToken,
-    biscuitDml,
-    `UPDATE ${schema}.DISPATCH_LOG SET TRIGGER_HASH = '${triggerHash}' WHERE TRANSITION_STAGE = ${transitionStage}`,
-  )
+async function sxtQuery(apiUrl, authToken, privateKey, resource, sql) {
+  const operation = classifySql(sql)
+  const biscuit = generateBiscuit(privateKey, operation, resource)
+  return executeSql(apiUrl, authToken, biscuit, resource, sql)
 }
 
 export async function run() {
   try {
-    const encryptionKey = core.getInput('encryption-key')
-    const sxtApiUrl = core.getInput('sxt-api-url')
+    const authUrl = core.getInput('auth-url')
+    const authSecret = core.getInput('auth-secret')
+    const apiUrl = core.getInput('sxt-api-url')
+    const privateKey = core.getInput('private-key')
     const schema = sanitizeSchema(core.getInput('sxt-schema'))
     const w3RpcUrl = core.getInput('w3-rpc-url')
+    const resource = `${schema}.EMAIL_METADATA`
 
-    // Decrypt sensitive tokens
-    const accessToken = decryptValue(
-      core.getInput('sxt-access-token'),
-      encryptionKey,
-    )
-    const biscuitSelect = decryptValue(
-      core.getInput('sxt-biscuit-select'),
-      encryptionKey,
-    )
-    const biscuitDml = decryptValue(
-      core.getInput('sxt-biscuit-dml'),
-      encryptionKey,
-    )
+    const activeFilter = validatePositiveInt(core.getInput('active-filter'), 'active-filter')
+    const activeDetect = validatePositiveInt(core.getInput('active-detect'), 'active-detect')
+    const pendingFilter = validatePositiveInt(core.getInput('pending-filter'), 'pending-filter')
+    const pendingDetect = validatePositiveInt(core.getInput('pending-detect'), 'pending-detect')
+    const maxFilter = validatePositiveInt(core.getInput('max-filter'), 'max-filter')
+    const maxDetect = validatePositiveInt(core.getInput('max-detect'), 'max-detect')
+    const filterBatchSize = validatePositiveInt(core.getInput('filter-batch-size'), 'filter-batch-size')
+    const detectBatchSize = validatePositiveInt(core.getInput('detect-batch-size'), 'detect-batch-size')
 
-    // Parse numeric inputs
-    const activeFilter = validatePositiveInt(
-      core.getInput('active-filter'),
-      'active-filter',
-    )
-    const activeDetect = validatePositiveInt(
-      core.getInput('active-detect'),
-      'active-detect',
-    )
-    const pendingFilter = validatePositiveInt(
-      core.getInput('pending-filter'),
-      'pending-filter',
-    )
-    const pendingDetect = validatePositiveInt(
-      core.getInput('pending-detect'),
-      'pending-detect',
-    )
-    const maxFilter = validatePositiveInt(
-      core.getInput('max-filter'),
-      'max-filter',
-    )
-    const maxDetect = validatePositiveInt(
-      core.getInput('max-detect'),
-      'max-detect',
-    )
-    const filterBatchSize = validatePositiveInt(
-      core.getInput('filter-batch-size'),
-      'filter-batch-size',
-    )
-    const detectBatchSize = validatePositiveInt(
-      core.getInput('detect-batch-size'),
-      'detect-batch-size',
-    )
-
-    // Calculate available slots
-    let filterSlots = maxFilter - activeFilter
-    let detectSlots = maxDetect - activeDetect
-
-    // Early exit if nothing to do
+    // Early exit
     if (pendingFilter === 0 && pendingDetect === 0) {
       core.info('No pending emails to dispatch')
       core.setOutput('success', 'true')
@@ -251,172 +115,113 @@ export async function run() {
       return
     }
 
-    // Track claimed batches
-    const filterBatches = [] // { transitionStage, count }
-    const detectBatches = [] // { transitionStage, count }
+    // Auth once
+    core.info('Authenticating...')
+    const authToken = await getAuthToken(authUrl, authSecret)
+
+    let filterSlots = maxFilter - activeFilter
+    let detectSlots = maxDetect - activeDetect
+    const filterBatches = []
+    const detectBatches = []
 
     // Claim filter batches
-    let filterBatchIndex = 0
+    let batchIndex = 0
     while (filterSlots > 0 && pendingFilter > 0) {
-      const transitionStage = 1000 + filterBatchIndex * 10
-      const claimed = await claimFilterBatch(
-        sxtApiUrl,
-        accessToken,
-        biscuitDml,
-        biscuitSelect,
-        schema,
-        transitionStage,
-        filterBatchSize,
-      )
+      const stage = 1001 + batchIndex
+      await sxtQuery(apiUrl, authToken, privateKey, resource,
+        `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${stage} WHERE ID IN (SELECT ID FROM ${schema}.EMAIL_METADATA WHERE STAGE = 2 LIMIT ${filterBatchSize})`)
+
+      const rows = await sxtQuery(apiUrl, authToken, privateKey, resource,
+        `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${stage}`)
+      const claimed = rows[0]?.CNT ?? 0
+
       if (claimed === 0) break
-      filterBatches.push({ transitionStage, count: claimed })
+      filterBatches.push({ stage, count: claimed })
       filterSlots -= claimed
-      filterBatchIndex++
+      batchIndex++
+      core.info(`Filter batch: stage=${stage}, claimed=${claimed}`)
     }
 
     // Claim detection batches
-    let detectBatchIndex = 0
+    batchIndex = 0
     while (detectSlots > 0 && pendingDetect > 0) {
-      const transitionStage = 11000 + detectBatchIndex * 10
-      const claimed = await claimDetectBatch(
-        sxtApiUrl,
-        accessToken,
-        biscuitDml,
-        biscuitSelect,
-        schema,
-        transitionStage,
-        detectBatchSize,
-      )
+      const stage = 11001 + batchIndex
+      await sxtQuery(apiUrl, authToken, privateKey, resource,
+        `UPDATE ${schema}.EMAIL_METADATA SET STAGE = ${stage} WHERE ID IN (SELECT em.ID FROM ${schema}.EMAIL_METADATA em WHERE em.STAGE = 3 AND NOT EXISTS (SELECT 1 FROM ${schema}.EMAIL_METADATA m2 WHERE m2.THREAD_ID = em.THREAD_ID AND m2.USER_ID = em.USER_ID AND m2.STAGE IN (1, 2)) LIMIT ${detectBatchSize})`)
+
+      const rows = await sxtQuery(apiUrl, authToken, privateKey, resource,
+        `SELECT COUNT(*) AS CNT FROM ${schema}.EMAIL_METADATA WHERE STAGE = ${stage}`)
+      const claimed = rows[0]?.CNT ?? 0
+
       if (claimed === 0) break
-      detectBatches.push({ transitionStage, count: claimed })
+      detectBatches.push({ stage, count: claimed })
       detectSlots -= claimed
-      detectBatchIndex++
+      batchIndex++
+      core.info(`Detect batch: stage=${stage}, claimed=${claimed}`)
     }
 
-    // Write dispatch logs and trigger workflows
+    // Trigger processors
     let callIndex = 1
-    let dispatchedFilterCount = 0
-    let dispatchedDetectCount = 0
+    let dispatchedFilter = 0
+    let dispatchedDetect = 0
 
-    // Dispatch filter batches
     for (const batch of filterBatches) {
-      const previousTriggerHash = await lookupPreviousTriggerHash(
-        sxtApiUrl,
-        accessToken,
-        biscuitSelect,
-        schema,
-        batch.transitionStage,
-      )
-
-      await writeDispatchLog(
-        sxtApiUrl,
-        accessToken,
-        biscuitDml,
-        schema,
-        batch.transitionStage,
-        'filter',
-      )
-
       try {
-        const triggerHash = await triggerWorkflow(
-          w3RpcUrl,
-          callIndex++,
-          'filter',
-          batch.transitionStage,
-          '2',
-          previousTriggerHash,
-        )
-        await updateDispatchLogHash(
-          sxtApiUrl,
-          accessToken,
-          biscuitDml,
-          schema,
-          batch.transitionStage,
-          triggerHash,
-        )
-        dispatchedFilterCount++
-        core.info(
-          `Filter batch ${batch.transitionStage}: claimed ${batch.count}, trigger=${triggerHash}`,
-        )
+        const resp = await fetch(w3RpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'w3_triggerWorkflow',
+            params: {
+              workflowName: 'Dealsync Processor',
+              body: { batch_type: 'filter', transition_stage: String(batch.stage), reset_stage: '2' },
+            },
+            id: callIndex++,
+          }),
+        })
+        const result = await resp.json()
+        if (result.error) throw new Error(result.error.message)
+        dispatchedFilter++
+        core.info(`Triggered filter processor: stage=${batch.stage}, hash=${result.result?.triggerHash}`)
       } catch (err) {
-        core.error(
-          `Filter batch ${batch.transitionStage} trigger failed: ${err.message}`,
-        )
-        await resetClaimedEmails(
-          sxtApiUrl,
-          accessToken,
-          biscuitDml,
-          schema,
-          batch.transitionStage,
-          2,
-        )
+        core.error(`Filter trigger failed for stage ${batch.stage}: ${err.message}`)
+        await sxtQuery(apiUrl, authToken, privateKey, resource,
+          `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 2 WHERE STAGE = ${batch.stage}`)
       }
-
-      // Rate limit: 100ms gap between triggers
-      await new Promise((r) => setTimeout(r, 100))
+      await sleep(100)
     }
 
-    // Dispatch detection batches
     for (const batch of detectBatches) {
-      const previousTriggerHash = await lookupPreviousTriggerHash(
-        sxtApiUrl,
-        accessToken,
-        biscuitSelect,
-        schema,
-        batch.transitionStage,
-      )
-
-      await writeDispatchLog(
-        sxtApiUrl,
-        accessToken,
-        biscuitDml,
-        schema,
-        batch.transitionStage,
-        'detect',
-      )
-
       try {
-        const triggerHash = await triggerWorkflow(
-          w3RpcUrl,
-          callIndex++,
-          'detect',
-          batch.transitionStage,
-          '3',
-          previousTriggerHash,
-        )
-        await updateDispatchLogHash(
-          sxtApiUrl,
-          accessToken,
-          biscuitDml,
-          schema,
-          batch.transitionStage,
-          triggerHash,
-        )
-        dispatchedDetectCount++
-        core.info(
-          `Detect batch ${batch.transitionStage}: claimed ${batch.count}, trigger=${triggerHash}`,
-        )
+        const resp = await fetch(w3RpcUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'w3_triggerWorkflow',
+            params: {
+              workflowName: 'Dealsync Processor',
+              body: { batch_type: 'detection', transition_stage: String(batch.stage), reset_stage: '3' },
+            },
+            id: callIndex++,
+          }),
+        })
+        const result = await resp.json()
+        if (result.error) throw new Error(result.error.message)
+        dispatchedDetect++
+        core.info(`Triggered detect processor: stage=${batch.stage}, hash=${result.result?.triggerHash}`)
       } catch (err) {
-        core.error(
-          `Detect batch ${batch.transitionStage} trigger failed: ${err.message}`,
-        )
-        await resetClaimedEmails(
-          sxtApiUrl,
-          accessToken,
-          biscuitDml,
-          schema,
-          batch.transitionStage,
-          3,
-        )
+        core.error(`Detect trigger failed for stage ${batch.stage}: ${err.message}`)
+        await sxtQuery(apiUrl, authToken, privateKey, resource,
+          `UPDATE ${schema}.EMAIL_METADATA SET STAGE = 3 WHERE STAGE = ${batch.stage}`)
       }
-
-      // Rate limit: 100ms gap between triggers
-      await new Promise((r) => setTimeout(r, 100))
+      await sleep(100)
     }
 
     core.setOutput('success', 'true')
-    core.setOutput('dispatched_filter_count', String(dispatchedFilterCount))
-    core.setOutput('dispatched_detect_count', String(dispatchedDetectCount))
+    core.setOutput('dispatched_filter_count', String(dispatchedFilter))
+    core.setOutput('dispatched_detect_count', String(dispatchedDetect))
   } catch (error) {
     core.setOutput('success', 'false')
     core.setOutput('dispatched_filter_count', '0')

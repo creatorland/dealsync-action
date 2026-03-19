@@ -1,35 +1,35 @@
 name: Dispatch Batches
 description: Claim emails into transition stages and trigger processor workflows
 inputs:
+  auth-url:
+    description: 'SxT auth proxy URL'
+    required: true
+  auth-secret:
+    description: 'Shared secret for auth proxy'
+    required: true
   sxt-api-url:
     description: 'SxT API base URL'
     required: true
+  private-key:
+    description: 'SxT private key for biscuit generation'
+    required: true
   sxt-schema:
     description: 'SxT schema prefix'
-    required: true
-  sxt-access-token:
-    description: 'SxT JWT access token (encrypted)'
-    required: true
-  sxt-biscuit-select:
-    description: 'SxT SELECT biscuit (encrypted)'
-    required: true
-  sxt-biscuit-dml:
-    description: 'SxT DML biscuit (encrypted)'
     required: true
   w3-rpc-url:
     description: 'W3 node RPC URL'
     required: true
   active-filter:
-    description: 'Current active filter transition count'
+    description: 'Current active filter count'
     required: true
   active-detect:
-    description: 'Current active detection transition count'
+    description: 'Current active detection count'
     required: true
   pending-filter:
-    description: 'Pending stage-2 email count'
+    description: 'Pending stage-2 count'
     required: true
   pending-detect:
-    description: 'Pending stage-3 email count'
+    description: 'Pending stage-3 count'
     required: true
   max-filter:
     description: 'Max filter concurrency'
@@ -43,9 +43,6 @@ inputs:
   detect-batch-size:
     description: 'Emails per detection batch'
     required: true
-  encryption-key:
-    description: 'AES-256-GCM key'
-    required: true
 outputs:
   success:
     description: 'Whether dispatching succeeded'
@@ -55,4 +52,4 @@ outputs:
     description: 'Number of detection batches dispatched'
 runs:
   using: node24
-  main: dist/index.js
+  main: src/index.js
