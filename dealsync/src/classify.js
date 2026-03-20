@@ -9,7 +9,7 @@ import {
   sanitizeSchema,
   toSqlIdList,
 } from '../../shared/queries.js'
-import { authenticate, generateBiscuit, executeSql } from './sxt-client.js'
+import { authenticate, executeSql } from './sxt-client.js'
 
 function resolveStage(thread) {
   if (thread.language && thread.language.toLowerCase() !== 'en') return 107
@@ -24,6 +24,7 @@ export async function runClassify() {
   const authUrl = core.getInput('auth-url')
   const authSecret = core.getInput('auth-secret')
   const apiUrl = core.getInput('api-url')
+  const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
 
   // Decrypt inputs
@@ -59,7 +60,6 @@ export async function runClassify() {
   }
 
   const jwt = await authenticate(authUrl, authSecret)
-  const biscuit = await generateBiscuit(apiUrl, jwt, schema)
 
   let dealsCreated = 0
   let emailsClassified = 0
