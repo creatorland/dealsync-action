@@ -4,6 +4,7 @@ import { runBuildPrompt } from './build-prompt.js'
 import { runClassify } from './classify.js'
 import { runDispatch } from './dispatch.js'
 import { runExtractMetadata } from './extract-metadata.js'
+import { runSxtQuery } from './sxt-query.js'
 
 const COMMANDS = {
   filter: runFilter,
@@ -11,6 +12,8 @@ const COMMANDS = {
   classify: runClassify,
   dispatch: runDispatch,
   'extract-metadata': runExtractMetadata,
+  'sxt-query': runSxtQuery,
+  'sxt-execute': runSxtQuery,
 }
 
 export async function run() {

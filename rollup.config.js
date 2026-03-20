@@ -13,12 +13,12 @@ const plugins = [
 export default [
   {
     input: 'encrypted-http/src/index.js',
-    output: { file: 'encrypted-http/dist/index.js', format: 'cjs' },
+    output: { file: 'encrypted-http/dist/index.js', format: 'es' },
     plugins,
   },
   {
     input: 'dealsync/src/index.js',
-    output: { file: 'dealsync/dist/index.js', format: 'cjs' },
+    output: { file: 'dealsync/dist/index.js', format: 'es' },
     plugins,
   },
 ]

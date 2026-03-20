@@ -51,7 +51,11 @@ inputs:
   ai-response:
     description: 'AI classification JSON (classify)'
   metadata:
-    description: 'JSON deal_states metadata (classify)'
+    description: 'JSON deal_states metadata (classify, extract-metadata)'
+  sql:
+    description: 'SQL statement (sxt-query, sxt-execute)'
+  sxt-command:
+    description: 'SxT operation type: query or execute (sxt-query, sxt-execute)'
 
 outputs:
   success:
