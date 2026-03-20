@@ -3,12 +3,14 @@ import { runFilter } from './filter.js'
 import { runBuildPrompt } from './build-prompt.js'
 import { runClassify } from './classify.js'
 import { runDispatch } from './dispatch.js'
+import { runExtractMetadata } from './extract-metadata.js'
 
 const COMMANDS = {
   filter: runFilter,
   'build-prompt': runBuildPrompt,
   classify: runClassify,
   dispatch: runDispatch,
+  'extract-metadata': runExtractMetadata,
 }
 
 export async function run() {

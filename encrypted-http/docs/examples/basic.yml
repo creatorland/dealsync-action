@@ -16,7 +16,7 @@
     headers: '{"Content-Type":"application/json"}'
     body: '{"key":"value"}'
     encrypt: 'true'
-    encrypt-outputs: "response"
+    encrypt-outputs: 'response'
     encryption-key: ${{ secrets.ENCRYPTION_KEY }}
 
 # SxT query with extract-outputs
@@ -27,4 +27,4 @@
     method: POST
     headers: '{"Authorization":"Bearer ${{ secrets.TOKEN }}","Content-Type":"application/json"}'
     body: '{"sqlText":"SELECT COUNT(*) AS CNT FROM schema.TABLE","biscuits":["${{ secrets.BISCUIT }}"]}'
-    extract-outputs: "CNT"
+    extract-outputs: 'CNT'
