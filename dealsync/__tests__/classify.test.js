@@ -75,8 +75,16 @@ function authResponse() {
   })
 }
 
+function biscuitResponse() {
+  return new Response(JSON.stringify([{ BISCUIT: 'test-biscuit' }]), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
 function mockAuthAndSql(fetchSpy, sqlCount) {
   fetchSpy.mockResolvedValueOnce(authResponse())
+  fetchSpy.mockResolvedValueOnce(biscuitResponse())
   for (let i = 0; i < sqlCount; i++) {
     fetchSpy.mockResolvedValueOnce(sxtResponse())
   }
@@ -244,6 +252,7 @@ describe('classify command', () => {
     })
 
     fetchSpy.mockResolvedValueOnce(authResponse())
+    fetchSpy.mockResolvedValueOnce(biscuitResponse())
     // Thread 1: 4 SQL calls
     fetchSpy.mockResolvedValueOnce(sxtResponse())
     fetchSpy.mockResolvedValueOnce(sxtResponse())

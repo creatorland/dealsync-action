@@ -61,6 +61,13 @@ function triggerError() {
   return new Response('workflow not found', { status: 404 })
 }
 
+function biscuitResponse() {
+  return new Response(JSON.stringify([{ BISCUIT: 'test-biscuit' }]), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
 function getSqlCalls(fetchSpy) {
   return fetchSpy.mock.calls.filter((c) => c[0].includes('/v1/sql'))
 }
@@ -102,6 +109,7 @@ describe('dispatch command', () => {
 
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // auth
+      .mockResolvedValueOnce(biscuitResponse()) // biscuit
       .mockResolvedValueOnce(sxtResponse()) // claim
       .mockResolvedValueOnce(sxtResponse([{ CNT: 10 }])) // verify
       .mockResolvedValueOnce(sxtResponse()) // claim batch 2
@@ -125,6 +133,7 @@ describe('dispatch command', () => {
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
+      .mockResolvedValueOnce(biscuitResponse())
       .mockResolvedValueOnce(sxtResponse()) // claim
       .mockResolvedValueOnce(sxtResponse([{ CNT: 5 }])) // verify
       .mockResolvedValueOnce(sxtResponse()) // claim batch 2
@@ -147,6 +156,7 @@ describe('dispatch command', () => {
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
+      .mockResolvedValueOnce(biscuitResponse())
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([{ CNT: 10 }]))
       .mockResolvedValueOnce(sxtResponse())
@@ -169,6 +179,7 @@ describe('dispatch command', () => {
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
+      .mockResolvedValueOnce(biscuitResponse())
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([{ CNT: 10 }]))
       .mockResolvedValueOnce(sxtResponse())
@@ -193,6 +204,7 @@ describe('dispatch command', () => {
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
+      .mockResolvedValueOnce(biscuitResponse())
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([{ CNT: 5 }]))
       .mockResolvedValueOnce(sxtResponse())
@@ -219,6 +231,7 @@ describe('dispatch command', () => {
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
+      .mockResolvedValueOnce(biscuitResponse())
       // Batch 0: claim + verify
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([{ CNT: 25 }]))
@@ -248,6 +261,7 @@ describe('dispatch command', () => {
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
+      .mockResolvedValueOnce(biscuitResponse())
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([{ CNT: 0 }]))
 
@@ -281,6 +295,7 @@ describe('dispatch command', () => {
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
+      .mockResolvedValueOnce(biscuitResponse())
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([{ CNT: 0 }]))
 
