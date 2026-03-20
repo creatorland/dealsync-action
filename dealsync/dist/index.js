@@ -27823,7 +27823,7 @@ function sanitizeSchema(schema) {
 
 /**
  * Shared SxT helpers for classify, dispatch, and sxt-query commands.
- * Auth via proxy. Biscuits generated per-run via SxT API (no WASM, no static biscuit).
+ * Auth via proxy, static biscuit from input.
  */
 
 async function authenticate(authUrl, authSecret) {
@@ -27834,17 +27834,6 @@ async function authenticate(authUrl, authSecret) {
   if (!resp.ok) throw new Error(`Auth failed: ${resp.status}`)
   const data = await resp.json();
   return data.data || data.accessToken || data
-}
-
-async function generateBiscuit(apiUrl, jwt, schema) {
-  const resp = await fetch(`${apiUrl}/v1/biscuits/generated/${schema.toLowerCase()}`, {
-    headers: { Authorization: `Bearer ${jwt}` },
-  });
-  if (!resp.ok) throw new Error(`Biscuit generation failed: ${resp.status}: ${await resp.text()}`)
-  const data = await resp.json();
-  // Response is [{BISCUIT: "..."}] or {BISCUIT: "..."}
-  if (Array.isArray(data)) return data[0]?.BISCUIT
-  return data.BISCUIT || data
 }
 
 async function executeSql(apiUrl, jwt, biscuit, sql) {
@@ -27873,6 +27862,7 @@ async function runClassify() {
   const authUrl = coreExports.getInput('auth-url');
   const authSecret = coreExports.getInput('auth-secret');
   const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
 
   // Decrypt inputs
@@ -27908,7 +27898,6 @@ async function runClassify() {
   }
 
   const jwt = await authenticate(authUrl, authSecret);
-  const biscuit = await generateBiscuit(apiUrl, jwt, schema);
 
   let dealsCreated = 0;
   let emailsClassified = 0;
@@ -28083,6 +28072,7 @@ async function runDispatch() {
   const authUrl = coreExports.getInput('auth-url');
   const authSecret = coreExports.getInput('auth-secret');
   const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
   const w3RpcUrl = coreExports.getInput('w3-rpc-url');
   const processorName = coreExports.getInput('processor-name') || 'Dealsync Processor';
@@ -28109,7 +28099,6 @@ async function runDispatch() {
 
   coreExports.info('Authenticating...');
   const jwt = await authenticate(authUrl, authSecret);
-  const biscuit = await generateBiscuit(apiUrl, jwt, schema);
 
   let filterSlots = maxFilter - activeFilter;
   let detectSlots = maxDetect - activeDetect;
@@ -28242,20 +28231,19 @@ async function runExtractMetadata() {
 
 /**
  * Standalone SxT query/execute command.
- * Authenticates via proxy, generates biscuit per-run, executes SQL.
- *
- * Input: auth-url, auth-secret, api-url, schema, sql
- * Output: { result } — JSON array for queries, or execution result
+ * Authenticates via proxy, uses pre-generated biscuit from input.
  */
 async function runSxtQuery() {
   const authUrl = coreExports.getInput('auth-url');
   const authSecret = coreExports.getInput('auth-secret');
   const apiUrl = coreExports.getInput('api-url');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const biscuit = coreExports.getInput('biscuit');
+  const schema = coreExports.getInput('schema');
   const sql = coreExports.getInput('sql');
 
+  if (schema) sanitizeSchema(schema);
+
   const jwt = await authenticate(authUrl, authSecret);
-  const biscuit = await generateBiscuit(apiUrl, jwt, schema);
   const result = await executeSql(apiUrl, jwt, biscuit, sql);
 
   return { result }

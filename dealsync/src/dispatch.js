@@ -1,6 +1,6 @@
 import * as core from '@actions/core'
 import { dispatch, sanitizeSchema } from '../../shared/queries.js'
-import { authenticate, generateBiscuit, executeSql } from './sxt-client.js'
+import { authenticate, executeSql } from './sxt-client.js'
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
@@ -16,6 +16,7 @@ export async function runDispatch() {
   const authUrl = core.getInput('auth-url')
   const authSecret = core.getInput('auth-secret')
   const apiUrl = core.getInput('api-url')
+  const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
   const w3RpcUrl = core.getInput('w3-rpc-url')
   const processorName = core.getInput('processor-name') || 'Dealsync Processor'
@@ -42,7 +43,6 @@ export async function runDispatch() {
 
   core.info('Authenticating...')
   const jwt = await authenticate(authUrl, authSecret)
-  const biscuit = await generateBiscuit(apiUrl, jwt, schema)
 
   let filterSlots = maxFilter - activeFilter
   let detectSlots = maxDetect - activeDetect

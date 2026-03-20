@@ -1,6 +1,6 @@
 /**
  * Shared SxT helpers for classify, dispatch, and sxt-query commands.
- * Auth via proxy. Biscuits generated per-run via SxT API (no WASM, no static biscuit).
+ * Auth via proxy, static biscuit from input.
  */
 
 export async function authenticate(authUrl, authSecret) {
@@ -11,17 +11,6 @@ export async function authenticate(authUrl, authSecret) {
   if (!resp.ok) throw new Error(`Auth failed: ${resp.status}`)
   const data = await resp.json()
   return data.data || data.accessToken || data
-}
-
-export async function generateBiscuit(apiUrl, jwt, schema) {
-  const resp = await fetch(`${apiUrl}/v1/biscuits/generated/${schema.toLowerCase()}`, {
-    headers: { Authorization: `Bearer ${jwt}` },
-  })
-  if (!resp.ok) throw new Error(`Biscuit generation failed: ${resp.status}: ${await resp.text()}`)
-  const data = await resp.json()
-  // Response is [{BISCUIT: "..."}] or {BISCUIT: "..."}
-  if (Array.isArray(data)) return data[0]?.BISCUIT
-  return data.BISCUIT || data
 }
 
 export async function executeSql(apiUrl, jwt, biscuit, sql) {
