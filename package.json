@@ -23,7 +23,9 @@
     "rollup-plugin-string": "^3.0.0"
   },
   "jest": {
-    "testMatch": ["**/__tests__/**/*.test.js"],
+    "testMatch": [
+      "**/__tests__/**/*.test.js"
+    ],
     "transform": {}
   }
 }

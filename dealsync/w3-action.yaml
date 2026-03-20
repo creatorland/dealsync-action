@@ -15,7 +15,7 @@ commands:
     outputs:
       result:
         type: object
-        description: "{ filtered_ids, rejected_ids }"
+        description: '{ filtered_ids, rejected_ids }'
 
   - name: build-prompt
     description: Build AI classification prompt from email content with incremental thread context
@@ -27,7 +27,7 @@ commands:
     outputs:
       result:
         type: object
-        description: "{ system_prompt, user_prompt }"
+        description: '{ system_prompt, user_prompt }'
 
   - name: classify
     description: Parse AI classification response, save evaluations/deals/contacts to SxT, update deal stages
@@ -43,7 +43,7 @@ commands:
     outputs:
       result:
         type: object
-        description: "{ deals_created, emails_classified, deal_ids, rejected_ids, non_english_ids }"
+        description: '{ deals_created, emails_classified, deal_ids, rejected_ids, non_english_ids }'
 
   - name: dispatch
     description: Claim email batches into transition stages and trigger processor workflows
@@ -57,4 +57,4 @@ commands:
     outputs:
       result:
         type: object
-        description: "{ dispatched_filter_count, dispatched_detect_count }"
+        description: '{ dispatched_filter_count, dispatched_detect_count }'

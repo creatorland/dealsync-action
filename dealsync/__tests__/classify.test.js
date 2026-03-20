@@ -123,7 +123,9 @@ describe('classify command', () => {
     expect(getSqlText(sqlCalls[1])).toBe(
       "DELETE FROM dealsync_stg_v1.EMAIL_THREAD_EVALUATIONS WHERE THREAD_ID = 'thread-abc-123'",
     )
-    expect(getSqlText(sqlCalls[2])).toContain('INSERT INTO dealsync_stg_v1.EMAIL_THREAD_EVALUATIONS')
+    expect(getSqlText(sqlCalls[2])).toContain(
+      'INSERT INTO dealsync_stg_v1.EMAIL_THREAD_EVALUATIONS',
+    )
 
     // Contact DELETE + INSERT
     expect(getSqlText(sqlCalls[3])).toBe(
@@ -258,7 +260,9 @@ describe('classify command', () => {
     const result = await runClassify()
 
     expect(result.emails_classified).toBe(2)
-    expect(core.error).toHaveBeenCalledWith(expect.stringContaining('Failed to process thread thread-bad-1'))
+    expect(core.error).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to process thread thread-bad-1'),
+    )
   })
 
   it('returns 0 counts for empty threads', async () => {

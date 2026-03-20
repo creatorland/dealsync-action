@@ -139,7 +139,7 @@ describe('dispatch command', () => {
     const claimSql = getSqlText(sqlCalls[0])
     expect(claimSql).toContain('SET STAGE = 11001')
     expect(claimSql).toContain('NOT EXISTS')
-    expect(claimSql).toContain("ds2.STAGE IN (1, 2)")
+    expect(claimSql).toContain('ds2.STAGE IN (1, 2)')
   })
 
   it('sends REST trigger with correct payload', async () => {

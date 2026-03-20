@@ -53,7 +53,12 @@ export async function runDispatch() {
   let batchIndex = 0
   while (filterSlots > 0 && pendingFilter > 0) {
     const stage = 1001 + batchIndex
-    await executeSql(apiUrl, jwt, biscuit, dispatch.claimFilterBatch(schema, stage, filterBatchSize))
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      dispatch.claimFilterBatch(schema, stage, filterBatchSize),
+    )
 
     const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countAtStage(schema, stage))
     const claimed = rows[0]?.CNT ?? 0
@@ -69,7 +74,12 @@ export async function runDispatch() {
   batchIndex = 0
   while (detectSlots > 0 && pendingDetect > 0) {
     const stage = 11001 + batchIndex
-    await executeSql(apiUrl, jwt, biscuit, dispatch.claimDetectBatch(schema, stage, detectBatchSize))
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      dispatch.claimDetectBatch(schema, stage, detectBatchSize),
+    )
 
     const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countAtStage(schema, stage))
     const claimed = rows[0]?.CNT ?? 0

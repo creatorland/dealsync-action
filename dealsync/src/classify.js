@@ -50,7 +50,13 @@ export async function runClassify() {
   const threads = aiOutput.threads || []
   if (threads.length === 0) {
     core.info('No threads to process')
-    return { deals_created: 0, emails_classified: 0, deal_ids: '', rejected_ids: '', non_english_ids: '' }
+    return {
+      deals_created: 0,
+      emails_classified: 0,
+      deal_ids: '',
+      rejected_ids: '',
+      non_english_ids: '',
+    }
   }
 
   const jwt = await authenticate(authUrl, authSecret)
@@ -71,7 +77,10 @@ export async function runClassify() {
       // a. INSERT AI_EVALUATION_AUDITS
       const auditId = crypto.randomUUID()
       const rawJson = sanitizeString(JSON.stringify(thread).substring(0, 6400))
-      await executeSql(apiUrl, jwt, biscuit,
+      await executeSql(
+        apiUrl,
+        jwt,
+        biscuit,
         saveResults.insertAudit(schema, {
           id: auditId,
           threadCount: threads.length,
@@ -81,23 +90,34 @@ export async function runClassify() {
           outputTokens: 0,
           model: '',
           evaluation: rawJson,
-        }))
+        }),
+      )
 
       // b. DELETE + INSERT EMAIL_THREAD_EVALUATIONS
       const evalId = crypto.randomUUID()
       const category = sanitizeString(thread.category || '')
       const aiSummary = sanitizeString(thread.ai_summary || '')
       const isDeal = thread.is_deal ? 'true' : 'false'
-      const isLikelyScam = (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'
+      const isLikelyScam =
+        (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'
       const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0
 
-      await executeSql(apiUrl, jwt, biscuit,
-        saveResults.deleteThreadEvaluation(schema, threadId))
-      await executeSql(apiUrl, jwt, biscuit,
+      await executeSql(apiUrl, jwt, biscuit, saveResults.deleteThreadEvaluation(schema, threadId))
+      await executeSql(
+        apiUrl,
+        jwt,
+        biscuit,
         saveResults.insertThreadEvaluation(schema, {
-          id: evalId, threadId, auditId, category, summary: aiSummary,
-          isDeal, likelyScam: isLikelyScam, score: aiScore,
-        }))
+          id: evalId,
+          threadId,
+          auditId,
+          category,
+          summary: aiSummary,
+          isDeal,
+          likelyScam: isLikelyScam,
+          score: aiScore,
+        }),
+      )
 
       // c. If is_deal and main_contact exists
       if (thread.is_deal && thread.main_contact) {
@@ -108,34 +128,62 @@ export async function runClassify() {
         const contactTitle = sanitizeString(contact.title || '')
         const contactId = crypto.randomUUID()
 
-        await executeSql(apiUrl, jwt, biscuit,
-          saveResults.deleteContact(schema, contactEmail))
-        await executeSql(apiUrl, jwt, biscuit,
+        await executeSql(apiUrl, jwt, biscuit, saveResults.deleteContact(schema, contactEmail))
+        await executeSql(
+          apiUrl,
+          jwt,
+          biscuit,
           saveResults.insertContact(schema, {
-            id: contactId, email: contactEmail, name: contactName,
-            company: contactCompany, title: contactTitle,
-          }))
+            id: contactId,
+            email: contactEmail,
+            name: contactName,
+            company: contactCompany,
+            title: contactTitle,
+          }),
+        )
 
         const dealId = crypto.randomUUID()
         const dealName = sanitizeString(thread.deal_name || '')
         const dealType = sanitizeString(thread.deal_type || '')
-        const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0
+        const dealValue =
+          typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0
         const currency = sanitizeString(thread.currency || 'USD')
 
-        await executeSql(apiUrl, jwt, biscuit,
-          saveResults.deleteDeal(schema, threadId, userId))
-        await executeSql(apiUrl, jwt, biscuit,
+        await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDeal(schema, threadId, userId))
+        await executeSql(
+          apiUrl,
+          jwt,
+          biscuit,
           saveResults.insertDeal(schema, {
-            id: dealId, userId, threadId, evalId, dealName, dealType,
-            category, value: dealValue, currency, brand: contactCompany,
-          }))
+            id: dealId,
+            userId,
+            threadId,
+            evalId,
+            dealName,
+            dealType,
+            category,
+            value: dealValue,
+            currency,
+            brand: contactCompany,
+          }),
+        )
 
-        await executeSql(apiUrl, jwt, biscuit,
-          saveResults.deleteDealContact(schema, dealId, contactId))
-        await executeSql(apiUrl, jwt, biscuit,
+        await executeSql(
+          apiUrl,
+          jwt,
+          biscuit,
+          saveResults.deleteDealContact(schema, dealId, contactId),
+        )
+        await executeSql(
+          apiUrl,
+          jwt,
+          biscuit,
           saveResults.insertDealContact(schema, {
-            id: crypto.randomUUID(), dealId, contactId,
-          }))
+            id: crypto.randomUUID(),
+            dealId,
+            contactId,
+          }),
+        )
 
         dealsCreated++
       }

@@ -16,7 +16,9 @@ export async function run() {
     const command = core.getInput('command', { required: true })
     const handler = COMMANDS[command]
     if (!handler) {
-      core.setFailed(`Unknown command: "${command}". Available: ${Object.keys(COMMANDS).join(', ')}`)
+      core.setFailed(
+        `Unknown command: "${command}". Available: ${Object.keys(COMMANDS).join(', ')}`,
+      )
       return
     }
     const result = await handler()

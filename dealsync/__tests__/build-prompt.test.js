@@ -57,15 +57,11 @@ describe('buildPrompt', () => {
   })
 
   it('incremental thread: previousAiSummary present', () => {
-    const emails = [
-      makeEmail({ previousAiSummary: 'Previous deal discussion about sponsorship.' }),
-    ]
+    const emails = [makeEmail({ previousAiSummary: 'Previous deal discussion about sponsorship.' })]
     const { userPrompt } = buildPrompt(emails)
 
     expect(userPrompt).toContain('(isIncremental: true)')
-    expect(userPrompt).toContain(
-      'Previous AI Summary: Previous deal discussion about sponsorship.',
-    )
+    expect(userPrompt).toContain('Previous AI Summary: Previous deal discussion about sponsorship.')
   })
 
   it('multi-thread batch', () => {

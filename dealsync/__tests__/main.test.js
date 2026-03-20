@@ -52,9 +52,7 @@ describe('dealsync main (command router)', () => {
 
     await run()
 
-    expect(core.setFailed).toHaveBeenCalledWith(
-      expect.stringContaining('Unknown command: "bogus"'),
-    )
+    expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining('Unknown command: "bogus"'))
   })
 
   it('sets success=false when command throws', async () => {

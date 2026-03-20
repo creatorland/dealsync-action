@@ -58,7 +58,9 @@ export class HttpClient {
             const delay = retryAfter
               ? parseInt(retryAfter) * 1000
               : calculateDelay(attempt, this.baseDelay)
-            this.log(`Retry ${attempt + 1}/${this.maxRetries} after ${delay}ms (status ${response.status})`)
+            this.log(
+              `Retry ${attempt + 1}/${this.maxRetries} after ${delay}ms (status ${response.status})`,
+            )
             await sleep(delay)
             continue
           }

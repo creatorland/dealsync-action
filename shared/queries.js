@@ -127,7 +127,10 @@ export const detection = {
 // ============================================================
 
 export const saveResults = {
-  insertAudit: (schema, { id, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation }) =>
+  insertAudit: (
+    schema,
+    { id, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation },
+  ) =>
     `INSERT INTO ${schema}.AI_EVALUATION_AUDITS
       (ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT, UPDATED_AT)
     VALUES
@@ -136,14 +139,16 @@ export const saveResults = {
   deleteThreadEvaluation: (schema, threadId) =>
     `DELETE FROM ${schema}.EMAIL_THREAD_EVALUATIONS WHERE THREAD_ID = '${threadId}'`,
 
-  insertThreadEvaluation: (schema, { id, threadId, auditId, category, summary, isDeal, likelyScam, score }) =>
+  insertThreadEvaluation: (
+    schema,
+    { id, threadId, auditId, category, summary, isDeal, likelyScam, score },
+  ) =>
     `INSERT INTO ${schema}.EMAIL_THREAD_EVALUATIONS
       (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT)
     VALUES
       ('${id}', '${threadId}', '${auditId}', '${category}', '${summary}', ${isDeal}, ${likelyScam}, ${score}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 
-  deleteContact: (schema, email) =>
-    `DELETE FROM ${schema}.CONTACTS WHERE EMAIL = '${email}'`,
+  deleteContact: (schema, email) => `DELETE FROM ${schema}.CONTACTS WHERE EMAIL = '${email}'`,
 
   insertContact: (schema, { id, email, name, company, title }) =>
     `INSERT INTO ${schema}.CONTACTS
@@ -154,7 +159,10 @@ export const saveResults = {
   deleteDeal: (schema, threadId, userId) =>
     `DELETE FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}' AND USER_ID = '${userId}'`,
 
-  insertDeal: (schema, { id, userId, threadId, evalId, dealName, dealType, category, value, currency, brand }) =>
+  insertDeal: (
+    schema,
+    { id, userId, threadId, evalId, dealName, dealType, category, value, currency, brand },
+  ) =>
     `INSERT INTO ${schema}.DEALS
       (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT)
     VALUES
