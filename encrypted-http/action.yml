@@ -1,0 +1,47 @@
+name: 'Encrypted HTTP'
+description: 'HTTP requests with optional AES-256-GCM encryption and retry'
+author: 'creatorland'
+
+inputs:
+  url:
+    description: 'Target URL'
+    required: true
+  method:
+    description: 'HTTP method'
+    default: 'GET'
+  headers:
+    description: 'JSON string of headers'
+  body:
+    description: 'Request body'
+  encrypt:
+    description: 'Enable encryption (true/false)'
+    default: 'true'
+  encryption-key:
+    description: 'AES-256-GCM key'
+  decrypt-inputs:
+    description: 'Comma-separated dot-notation paths to decrypt before sending'
+  encrypt-outputs:
+    description: 'Comma-separated output names to encrypt'
+  extract-outputs:
+    description: 'Comma-separated fields to extract from JSON response'
+  max-retries:
+    description: 'Max retry attempts'
+    default: '3'
+  retry-delay-ms:
+    description: 'Base retry delay in ms'
+    default: '1000'
+  retry-on-status:
+    description: 'Status codes that trigger retry'
+    default: '429,500,502,503,504'
+
+outputs:
+  success:
+    description: 'Whether request succeeded'
+  status-code:
+    description: 'HTTP status code'
+  response:
+    description: 'Response body (optionally encrypted)'
+
+runs:
+  using: 'node24'
+  main: 'dist/index.js'
