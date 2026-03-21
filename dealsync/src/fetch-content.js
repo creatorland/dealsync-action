@@ -41,6 +41,7 @@ export async function runFetchContent() {
     chunks.push(allMessageIds.slice(i, i + MAX_MESSAGE_IDS))
   }
 
+  console.log(`[fetch-content] ${allMessageIds.length} messages in ${chunks.length} batch(es), url=${contentFetcherUrl}`)
   core.info(`Fetching content: ${allMessageIds.length} messages in ${chunks.length} batch(es)`)
 
   const allEmails = []
@@ -79,8 +80,9 @@ export async function runFetchContent() {
         allEmails.push(email)
       }
 
-      core.info(`Batch ${i + 1}/${chunks.length}: fetched ${emails.length} emails`)
+      console.log(`[fetch-content] batch ${i + 1}/${chunks.length}: fetched ${emails.length} emails`)
     } catch (err) {
+      console.log(`[fetch-content] batch ${i + 1}/${chunks.length} FAILED: ${err.message}`)
       core.error(`Batch ${i + 1}/${chunks.length} failed: ${err.message}`)
       // Track failed messageIds for the batch
       for (const msgId of chunk) {

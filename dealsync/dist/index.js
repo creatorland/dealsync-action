@@ -31,7 +31,7 @@ var commonjsGlobal = typeof globalThis !== 'undefined' ? globalThis : typeof win
 
 var core = {};
 
-var command = {};
+var command$1 = {};
 
 var utils$1 = {};
 
@@ -85,9 +85,9 @@ function requireUtils$1 () {
 var hasRequiredCommand;
 
 function requireCommand () {
-	if (hasRequiredCommand) return command;
+	if (hasRequiredCommand) return command$1;
 	hasRequiredCommand = 1;
-	var __createBinding = (command && command.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+	var __createBinding = (command$1 && command$1.__createBinding) || (Object.create ? (function(o, m, k, k2) {
 	    if (k2 === undefined) k2 = k;
 	    var desc = Object.getOwnPropertyDescriptor(m, k);
 	    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
@@ -98,20 +98,20 @@ function requireCommand () {
 	    if (k2 === undefined) k2 = k;
 	    o[k2] = m[k];
 	}));
-	var __setModuleDefault = (command && command.__setModuleDefault) || (Object.create ? (function(o, v) {
+	var __setModuleDefault = (command$1 && command$1.__setModuleDefault) || (Object.create ? (function(o, v) {
 	    Object.defineProperty(o, "default", { enumerable: true, value: v });
 	}) : function(o, v) {
 	    o["default"] = v;
 	});
-	var __importStar = (command && command.__importStar) || function (mod) {
+	var __importStar = (command$1 && command$1.__importStar) || function (mod) {
 	    if (mod && mod.__esModule) return mod;
 	    var result = {};
 	    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
 	    __setModuleDefault(result, mod);
 	    return result;
 	};
-	Object.defineProperty(command, "__esModule", { value: true });
-	command.issue = command.issueCommand = void 0;
+	Object.defineProperty(command$1, "__esModule", { value: true });
+	command$1.issue = command$1.issueCommand = void 0;
 	const os = __importStar(require$$0);
 	const utils_1 = requireUtils$1();
 	/**
@@ -128,11 +128,11 @@ function requireCommand () {
 	    const cmd = new Command(command, properties, message);
 	    process.stdout.write(cmd.toString() + os.EOL);
 	}
-	command.issueCommand = issueCommand;
+	command$1.issueCommand = issueCommand;
 	function issue(name, message = '') {
 	    issueCommand(name, {}, message);
 	}
-	command.issue = issue;
+	command$1.issue = issue;
 	const CMD_STRING = '::';
 	class Command {
 	    constructor(command, properties, message) {
@@ -182,7 +182,7 @@ function requireCommand () {
 	        .replace(/,/g, '%2C');
 	}
 	
-	return command;
+	return command$1;
 }
 
 var fileCommand = {};
@@ -28329,6 +28329,7 @@ async function runFetchContent() {
     chunks.push(allMessageIds.slice(i, i + MAX_MESSAGE_IDS));
   }
 
+  console.log(`[fetch-content] ${allMessageIds.length} messages in ${chunks.length} batch(es), url=${contentFetcherUrl}`);
   coreExports.info(`Fetching content: ${allMessageIds.length} messages in ${chunks.length} batch(es)`);
 
   const allEmails = [];
@@ -28367,8 +28368,9 @@ async function runFetchContent() {
         allEmails.push(email);
       }
 
-      coreExports.info(`Batch ${i + 1}/${chunks.length}: fetched ${emails.length} emails`);
+      console.log(`[fetch-content] batch ${i + 1}/${chunks.length}: fetched ${emails.length} emails`);
     } catch (err) {
+      console.log(`[fetch-content] batch ${i + 1}/${chunks.length} FAILED: ${err.message}`);
       coreExports.error(`Batch ${i + 1}/${chunks.length} failed: ${err.message}`);
       // Track failed messageIds for the batch
       for (const msgId of chunk) {
@@ -28489,10 +28491,14 @@ async function run() {
       );
       return
     }
+    console.log(`[dealsync] command=${command} starting`);
     const result = await handler();
+    console.log(`[dealsync] command=${command} success`);
     coreExports.setOutput('success', 'true');
     coreExports.setOutput('result', JSON.stringify(result));
   } catch (error) {
+    console.log(`[dealsync] command=${command} FAILED: ${error.message}`);
+    console.log(`[dealsync] stack: ${error.stack}`);
     coreExports.setOutput('success', 'false');
     coreExports.setOutput('error', error.message);
     coreExports.setOutput('error_stack', error.stack || '');
