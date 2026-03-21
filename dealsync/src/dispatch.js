@@ -1,5 +1,5 @@
 import * as core from '@actions/core'
-import { dispatch, orchestrator, STATUS, sanitizeSchema } from '../../shared/queries.js'
+import { dispatch, STATUS, sanitizeSchema } from '../../shared/queries.js'
 import { authenticate, executeSql } from './sxt-client.js'
 
 function sleep(ms) {
@@ -22,9 +22,6 @@ function generateBatchId() {
   return `${ts.slice(0, 8)}-${ts.slice(8, 12)}-${ver}-${variant}-${rand()}${rand()}${rand()}`
 }
 
-/**
- * Try to claim a filter batch. Returns { batchId, claimed } or null.
- */
 async function claimFilter(apiUrl, jwt, biscuit, schema, batchSize, maxInFlight) {
   const batchId = generateBatchId()
   await executeSql(apiUrl, jwt, biscuit, dispatch.claimFilterBatch(schema, batchId, batchSize))
@@ -41,9 +38,6 @@ async function claimFilter(apiUrl, jwt, biscuit, schema, batchSize, maxInFlight)
   return { batchId, claimed }
 }
 
-/**
- * Try to claim a classify batch. Returns { batchId, claimed } or null.
- */
 async function claimClassify(apiUrl, jwt, biscuit, schema, batchSize, maxInFlight) {
   const batchId = generateBatchId()
   await executeSql(apiUrl, jwt, biscuit, dispatch.claimClassifyBatch(schema, batchId, batchSize))
@@ -61,10 +55,7 @@ async function claimClassify(apiUrl, jwt, biscuit, schema, batchSize, maxInFligh
 }
 
 /**
- * Dispatch command:
- * 1. Retrigger stuck batches (same batch_id — processor resumes from checkpoint)
- * 2. Claim + dispatch new filter batches
- * 3. Claim + dispatch new classify batches
+ * Dispatch new batches only. Stuck batch retriggering is handled by retrigger-stuck command.
  */
 export async function runDispatch() {
   const authUrl = core.getInput('auth-url')
@@ -83,37 +74,8 @@ export async function runDispatch() {
   console.log('[dispatch] Authenticating...')
   const jwt = await authenticate(authUrl, authSecret)
 
-  let retriggered = 0
   let dispatchedFilter = 0
   let dispatchedClassify = 0
-
-  // 1. Retrigger stuck batches (processor resumes from audit checkpoint)
-  const stuckBatches = await executeSql(apiUrl, jwt, biscuit, orchestrator.findStuckBatches(schema))
-  for (const stuck of stuckBatches) {
-    const inputs = {}
-    if (stuck.BATCH_TYPE === 'filter') {
-      inputs.filter_batch_id = stuck.BATCH_ID
-    } else {
-      inputs.classify_batch_id = stuck.BATCH_ID
-    }
-
-    try {
-      const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`
-      const resp = await fetch(triggerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputs }),
-      })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      retriggered++
-      console.log(`[dispatch] Retriggered stuck ${stuck.BATCH_TYPE}: ${stuck.BATCH_ID}`)
-    } catch (err) {
-      console.log(`[dispatch] Retrigger failed for ${stuck.BATCH_ID}: ${err.message}`)
-    }
-    await sleep(100)
-  }
-
-  // 2. Dispatch new batches
   let filterExhausted = false
   let classifyExhausted = false
 
@@ -168,6 +130,6 @@ export async function runDispatch() {
     await sleep(100)
   }
 
-  console.log(`[dispatch] Done: ${retriggered} retriggered, ${dispatchedFilter} filter, ${dispatchedClassify} classify`)
-  return { retriggered, dispatched_filter_count: dispatchedFilter, dispatched_classify_count: dispatchedClassify }
+  console.log(`[dispatch] Done: ${dispatchedFilter} filter, ${dispatchedClassify} classify`)
+  return { dispatched_filter_count: dispatchedFilter, dispatched_classify_count: dispatchedClassify }
 }

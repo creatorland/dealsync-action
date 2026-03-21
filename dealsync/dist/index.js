@@ -28155,9 +28155,6 @@ function generateBatchId() {
   return `${ts.slice(0, 8)}-${ts.slice(8, 12)}-${ver}-${variant}-${rand()}${rand()}${rand()}`
 }
 
-/**
- * Try to claim a filter batch. Returns { batchId, claimed } or null.
- */
 async function claimFilter(apiUrl, jwt, biscuit, schema, batchSize, maxInFlight) {
   const batchId = generateBatchId();
   await executeSql(apiUrl, jwt, biscuit, dispatch.claimFilterBatch(schema, batchId, batchSize));
@@ -28174,9 +28171,6 @@ async function claimFilter(apiUrl, jwt, biscuit, schema, batchSize, maxInFlight)
   return { batchId, claimed }
 }
 
-/**
- * Try to claim a classify batch. Returns { batchId, claimed } or null.
- */
 async function claimClassify(apiUrl, jwt, biscuit, schema, batchSize, maxInFlight) {
   const batchId = generateBatchId();
   await executeSql(apiUrl, jwt, biscuit, dispatch.claimClassifyBatch(schema, batchId, batchSize));
@@ -28194,10 +28188,7 @@ async function claimClassify(apiUrl, jwt, biscuit, schema, batchSize, maxInFligh
 }
 
 /**
- * Dispatch command:
- * 1. Retrigger stuck batches (same batch_id — processor resumes from checkpoint)
- * 2. Claim + dispatch new filter batches
- * 3. Claim + dispatch new classify batches
+ * Dispatch new batches only. Stuck batch retriggering is handled by retrigger-stuck command.
  */
 async function runDispatch() {
   const authUrl = coreExports.getInput('auth-url');
@@ -28216,37 +28207,8 @@ async function runDispatch() {
   console.log('[dispatch] Authenticating...');
   const jwt = await authenticate(authUrl, authSecret);
 
-  let retriggered = 0;
   let dispatchedFilter = 0;
   let dispatchedClassify = 0;
-
-  // 1. Retrigger stuck batches (processor resumes from audit checkpoint)
-  const stuckBatches = await executeSql(apiUrl, jwt, biscuit, orchestrator.findStuckBatches(schema));
-  for (const stuck of stuckBatches) {
-    const inputs = {};
-    if (stuck.BATCH_TYPE === 'filter') {
-      inputs.filter_batch_id = stuck.BATCH_ID;
-    } else {
-      inputs.classify_batch_id = stuck.BATCH_ID;
-    }
-
-    try {
-      const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
-      const resp = await fetch(triggerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputs }),
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      retriggered++;
-      console.log(`[dispatch] Retriggered stuck ${stuck.BATCH_TYPE}: ${stuck.BATCH_ID}`);
-    } catch (err) {
-      console.log(`[dispatch] Retrigger failed for ${stuck.BATCH_ID}: ${err.message}`);
-    }
-    await sleep(100);
-  }
-
-  // 2. Dispatch new batches
   let filterExhausted = false;
   let classifyExhausted = false;
 
@@ -28301,8 +28263,8 @@ async function runDispatch() {
     await sleep(100);
   }
 
-  console.log(`[dispatch] Done: ${retriggered} retriggered, ${dispatchedFilter} filter, ${dispatchedClassify} classify`);
-  return { retriggered, dispatched_filter_count: dispatchedFilter, dispatched_classify_count: dispatchedClassify }
+  console.log(`[dispatch] Done: ${dispatchedFilter} filter, ${dispatchedClassify} classify`);
+  return { dispatched_filter_count: dispatchedFilter, dispatched_classify_count: dispatchedClassify }
 }
 
 /**
@@ -28734,6 +28696,59 @@ async function runFetchAndFilter() {
 }
 
 /**
+ * Find stuck batches (>10min, attempts<3) and retrigger them.
+ * The processor resumes from audit checkpoint — no status reset needed.
+ */
+async function runRetriggerStuck() {
+  const authUrl = coreExports.getInput('auth-url');
+  const authSecret = coreExports.getInput('auth-secret');
+  const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
+  const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const w3RpcUrl = coreExports.getInput('w3-rpc-url');
+  const processorName = coreExports.getInput('processor-name') || 'Dealsync Processor';
+
+  console.log('[retrigger] checking for stuck batches...');
+  const jwt = await authenticate(authUrl, authSecret);
+
+  const stuckBatches = await executeSql(apiUrl, jwt, biscuit, orchestrator.findStuckBatches(schema));
+
+  if (stuckBatches.length === 0) {
+    console.log('[retrigger] no stuck batches');
+    return { retriggered: 0 }
+  }
+
+  console.log(`[retrigger] found ${stuckBatches.length} stuck batch(es)`);
+
+  let retriggered = 0;
+  for (const stuck of stuckBatches) {
+    const inputs = {};
+    if (stuck.BATCH_TYPE === 'filter') {
+      inputs.filter_batch_id = stuck.BATCH_ID;
+    } else {
+      inputs.classify_batch_id = stuck.BATCH_ID;
+    }
+
+    try {
+      const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
+      const resp = await fetch(triggerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inputs }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+      retriggered++;
+      console.log(`[retrigger] ${stuck.BATCH_TYPE}: ${stuck.BATCH_ID}`);
+    } catch (err) {
+      console.log(`[retrigger] failed ${stuck.BATCH_ID}: ${err.message}`);
+    }
+  }
+
+  console.log(`[retrigger] done: ${retriggered}/${stuckBatches.length}`);
+  return { retriggered, total: stuckBatches.length }
+}
+
+/**
  * Step 1: Fetch content + call AI + save audit checkpoint.
  *
  * If audit already exists for batch_id → skip AI, return immediately.
@@ -29100,6 +29115,7 @@ const COMMANDS = {
   'fetch-content': runFetchContent,
   'workflow-triggers': runWorkflowTriggers,
   'fetch-and-filter': runFetchAndFilter,
+  'retrigger-stuck': runRetriggerStuck,
   'fetch-and-classify': runFetchAndClassify,
   'save-evals': runSaveEvals,
   'save-deals': runSaveDeals,

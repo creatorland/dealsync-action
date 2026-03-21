@@ -8,6 +8,7 @@ import { runSxtQuery } from './sxt-query.js'
 import { runFetchContent } from './fetch-content.js'
 import { runWorkflowTriggers } from './workflow-triggers.js'
 import { runFetchAndFilter } from './fetch-and-filter.js'
+import { runRetriggerStuck } from './retrigger-stuck.js'
 import { runFetchAndClassify } from './fetch-and-classify.js'
 import { runSaveEvals } from './save-evals.js'
 import { runSaveDeals } from './save-deals.js'
@@ -24,6 +25,7 @@ const COMMANDS = {
   'fetch-content': runFetchContent,
   'workflow-triggers': runWorkflowTriggers,
   'fetch-and-filter': runFetchAndFilter,
+  'retrigger-stuck': runRetriggerStuck,
   'fetch-and-classify': runFetchAndClassify,
   'save-evals': runSaveEvals,
   'save-deals': runSaveDeals,
