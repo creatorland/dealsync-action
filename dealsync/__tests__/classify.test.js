@@ -103,10 +103,10 @@ describe('classify command', () => {
     fetchSpy.mockRestore()
   })
 
-  it('creates all records for a deal and sets status to deal', async () => {
+  it('creates deal records and sets status to deal (no contacts)', async () => {
     mockInputs()
-    // Deal: audit(1) + eval_del(2) + eval_ins(3) + contact_del(4) + contact_ins(5) + deal_del(6) + deal_ins(7) + dc_del(8) + dc_ins(9) + status(10) = 10
-    mockAuthAndSql(fetchSpy, 10)
+    // Deal: audit(1) + eval_del(2) + eval_ins(3) + deal_del(4) + deal_ins(5) + dc_del(6) + dc_ins(7) + status(8) = 8
+    mockAuthAndSql(fetchSpy, 8)
 
     const result = await runClassify()
 
@@ -114,7 +114,7 @@ describe('classify command', () => {
     expect(result.emails_classified).toBe(1)
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    expect(sqlCalls.length).toBe(10)
+    expect(sqlCalls.length).toBe(8)
 
     // Audit INSERT
     expect(getSqlText(sqlCalls[0])).toContain('INSERT INTO dealsync_stg_v1.AI_EVALUATION_AUDITS')
@@ -127,23 +127,25 @@ describe('classify command', () => {
       'INSERT INTO dealsync_stg_v1.EMAIL_THREAD_EVALUATIONS',
     )
 
-    // Contact DELETE + INSERT
+    // Deal DELETE by thread_id (unique per thread, no userId)
     expect(getSqlText(sqlCalls[3])).toBe(
-      "DELETE FROM dealsync_stg_v1.CONTACTS WHERE EMAIL = 'jane@example.com'",
+      "DELETE FROM dealsync_stg_v1.DEALS WHERE THREAD_ID = 'thread-abc-123'",
     )
-    expect(getSqlText(sqlCalls[4])).toContain('Jane Smith')
-    expect(getSqlText(sqlCalls[4])).toContain('Acme Corp')
+    expect(getSqlText(sqlCalls[4])).toContain('Big Deal')
+    expect(getSqlText(sqlCalls[4])).toContain('50000')
 
-    // Deal DELETE + INSERT
-    expect(getSqlText(sqlCalls[5])).toBe(
-      "DELETE FROM dealsync_stg_v1.DEALS WHERE THREAD_ID = 'thread-abc-123' AND USER_ID = 'user-001'",
-    )
-    expect(getSqlText(sqlCalls[6])).toContain('Big Deal')
-    expect(getSqlText(sqlCalls[6])).toContain('50000')
+    // Deal contact uses email directly
+    expect(getSqlText(sqlCalls[6])).toContain('CONTACT_EMAIL')
+    expect(getSqlText(sqlCalls[6])).toContain('jane@example.com')
+
+    // No contacts table queries
+    const allSql = sqlCalls.map((c) => getSqlText(c)).join(' ')
+    expect(allSql).not.toContain('CONTACTS WHERE EMAIL')
+    expect(allSql).not.toContain('INSERT INTO dealsync_stg_v1.CONTACTS')
 
     // Status UPDATE to 'deal'
-    expect(getSqlText(sqlCalls[9])).toContain("STATUS = 'deal'")
-    expect(getSqlText(sqlCalls[9])).toContain("'email-id-001'")
+    expect(getSqlText(sqlCalls[7])).toContain("STATUS = 'deal'")
+    expect(getSqlText(sqlCalls[7])).toContain("'email-id-001'")
   })
 
   it('sets status to not_deal for non-deal', async () => {
@@ -179,7 +181,7 @@ describe('classify command', () => {
 
   it('authenticates via proxy with x-shared-secret', async () => {
     mockInputs()
-    mockAuthAndSql(fetchSpy, 10)
+    mockAuthAndSql(fetchSpy, 8)
 
     await runClassify()
 
@@ -191,7 +193,7 @@ describe('classify command', () => {
 
   it('uses pre-generated biscuit in SQL calls', async () => {
     mockInputs()
-    mockAuthAndSql(fetchSpy, 10)
+    mockAuthAndSql(fetchSpy, 8)
 
     await runClassify()
 
@@ -217,14 +219,13 @@ describe('classify command', () => {
         ],
       }),
     })
-    mockAuthAndSql(fetchSpy, 10)
+    mockAuthAndSql(fetchSpy, 8)
 
     await runClassify()
 
     const sqlCalls = getSqlCalls(fetchSpy)
     expect(getSqlText(sqlCalls[2])).toContain("It''s a great deal")
-    expect(getSqlText(sqlCalls[4])).toContain("Tim O''Brien")
-    expect(getSqlText(sqlCalls[6])).toContain("O''Brien''s Offer")
+    expect(getSqlText(sqlCalls[4])).toContain("O''Brien''s Offer")
   })
 
   it('continues processing when one thread fails', async () => {
@@ -244,7 +245,7 @@ describe('classify command', () => {
     })
 
     fetchSpy.mockResolvedValueOnce(authResponse())
-    // Thread 1: 4 SQL calls
+    // Thread 1: 4 SQL calls (audit + eval_del + eval_ins + status)
     fetchSpy.mockResolvedValueOnce(sxtResponse())
     fetchSpy.mockResolvedValueOnce(sxtResponse())
     fetchSpy.mockResolvedValueOnce(sxtResponse())
@@ -260,6 +261,7 @@ describe('classify command', () => {
     const result = await runClassify()
 
     expect(result.emails_classified).toBe(2)
+    expect(result.failed_threads).toBe(1)
     expect(core.error).toHaveBeenCalledWith(
       expect.stringContaining('Failed to process thread thread-bad-1'),
     )
@@ -303,12 +305,20 @@ describe('classify command', () => {
         threads: [makeThread({ is_deal: true, language: 'zh' })],
       }),
     })
-    mockAuthAndSql(fetchSpy, 10)
+    mockAuthAndSql(fetchSpy, 8)
 
     const result = await runClassify()
 
     const sqlCalls = getSqlCalls(fetchSpy)
     const statusSql = getSqlText(sqlCalls[sqlCalls.length - 1])
     expect(statusSql).toContain("STATUS = 'deal'")
+  })
+
+  it('throws when all threads fail', async () => {
+    mockInputs()
+    fetchSpy.mockResolvedValueOnce(authResponse())
+    fetchSpy.mockResolvedValueOnce(new Response('fail', { status: 500 }))
+
+    await expect(runClassify()).rejects.toThrow('All 1 thread(s) failed to classify')
   })
 })

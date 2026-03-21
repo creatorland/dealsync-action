@@ -162,16 +162,9 @@ export const saveResults = {
     VALUES
       ('${id}', '${threadId}', '${auditId}', '${category}', '${summary}', ${isDeal}, ${likelyScam}, ${score}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 
-  deleteContact: (schema, email) => `DELETE FROM ${schema}.CONTACTS WHERE EMAIL = '${email}'`,
-
-  insertContact: (schema, { id, email, name, company, title }) =>
-    `INSERT INTO ${schema}.CONTACTS
-      (ID, EMAIL, NAME, COMPANY_NAME, TITLE, CREATED_AT, UPDATED_AT)
-    VALUES
-      ('${id}', '${email}', '${name}', '${company}', '${title}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-
-  deleteDeal: (schema, threadId, userId) =>
-    `DELETE FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}' AND USER_ID = '${userId}'`,
+  /** Delete deal by thread_id (one deal per thread) */
+  deleteDeal: (schema, threadId) =>
+    `DELETE FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}'`,
 
   insertDeal: (
     schema,
@@ -182,14 +175,16 @@ export const saveResults = {
     VALUES
       ('${id}', '${userId}', '${threadId}', '${evalId}', '${dealName}', '${dealType}', '${category}', ${value}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 
-  deleteDealContact: (schema, dealId, contactId) =>
-    `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID = '${dealId}' AND CONTACT_ID = '${contactId}'`,
+  /** Delete deal contacts by deal_id */
+  deleteDealContact: (schema, dealId) =>
+    `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID = '${dealId}'`,
 
-  insertDealContact: (schema, { id, dealId, contactId }) =>
+  /** Insert deal contact using email directly (no contact_id FK) */
+  insertDealContact: (schema, { id, dealId, contactEmail }) =>
     `INSERT INTO ${schema}.DEAL_CONTACTS
-      (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, CREATED_AT, UPDATED_AT)
+      (ID, DEAL_ID, CONTACT_EMAIL, CONTACT_TYPE, CREATED_AT, UPDATED_AT)
     VALUES
-      ('${id}', '${dealId}', '${contactId}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      ('${id}', '${dealId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 }
 
 // ============================================================

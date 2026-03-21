@@ -121,37 +121,23 @@ export async function runClassify() {
         }),
       )
 
-      // c. If is_deal and main_contact exists
-      if (thread.is_deal && thread.main_contact) {
-        const contact = thread.main_contact
-        const contactEmail = sanitizeString(contact.email || '')
-        const contactName = sanitizeString(contact.name || '')
-        const contactCompany = sanitizeString(contact.company || '')
-        const contactTitle = sanitizeString(contact.title || '')
-        const contactId = crypto.randomUUID()
-
-        await executeSql(apiUrl, jwt, biscuit, saveResults.deleteContact(schema, contactEmail))
-        await executeSql(
-          apiUrl,
-          jwt,
-          biscuit,
-          saveResults.insertContact(schema, {
-            id: contactId,
-            email: contactEmail,
-            name: contactName,
-            company: contactCompany,
-            title: contactTitle,
-          }),
-        )
-
+      // c. If is_deal — create deal + deal_contact (one deal per thread)
+      if (thread.is_deal) {
         const dealId = crypto.randomUUID()
         const dealName = sanitizeString(thread.deal_name || '')
         const dealType = sanitizeString(thread.deal_type || '')
         const dealValue =
           typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0
         const currency = sanitizeString(thread.currency || 'USD')
+        const contactEmail = thread.main_contact
+          ? sanitizeString(thread.main_contact.email || '')
+          : ''
+        const brand = thread.main_contact
+          ? sanitizeString(thread.main_contact.company || '')
+          : ''
 
-        await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDeal(schema, threadId, userId))
+        // One deal per thread — delete existing, insert new
+        await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDeal(schema, threadId))
         await executeSql(
           apiUrl,
           jwt,
@@ -166,26 +152,29 @@ export async function runClassify() {
             category,
             value: dealValue,
             currency,
-            brand: contactCompany,
+            brand,
           }),
         )
 
-        await executeSql(
-          apiUrl,
-          jwt,
-          biscuit,
-          saveResults.deleteDealContact(schema, dealId, contactId),
-        )
-        await executeSql(
-          apiUrl,
-          jwt,
-          biscuit,
-          saveResults.insertDealContact(schema, {
-            id: crypto.randomUUID(),
-            dealId,
-            contactId,
-          }),
-        )
+        // Deal contact — use email directly, no contact_id FK
+        if (contactEmail) {
+          await executeSql(
+            apiUrl,
+            jwt,
+            biscuit,
+            saveResults.deleteDealContact(schema, dealId),
+          )
+          await executeSql(
+            apiUrl,
+            jwt,
+            biscuit,
+            saveResults.insertDealContact(schema, {
+              id: crypto.randomUUID(),
+              dealId,
+              contactEmail,
+            }),
+          )
+        }
 
         dealsCreated++
       }
