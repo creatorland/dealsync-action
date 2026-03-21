@@ -65,7 +65,8 @@ export const dispatch = {
     )`,
 
   /** Atomically claim pending_classification deal_states into classifying (sync-level + thread-level guard) */
-  /** Claim by thread — batchSize = max threads, claims ALL emails in those threads */
+  /** Claim by thread — batchSize = max threads, claims ALL emails in those threads.
+   *  Thread is eligible only if ALL its emails in the same sync are done filtering. */
   claimClassifyBatch: (schema, batchId, batchSize) =>
     `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.CLASSIFYING}', BATCH_ID = '${batchId}'
     WHERE THREAD_ID IN (
@@ -73,7 +74,8 @@ export const dispatch = {
       WHERE ds.STATUS = '${STATUS.PENDING_CLASSIFICATION}'
         AND NOT EXISTS (
           SELECT 1 FROM ${schema}.DEAL_STATES ds2
-          WHERE ds2.SYNC_STATE_ID = ds.SYNC_STATE_ID
+          WHERE ds2.THREAD_ID = ds.THREAD_ID
+            AND ds2.SYNC_STATE_ID = ds.SYNC_STATE_ID
             AND ds2.STATUS IN ('${STATUS.PENDING}', '${STATUS.FILTERING}')
         )
       LIMIT ${batchSize}
