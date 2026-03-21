@@ -18,7 +18,7 @@ export async function runFetchContent() {
 
   let metadataRaw = core.getInput('metadata')
   if (!metadataRaw || metadataRaw === '[]') {
-    return { emails: [], count: 0 }
+    return '[]'
   }
 
   // Decrypt metadata if encrypted
@@ -29,7 +29,7 @@ export async function runFetchContent() {
 
   const rows = JSON.parse(metadataRaw)
   if (rows.length === 0) {
-    return { emails: [], count: 0 }
+    return '[]'
   }
 
   const userId = rows[0].USER_ID

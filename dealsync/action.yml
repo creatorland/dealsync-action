@@ -28,24 +28,24 @@ inputs:
     default: 'Dealsync Processor'
   active-filter:
     description: 'Current active filter count (dispatch)'
-  active-detect:
+  active-classify:
     description: 'Current active detect count (dispatch)'
   pending-filter:
     description: 'Pending filter count (dispatch)'
-  pending-detect:
+  pending-classify:
     description: 'Pending detect count (dispatch)'
   max-filter:
     description: 'Max filter concurrency (dispatch)'
     default: '600'
-  max-detect:
+  max-classify:
     description: 'Max detect concurrency (dispatch)'
     default: '300'
   filter-batch-size:
     description: 'Emails per filter batch (dispatch)'
     default: '200'
-  detect-batch-size:
-    description: 'Emails per detect batch (dispatch)'
-    default: '50'
+  classify-batch-size:
+    description: 'Emails per classify batch (dispatch)'
+    default: '5'
   emails:
     description: 'JSON array of email content (filter, build-prompt)'
   ai-response:
@@ -65,7 +65,7 @@ inputs:
   trigger-action:
     description: 'Action for workflow-triggers: start or complete'
   trigger-type:
-    description: 'Type for workflow-triggers: filter or detection'
+    description: 'Type for workflow-triggers: filter or classify'
 
 outputs:
   success:

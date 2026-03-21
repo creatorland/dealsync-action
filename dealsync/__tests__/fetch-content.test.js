@@ -50,8 +50,7 @@ describe('fetch-content command', () => {
 
     const result = await runFetchContent()
 
-    expect(result.emails).toEqual([])
-    expect(result.count).toBe(0)
+    expect(result).toBe('[]')
     expect(fetchSpy).not.toHaveBeenCalled()
   })
 
@@ -73,16 +72,14 @@ describe('fetch-content command', () => {
     )
 
     const result = await runFetchContent()
-    const emails = JSON.parse(result.emails)
+    const emails = JSON.parse(result)
 
     expect(emails).toHaveLength(2)
     expect(emails[0].id).toBe('em-1')
     expect(emails[0].threadId).toBe('thread-1')
     expect(emails[0].body).toBe('Hello')
     expect(emails[1].id).toBe('em-2')
-    expect(result.count).toBe(2)
 
-    // Verify single fetch call
     expect(fetchSpy).toHaveBeenCalledTimes(1)
     const callBody = JSON.parse(fetchSpy.mock.calls[0][1].body)
     expect(callBody.userId).toBe('user-1')
@@ -91,7 +88,6 @@ describe('fetch-content command', () => {
   })
 
   it('chunks into multiple batches when > 50 messages', async () => {
-    // Create 75 metadata rows
     const rows = Array.from({ length: 75 }, (_, i) =>
       makeMetadataRow({ EMAIL_METADATA_ID: `em-${i}`, MESSAGE_ID: `msg-${i}` }),
     )
@@ -100,13 +96,11 @@ describe('fetch-content command', () => {
       'content-fetcher-url': 'https://fetcher.example.com',
     })
 
-    // First batch: 50 emails
     fetchSpy.mockResolvedValueOnce(
       fetchResponse(
         Array.from({ length: 50 }, (_, i) => ({ messageId: `msg-${i}`, body: `body-${i}` })),
       ),
     )
-    // Second batch: 25 emails
     fetchSpy.mockResolvedValueOnce(
       fetchResponse(
         Array.from({ length: 25 }, (_, i) => ({
@@ -117,17 +111,14 @@ describe('fetch-content command', () => {
     )
 
     const result = await runFetchContent()
-    const emails = JSON.parse(result.emails)
+    const emails = JSON.parse(result)
 
     expect(fetchSpy).toHaveBeenCalledTimes(2)
     expect(emails).toHaveLength(75)
-    expect(result.count).toBe(75)
 
-    // First call has 50 messageIds
     const call1Body = JSON.parse(fetchSpy.mock.calls[0][1].body)
     expect(call1Body.messageIds).toHaveLength(50)
 
-    // Second call has 25 messageIds
     const call2Body = JSON.parse(fetchSpy.mock.calls[1][1].body)
     expect(call2Body.messageIds).toHaveLength(25)
   })
@@ -148,7 +139,7 @@ describe('fetch-content command', () => {
     fetchSpy.mockResolvedValueOnce(fetchResponse([{ messageId: 'msg-1', body: 'Hello' }]))
 
     const result = await runFetchContent()
-    const emails = JSON.parse(result.emails)
+    const emails = JSON.parse(result)
 
     expect(emails[0].previousAiSummary).toBe('Previous deal discussion')
     expect(emails[0].existingDealId).toBe('deal-123')
@@ -168,13 +159,13 @@ describe('fetch-content command', () => {
 
     const result = await runFetchContent()
 
-    // emails should be encrypted
-    expect(result.emails).not.toContain('secret')
-    const decrypted = JSON.parse(decryptValue(result.emails, key))
+    // result should be encrypted string
+    expect(result).not.toContain('secret')
+    const decrypted = JSON.parse(decryptValue(result, key))
     expect(decrypted[0].body).toBe('secret')
   })
 
-  it('continues on batch failure and reports failed_ids', async () => {
+  it('continues on batch failure and reports failed_ids via setOutput', async () => {
     const rows = Array.from({ length: 75 }, (_, i) =>
       makeMetadataRow({ EMAIL_METADATA_ID: `em-${i}`, MESSAGE_ID: `msg-${i}` }),
     )
@@ -183,22 +174,18 @@ describe('fetch-content command', () => {
       'content-fetcher-url': 'https://fetcher.example.com',
     })
 
-    // First batch succeeds
     fetchSpy.mockResolvedValueOnce(
       fetchResponse(
         Array.from({ length: 50 }, (_, i) => ({ messageId: `msg-${i}`, body: `body-${i}` })),
       ),
     )
-    // Second batch fails
     fetchSpy.mockResolvedValueOnce(new Response('Internal Server Error', { status: 500 }))
 
     const result = await runFetchContent()
-    const emails = JSON.parse(result.emails)
+    const emails = JSON.parse(result)
 
     expect(emails).toHaveLength(50)
-    expect(result.count).toBe(50)
-    expect(result.failed_ids).toBeDefined()
-    expect(result.failed_ids).toContain("'em-50'")
+    expect(core.setOutput).toHaveBeenCalledWith('failed_ids', expect.stringContaining("'em-50'"))
     expect(core.error).toHaveBeenCalledWith(expect.stringContaining('Batch 2/2 failed'))
   })
 

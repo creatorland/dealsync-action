@@ -27701,16 +27701,15 @@ const dispatch = {
       SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}' LIMIT ${batchSize}
     )`,
 
-  /** Atomically claim pending_classification deal_states into classifying (with thread-completeness check) */
-  claimDetectBatch: (schema, batchId, batchSize) =>
+  /** Atomically claim pending_classification deal_states into classifying (sync-level + thread-level guard) */
+  claimClassifyBatch: (schema, batchId, batchSize) =>
     `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.CLASSIFYING}', BATCH_ID = '${batchId}'
     WHERE EMAIL_METADATA_ID IN (
       SELECT ds.EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES ds
       WHERE ds.STATUS = '${STATUS.PENDING_CLASSIFICATION}'
         AND NOT EXISTS (
           SELECT 1 FROM ${schema}.DEAL_STATES ds2
-          WHERE ds2.THREAD_ID = ds.THREAD_ID
-            AND ds2.USER_ID = ds.USER_ID
+          WHERE ds2.SYNC_STATE_ID = ds.SYNC_STATE_ID
             AND ds2.STATUS IN ('${STATUS.PENDING}', '${STATUS.FILTERING}')
         )
       LIMIT ${batchSize}
@@ -28122,32 +28121,32 @@ async function runDispatch() {
   const processorName = coreExports.getInput('processor-name') || 'Dealsync Processor';
 
   const activeFilter = parseNonNegativeInt(coreExports.getInput('active-filter'), 'active-filter');
-  const activeDetect = parseNonNegativeInt(coreExports.getInput('active-detect'), 'active-detect');
+  const activeClassify = parseNonNegativeInt(coreExports.getInput('active-classify'), 'active-classify');
   const pendingFilter = parseNonNegativeInt(coreExports.getInput('pending-filter'), 'pending-filter');
-  const pendingDetect = parseNonNegativeInt(coreExports.getInput('pending-detect'), 'pending-detect');
+  const pendingClassify = parseNonNegativeInt(coreExports.getInput('pending-classify'), 'pending-classify');
   const maxFilter = parseNonNegativeInt(coreExports.getInput('max-filter') || '600', 'max-filter');
-  const maxDetect = parseNonNegativeInt(coreExports.getInput('max-detect') || '300', 'max-detect');
+  const maxClassify = parseNonNegativeInt(coreExports.getInput('max-classify') || '300', 'max-classify');
   const filterBatchSize = parseNonNegativeInt(
     coreExports.getInput('filter-batch-size') || '200',
     'filter-batch-size',
   );
-  const detectBatchSize = parseNonNegativeInt(
-    coreExports.getInput('detect-batch-size') || '50',
-    'detect-batch-size',
+  const classifyBatchSize = parseNonNegativeInt(
+    coreExports.getInput('classify-batch-size') || '5',
+    'classify-batch-size',
   );
 
-  if (pendingFilter === 0 && pendingDetect === 0) {
+  if (pendingFilter === 0 && pendingClassify === 0) {
     coreExports.info('No pending emails to dispatch');
-    return { dispatched_filter_count: 0, dispatched_detect_count: 0 }
+    return { dispatched_filter_count: 0, dispatched_classify_count: 0 }
   }
 
   coreExports.info('Authenticating...');
   const jwt = await authenticate(authUrl, authSecret);
 
   let filterSlots = maxFilter - activeFilter;
-  let detectSlots = maxDetect - activeDetect;
+  let classifySlots = maxClassify - activeClassify;
   let dispatchedFilter = 0;
-  let dispatchedDetect = 0;
+  let dispatchedClassify = 0;
 
   // Dispatch filter batches: claim first, then trigger
   while (filterSlots > 0 && pendingFilter > 0) {
@@ -28194,8 +28193,8 @@ async function runDispatch() {
     await sleep(100);
   }
 
-  // Dispatch detection batches: claim first, then trigger
-  while (detectSlots > 0 && pendingDetect > 0) {
+  // Dispatch classify batches: claim first, then trigger
+  while (classifySlots > 0 && pendingClassify > 0) {
     const batchId = generateBatchId();
 
     // 1. Claim batch
@@ -28203,7 +28202,7 @@ async function runDispatch() {
       apiUrl,
       jwt,
       biscuit,
-      dispatch.claimDetectBatch(schema, batchId, detectBatchSize),
+      dispatch.claimClassifyBatch(schema, batchId, classifyBatchSize),
     );
 
     const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, batchId));
@@ -28218,14 +28217,14 @@ async function runDispatch() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          inputs: { batch_type: 'detection', batch_id: batchId },
+          inputs: { batch_type: 'classify', batch_id: batchId },
         }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      dispatchedDetect++;
-      coreExports.info(`Detect batch: batchId=${batchId}, claimed=${claimed}`);
+      dispatchedClassify++;
+      coreExports.info(`Classify batch: batchId=${batchId}, claimed=${claimed}`);
     } catch (err) {
-      coreExports.error(`Detect trigger failed for ${batchId}: ${err.message}`);
+      coreExports.error(`Classify trigger failed for ${batchId}: ${err.message}`);
       await executeSql(
         apiUrl,
         jwt,
@@ -28235,11 +28234,11 @@ async function runDispatch() {
       break
     }
 
-    detectSlots -= claimed;
+    classifySlots -= claimed;
     await sleep(100);
   }
 
-  return { dispatched_filter_count: dispatchedFilter, dispatched_detect_count: dispatchedDetect }
+  return { dispatched_filter_count: dispatchedFilter, dispatched_classify_count: dispatchedClassify }
 }
 
 /**
@@ -28306,7 +28305,7 @@ async function runFetchContent() {
 
   let metadataRaw = coreExports.getInput('metadata');
   if (!metadataRaw || metadataRaw === '[]') {
-    return { emails: [], count: 0 }
+    return '[]'
   }
 
   // Decrypt metadata if encrypted
@@ -28317,7 +28316,7 @@ async function runFetchContent() {
 
   const rows = JSON.parse(metadataRaw);
   if (rows.length === 0) {
-    return { emails: [], count: 0 }
+    return '[]'
   }
 
   const userId = rows[0].USER_ID;

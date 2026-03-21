@@ -35,21 +35,21 @@ export const orchestrator = {
   checkConcurrency: (schema) =>
     `SELECT
       (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.FILTERING}') AS ACTIVE_FILTER,
-      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.CLASSIFYING}') AS ACTIVE_DETECT,
+      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.CLASSIFYING}') AS ACTIVE_CLASSIFY,
       (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}') AS PENDING_FILTER,
-      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING_CLASSIFICATION}') AS PENDING_DETECT`,
+      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING_CLASSIFICATION}') AS PENDING_CLASSIFY`,
 
   /** Reset stale filtering back to pending, stale classifying back to pending_classification (with attempts) */
   expireStale: (schema, minutes = 10, maxAttempts = 3) =>
     `UPDATE ${schema}.DEAL_STATES SET
       STATUS = CASE
-        WHEN STATUS = '${STATUS.FILTERING}' AND ATTEMPTS < ${maxAttempts} THEN '${STATUS.PENDING}'
-        WHEN STATUS = '${STATUS.CLASSIFYING}' AND ATTEMPTS < ${maxAttempts} THEN '${STATUS.PENDING_CLASSIFICATION}'
-        ELSE STATUS
+        WHEN STATUS = '${STATUS.FILTERING}' THEN '${STATUS.PENDING}'
+        WHEN STATUS = '${STATUS.CLASSIFYING}' THEN '${STATUS.PENDING_CLASSIFICATION}'
       END,
       ATTEMPTS = ATTEMPTS + 1,
       BATCH_ID = NULL
     WHERE STATUS IN ('${STATUS.FILTERING}', '${STATUS.CLASSIFYING}')
+    AND ATTEMPTS < ${maxAttempts}
     AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${minutes}' MINUTE`,
 }
 
@@ -65,16 +65,15 @@ export const dispatch = {
       SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}' LIMIT ${batchSize}
     )`,
 
-  /** Atomically claim pending_classification deal_states into classifying (with thread-completeness check) */
-  claimDetectBatch: (schema, batchId, batchSize) =>
+  /** Atomically claim pending_classification deal_states into classifying (sync-level + thread-level guard) */
+  claimClassifyBatch: (schema, batchId, batchSize) =>
     `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.CLASSIFYING}', BATCH_ID = '${batchId}'
     WHERE EMAIL_METADATA_ID IN (
       SELECT ds.EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES ds
       WHERE ds.STATUS = '${STATUS.PENDING_CLASSIFICATION}'
         AND NOT EXISTS (
           SELECT 1 FROM ${schema}.DEAL_STATES ds2
-          WHERE ds2.THREAD_ID = ds.THREAD_ID
-            AND ds2.USER_ID = ds.USER_ID
+          WHERE ds2.SYNC_STATE_ID = ds.SYNC_STATE_ID
             AND ds2.STATUS IN ('${STATUS.PENDING}', '${STATUS.FILTERING}')
         )
       LIMIT ${batchSize}

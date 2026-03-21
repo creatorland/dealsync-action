@@ -24,13 +24,13 @@ function mockInputs(overrides = {}) {
     'w3-rpc-url': 'https://w3.example.com',
     'processor-name': 'Dealsync Processor',
     'active-filter': '400',
-    'active-detect': '200',
+    'active-classify': '200',
     'pending-filter': '50',
-    'pending-detect': '30',
+    'pending-classify': '30',
     'max-filter': '600',
-    'max-detect': '300',
+    'max-classify': '300',
     'filter-batch-size': '200',
-    'detect-batch-size': '50',
+    'classify-batch-size': '5',
     ...overrides,
   }
   core.getInput.mockImplementation((name) => defaults[name] ?? '')
@@ -87,18 +87,18 @@ describe('dispatch command', () => {
   })
 
   it('early exits when no pending emails', async () => {
-    mockInputs({ 'pending-filter': '0', 'pending-detect': '0' })
+    mockInputs({ 'pending-filter': '0', 'pending-classify': '0' })
 
     const result = await runDispatch()
 
     expect(fetchSpy).not.toHaveBeenCalled()
     expect(result.dispatched_filter_count).toBe(0)
-    expect(result.dispatched_detect_count).toBe(0)
+    expect(result.dispatched_classify_count).toBe(0)
     expect(core.info).toHaveBeenCalledWith('No pending emails to dispatch')
   })
 
   it('claims filter batch first with UUIDv7 batch_id, then triggers processor', async () => {
-    mockInputs({ 'pending-filter': '10', 'pending-detect': '0' })
+    mockInputs({ 'pending-filter': '10', 'pending-classify': '0' })
 
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // auth
@@ -130,8 +130,8 @@ describe('dispatch command', () => {
     expect(body.inputs.trigger_hash).toBeUndefined()
   })
 
-  it('claims detection batch with thread-completeness check', async () => {
-    mockInputs({ 'pending-filter': '0', 'pending-detect': '10' })
+  it('claims classify batch with thread-completeness check', async () => {
+    mockInputs({ 'pending-filter': '0', 'pending-classify': '10' })
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
@@ -143,17 +143,18 @@ describe('dispatch command', () => {
 
     const result = await runDispatch()
 
-    expect(result.dispatched_detect_count).toBe(1)
+    expect(result.dispatched_classify_count).toBe(1)
 
     const sqlCalls = getSqlCalls(fetchSpy)
     const claimSql = getSqlText(sqlCalls[0])
     expect(claimSql).toContain("STATUS = 'classifying'")
     expect(claimSql).toContain('NOT EXISTS')
+    expect(claimSql).toContain('SYNC_STATE_ID')
     expect(claimSql).toContain("ds2.STATUS IN ('pending', 'filtering')")
   })
 
   it('resets claimed emails on trigger failure', async () => {
-    mockInputs({ 'pending-filter': '10', 'pending-detect': '0' })
+    mockInputs({ 'pending-filter': '10', 'pending-classify': '0' })
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
@@ -174,8 +175,8 @@ describe('dispatch command', () => {
     expect(resetSql).toContain('BATCH_ID')
   })
 
-  it('resets detection to pending_classification on trigger failure', async () => {
-    mockInputs({ 'pending-filter': '0', 'pending-detect': '10' })
+  it('resets classify to pending_classification on trigger failure', async () => {
+    mockInputs({ 'pending-filter': '0', 'pending-classify': '10' })
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
@@ -186,7 +187,7 @@ describe('dispatch command', () => {
 
     const result = await runDispatch()
 
-    expect(result.dispatched_detect_count).toBe(0)
+    expect(result.dispatched_classify_count).toBe(0)
 
     const sqlCalls = getSqlCalls(fetchSpy)
     const resetSql = getSqlText(sqlCalls[sqlCalls.length - 1])
@@ -196,7 +197,7 @@ describe('dispatch command', () => {
   it('claims multiple batches per run', async () => {
     mockInputs({
       'pending-filter': '100',
-      'pending-detect': '0',
+      'pending-classify': '0',
       'filter-batch-size': '25',
     })
 
@@ -226,7 +227,7 @@ describe('dispatch command', () => {
   })
 
   it('stops when claim returns 0 emails', async () => {
-    mockInputs({ 'pending-filter': '50', 'pending-detect': '0' })
+    mockInputs({ 'pending-filter': '50', 'pending-classify': '0' })
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
@@ -257,7 +258,7 @@ describe('dispatch command', () => {
   })
 
   it('authenticates via proxy with x-shared-secret', async () => {
-    mockInputs({ 'pending-filter': '10', 'pending-detect': '0' })
+    mockInputs({ 'pending-filter': '10', 'pending-classify': '0' })
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
