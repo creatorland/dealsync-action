@@ -39,14 +39,13 @@ export const orchestrator = {
       (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}') AS PENDING_FILTER,
       (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING_CLASSIFICATION}') AS PENDING_CLASSIFY`,
 
-  /** Reset stale filtering back to pending, stale classifying back to pending_classification (with attempts) */
+  /** Reset stale batches back to queue status (does NOT increment attempts — processor does that) */
   expireStale: (schema, minutes = 10, maxAttempts = 3) =>
     `UPDATE ${schema}.DEAL_STATES SET
       STATUS = CASE
         WHEN STATUS = '${STATUS.FILTERING}' THEN '${STATUS.PENDING}'
         WHEN STATUS = '${STATUS.CLASSIFYING}' THEN '${STATUS.PENDING_CLASSIFICATION}'
       END,
-      ATTEMPTS = ATTEMPTS + 1,
       BATCH_ID = NULL
     WHERE STATUS IN ('${STATUS.FILTERING}', '${STATUS.CLASSIFYING}')
     AND ATTEMPTS < ${maxAttempts}
@@ -86,6 +85,16 @@ export const dispatch = {
   /** Reset claimed deal_states back to original status on trigger failure */
   resetClaimed: (schema, batchId, resetStatus) =>
     `UPDATE ${schema}.DEAL_STATES SET STATUS = '${resetStatus}', BATCH_ID = NULL WHERE BATCH_ID = '${batchId}'`,
+}
+
+// ============================================================
+// PROCESSOR QUERIES (shared across filter + classify)
+// ============================================================
+
+export const processor = {
+  /** Increment attempts for all deal_states in a batch (called at processor start) */
+  incrementAttempts: (schema, batchId) =>
+    `UPDATE ${schema}.DEAL_STATES SET ATTEMPTS = ATTEMPTS + 1 WHERE BATCH_ID = '${batchId}'`,
 }
 
 // ============================================================
