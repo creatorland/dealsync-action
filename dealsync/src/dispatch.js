@@ -1,5 +1,5 @@
 import * as core from '@actions/core'
-import { dispatch, STATUS, sanitizeSchema } from '../../shared/queries.js'
+import { dispatch, batchEvents, STATUS, sanitizeSchema } from '../../shared/queries.js'
 import { authenticate, executeSql } from './sxt-client.js'
 
 function sleep(ms) {
@@ -107,14 +107,27 @@ export async function runDispatch() {
         body: JSON.stringify({ inputs }),
       })
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+      const triggerResult = await resp.json()
+      const triggerHash = triggerResult.triggerHash || ''
 
+      // Log batch events
+      const eventValues = []
       if (filterBatch) {
+        eventValues.push(`('${triggerHash}', '${filterBatch.batchId}', 'filter', 'new', CURRENT_TIMESTAMP)`)
         dispatchedFilter++
-        console.log(`[dispatch] Filter: ${filterBatch.batchId} (${filterBatch.claimed} emails)`)
+        console.log(`[dispatch] Filter: ${filterBatch.batchId} (${filterBatch.claimed} emails) trigger=${triggerHash.substring(0, 16)}`)
       }
       if (classifyBatch) {
+        eventValues.push(`('${triggerHash}', '${classifyBatch.batchId}', 'classify', 'new', CURRENT_TIMESTAMP)`)
         dispatchedClassify++
-        console.log(`[dispatch] Classify: ${classifyBatch.batchId} (${classifyBatch.claimed} emails)`)
+        console.log(`[dispatch] Classify: ${classifyBatch.batchId} (${classifyBatch.claimed} emails) trigger=${triggerHash.substring(0, 16)}`)
+      }
+      if (eventValues.length > 0) {
+        try {
+          await executeSql(apiUrl, jwt, biscuit, batchEvents.insert(schema, eventValues.join(', ')))
+        } catch (e) {
+          console.log(`[dispatch] batch_events insert failed: ${e.message.substring(0, 80)}`)
+        }
       }
     } catch (err) {
       console.log(`[dispatch] Trigger failed: ${err.message}`)

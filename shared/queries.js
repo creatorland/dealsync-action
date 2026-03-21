@@ -248,6 +248,16 @@ export const workflowTriggers = {
 }
 
 // ============================================================
+// BATCH EVENTS (append-only audit log)
+// ============================================================
+
+export const batchEvents = {
+  /** Insert one or more batch events. Values is a pre-built VALUES string. */
+  insert: (schema, valuesStr) =>
+    `INSERT INTO ${schema}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ${valuesStr}`,
+}
+
+// ============================================================
 // UTILITIES
 // ============================================================
 

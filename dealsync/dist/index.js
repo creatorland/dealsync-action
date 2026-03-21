@@ -27881,6 +27881,16 @@ const workflowTriggers = {
 };
 
 // ============================================================
+// BATCH EVENTS (append-only audit log)
+// ============================================================
+
+const batchEvents = {
+  /** Insert one or more batch events. Values is a pre-built VALUES string. */
+  insert: (schema, valuesStr) =>
+    `INSERT INTO ${schema}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ${valuesStr}`,
+};
+
+// ============================================================
 // UTILITIES
 // ============================================================
 
@@ -28240,14 +28250,27 @@ async function runDispatch() {
         body: JSON.stringify({ inputs }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+      const triggerResult = await resp.json();
+      const triggerHash = triggerResult.triggerHash || '';
 
+      // Log batch events
+      const eventValues = [];
       if (filterBatch) {
+        eventValues.push(`('${triggerHash}', '${filterBatch.batchId}', 'filter', 'new', CURRENT_TIMESTAMP)`);
         dispatchedFilter++;
-        console.log(`[dispatch] Filter: ${filterBatch.batchId} (${filterBatch.claimed} emails)`);
+        console.log(`[dispatch] Filter: ${filterBatch.batchId} (${filterBatch.claimed} emails) trigger=${triggerHash.substring(0, 16)}`);
       }
       if (classifyBatch) {
+        eventValues.push(`('${triggerHash}', '${classifyBatch.batchId}', 'classify', 'new', CURRENT_TIMESTAMP)`);
         dispatchedClassify++;
-        console.log(`[dispatch] Classify: ${classifyBatch.batchId} (${classifyBatch.claimed} emails)`);
+        console.log(`[dispatch] Classify: ${classifyBatch.batchId} (${classifyBatch.claimed} emails) trigger=${triggerHash.substring(0, 16)}`);
+      }
+      if (eventValues.length > 0) {
+        try {
+          await executeSql(apiUrl, jwt, biscuit, batchEvents.insert(schema, eventValues.join(', ')));
+        } catch (e) {
+          console.log(`[dispatch] batch_events insert failed: ${e.message.substring(0, 80)}`);
+        }
       }
     } catch (err) {
       console.log(`[dispatch] Trigger failed: ${err.message}`);
@@ -28737,8 +28760,19 @@ async function runRetriggerStuck() {
         body: JSON.stringify({ inputs }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+      const triggerResult = await resp.json();
+      const triggerHash = triggerResult.triggerHash || '';
+
+      // Log retrigger event
+      try {
+        await executeSql(apiUrl, jwt, biscuit,
+          batchEvents.insert(schema, `('${triggerHash}', '${stuck.BATCH_ID}', '${stuck.BATCH_TYPE}', 'retrigger', CURRENT_TIMESTAMP)`));
+      } catch (e) {
+        console.log(`[retrigger] batch_events insert failed: ${e.message.substring(0, 80)}`);
+      }
+
       retriggered++;
-      console.log(`[retrigger] ${stuck.BATCH_TYPE}: ${stuck.BATCH_ID}`);
+      console.log(`[retrigger] ${stuck.BATCH_TYPE}: ${stuck.BATCH_ID} trigger=${triggerHash.substring(0, 16)}`);
     } catch (err) {
       console.log(`[retrigger] failed ${stuck.BATCH_ID}: ${err.message}`);
     }
