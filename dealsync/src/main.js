@@ -9,6 +9,9 @@ import { runFetchContent } from './fetch-content.js'
 import { runWorkflowTriggers } from './workflow-triggers.js'
 import { runFetchAndFilter } from './fetch-and-filter.js'
 import { runFetchAndClassify } from './fetch-and-classify.js'
+import { runSaveEvals } from './save-evals.js'
+import { runSaveDeals } from './save-deals.js'
+import { runUpdateDealStates } from './update-deal-states.js'
 
 const COMMANDS = {
   filter: runFilter,
@@ -22,6 +25,9 @@ const COMMANDS = {
   'workflow-triggers': runWorkflowTriggers,
   'fetch-and-filter': runFetchAndFilter,
   'fetch-and-classify': runFetchAndClassify,
+  'save-evals': runSaveEvals,
+  'save-deals': runSaveDeals,
+  'update-deal-states': runUpdateDealStates,
 }
 
 export async function run() {
