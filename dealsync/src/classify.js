@@ -200,8 +200,8 @@ export async function runClassify() {
     }
   }
 
-  if (failedThreads > 0 && emailsClassified === 0) {
-    throw new Error(`All ${failedThreads} thread(s) failed to classify`)
+  if (failedThreads > 0) {
+    throw new Error(`${failedThreads} thread(s) failed to classify (${emailsClassified} succeeded)`)
   }
 
   return {

@@ -116,9 +116,11 @@ export async function runFetchAndClassify() {
   let aiResponseRaw = null
 
   for (const model of [primaryModel, fallbackModel]) {
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         console.log(`[fetch-and-classify] calling AI: ${model} (attempt ${attempt}/3)`)
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 60000) // 60s timeout
         const resp = await fetch(aiApiUrl, {
           method: 'POST',
           headers: {
@@ -133,12 +135,14 @@ export async function runFetchAndClassify() {
             ],
             response_format: { type: 'json_object' },
           }),
+          signal: controller.signal,
         })
+        clearTimeout(timeout)
 
         if (!resp.ok) {
           const body = await resp.text()
           console.log(`[fetch-and-classify] AI ${model} attempt ${attempt} failed: HTTP ${resp.status} ${body.substring(0, 200)}`)
-          if (attempt < 3) {
+          if (attempt < 2) {
             const delay = 2000 * Math.pow(2, attempt - 1) // 2s, 4s
             await new Promise((r) => setTimeout(r, delay))
           }
@@ -153,7 +157,7 @@ export async function runFetchAndClassify() {
         }
       } catch (err) {
         console.log(`[fetch-and-classify] AI ${model} attempt ${attempt} error: ${err.message}`)
-        if (attempt < 3) {
+        if (attempt < 2) {
           await new Promise((r) => setTimeout(r, 2000 * Math.pow(2, attempt - 1)))
         }
       }
@@ -262,8 +266,8 @@ export async function runFetchAndClassify() {
     }
   }
 
-  if (failedThreads > 0 && emailsClassified === 0) {
-    throw new Error(`All ${failedThreads} thread(s) failed to classify`)
+  if (failedThreads > 0) {
+    throw new Error(`${failedThreads} thread(s) failed to classify (${emailsClassified} succeeded)`)
   }
 
   console.log(`[fetch-and-classify] done: ${dealsCreated} deals, ${emailsClassified} classified, ${failedThreads} failed`)

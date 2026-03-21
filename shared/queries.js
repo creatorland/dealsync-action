@@ -195,10 +195,10 @@ export const saveResults = {
   deleteDealContact: (schema, dealId) =>
     `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID = '${dealId}'`,
 
-  /** Insert deal contact using email directly (no contact_id FK) */
+  /** Insert deal contact — stores email in CONTACT_ID field */
   insertDealContact: (schema, { id, dealId, contactEmail }) =>
     `INSERT INTO ${schema}.DEAL_CONTACTS
-      (ID, DEAL_ID, CONTACT_EMAIL, CONTACT_TYPE, CREATED_AT, UPDATED_AT)
+      (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, CREATED_AT, UPDATED_AT)
     VALUES
       ('${id}', '${dealId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
 }
