@@ -112,47 +112,57 @@ export async function runFetchAndClassify() {
   // 4. Build AI prompt
   const { systemPrompt, userPrompt } = buildPrompt(allEmails)
 
-  // 5. Call AI (primary + fallback)
+  // 5. Call AI with retry (primary + fallback, 3 attempts each with backoff)
   let aiResponseRaw = null
 
   for (const model of [primaryModel, fallbackModel]) {
-    try {
-      console.log(`[fetch-and-classify] calling AI: ${model}`)
-      const resp = await fetch(aiApiUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${hyperbolicKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          response_format: { type: 'json_object' },
-        }),
-      })
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`[fetch-and-classify] calling AI: ${model} (attempt ${attempt}/3)`)
+        const resp = await fetch(aiApiUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${hyperbolicKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            response_format: { type: 'json_object' },
+          }),
+        })
 
-      if (!resp.ok) {
-        const body = await resp.text()
-        console.log(`[fetch-and-classify] AI ${model} failed: HTTP ${resp.status} ${body.substring(0, 200)}`)
-        continue
-      }
+        if (!resp.ok) {
+          const body = await resp.text()
+          console.log(`[fetch-and-classify] AI ${model} attempt ${attempt} failed: HTTP ${resp.status} ${body.substring(0, 200)}`)
+          if (attempt < 3) {
+            const delay = 2000 * Math.pow(2, attempt - 1) // 2s, 4s
+            await new Promise((r) => setTimeout(r, delay))
+          }
+          continue
+        }
 
-      const result = await resp.json()
-      aiResponseRaw = result.choices?.[0]?.message?.content
-      if (aiResponseRaw) {
-        console.log(`[fetch-and-classify] AI ${model} responded (${aiResponseRaw.length} chars)`)
-        break
+        const result = await resp.json()
+        aiResponseRaw = result.choices?.[0]?.message?.content
+        if (aiResponseRaw) {
+          console.log(`[fetch-and-classify] AI ${model} responded (${aiResponseRaw.length} chars)`)
+          break
+        }
+      } catch (err) {
+        console.log(`[fetch-and-classify] AI ${model} attempt ${attempt} error: ${err.message}`)
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 2000 * Math.pow(2, attempt - 1)))
+        }
       }
-    } catch (err) {
-      console.log(`[fetch-and-classify] AI ${model} error: ${err.message}`)
     }
+    if (aiResponseRaw) break // got response, skip fallback
   }
 
   if (!aiResponseRaw) {
-    throw new Error('Both AI models failed to respond')
+    throw new Error('All AI models failed after retries')
   }
 
   // 6. Parse AI response (strip markdown fences)

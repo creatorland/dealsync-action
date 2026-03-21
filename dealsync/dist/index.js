@@ -28108,13 +28108,50 @@ function generateBatchId() {
 }
 
 /**
- * Dispatch command — claim-then-verify pattern.
+ * Try to claim a filter batch. Returns { batchId, claimed } or null.
+ */
+async function claimFilter(apiUrl, jwt, biscuit, schema, batchSize, maxInFlight) {
+  const batchId = generateBatchId();
+  await executeSql(apiUrl, jwt, biscuit, dispatch.claimFilterBatch(schema, batchId, batchSize));
+  const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, batchId));
+  const claimed = rows[0]?.CNT ?? 0;
+  if (claimed === 0) return null
+
+  // Verify in-flight limit
+  const inflight = await executeSql(apiUrl, jwt, biscuit, dispatch.countInFlight(schema, STATUS.FILTERING));
+  if ((inflight[0]?.CNT ?? 0) > maxInFlight) {
+    await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING));
+    return null
+  }
+
+  return { batchId, claimed }
+}
+
+/**
+ * Try to claim a classify batch. Returns { batchId, claimed } or null.
+ */
+async function claimClassify(apiUrl, jwt, biscuit, schema, batchSize, maxInFlight) {
+  const batchId = generateBatchId();
+  await executeSql(apiUrl, jwt, biscuit, dispatch.claimClassifyBatch(schema, batchId, batchSize));
+  const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, batchId));
+  const claimed = rows[0]?.CNT ?? 0;
+  if (claimed === 0) return null
+
+  const inflight = await executeSql(apiUrl, jwt, biscuit, dispatch.countInFlight(schema, STATUS.CLASSIFYING));
+  if ((inflight[0]?.CNT ?? 0) > maxInFlight) {
+    await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING_CLASSIFICATION));
+    return null
+  }
+
+  return { batchId, claimed }
+}
+
+/**
+ * Dispatch command — pairs filter + classify batches in a single processor trigger.
  *
- * No separate concurrency check step needed. The dispatch:
- * 1. Claims a batch (atomic UPDATE with unique batch_id)
- * 2. Counts total in-flight to verify we're under the limit
- * 3. If over limit, releases the batch
- * 4. If under limit, triggers the processor
+ * Each trigger can carry both a filter_batch_id and a classify_batch_id.
+ * The processor runs both jobs in parallel if both are provided.
+ * Falls back to single-job triggers when only one type of work is available.
  */
 async function runDispatch() {
   const authUrl = coreExports.getInput('auth-url');
@@ -28127,97 +28164,67 @@ async function runDispatch() {
 
   const maxFilter = parseNonNegativeInt(coreExports.getInput('max-filter') || '30000', 'max-filter');
   const maxClassify = parseNonNegativeInt(coreExports.getInput('max-classify') || '750', 'max-classify');
-  const filterBatchSize = parseNonNegativeInt(
-    coreExports.getInput('filter-batch-size') || '200',
-    'filter-batch-size',
-  );
-  const classifyBatchSize = parseNonNegativeInt(
-    coreExports.getInput('classify-batch-size') || '5',
-    'classify-batch-size',
-  );
+  const filterBatchSize = parseNonNegativeInt(coreExports.getInput('filter-batch-size') || '200', 'filter-batch-size');
+  const classifyBatchSize = parseNonNegativeInt(coreExports.getInput('classify-batch-size') || '5', 'classify-batch-size');
 
   console.log('[dispatch] Authenticating...');
   const jwt = await authenticate(authUrl, authSecret);
 
   let dispatchedFilter = 0;
   let dispatchedClassify = 0;
+  let filterExhausted = false;
+  let classifyExhausted = false;
 
-  // Dispatch filter batches: claim → verify → trigger
-  while (true) {
-    const batchId = generateBatchId();
+  while (!filterExhausted || !classifyExhausted) {
+    // Try to claim both types
+    let filterBatch = null;
+    let classifyBatch = null;
 
-    // 1. Claim batch
-    await executeSql(apiUrl, jwt, biscuit, dispatch.claimFilterBatch(schema, batchId, filterBatchSize));
-    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, batchId));
-    const claimed = rows[0]?.CNT ?? 0;
-
-    if (claimed === 0) break // nothing left to claim
-
-    // 2. Verify: count total in-flight, release if over limit
-    const inflight = await executeSql(apiUrl, jwt, biscuit, dispatch.countInFlight(schema, STATUS.FILTERING));
-    const totalInFlight = inflight[0]?.CNT ?? 0;
-
-    if (totalInFlight > maxFilter) {
-      console.log(`[dispatch] Over filter limit (${totalInFlight}/${maxFilter}), releasing batch ${batchId}`);
-      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING));
-      break
+    if (!filterExhausted) {
+      filterBatch = await claimFilter(apiUrl, jwt, biscuit, schema, filterBatchSize, maxFilter);
+      if (!filterBatch) filterExhausted = true;
     }
 
-    // 3. Trigger processor
+    if (!classifyExhausted) {
+      classifyBatch = await claimClassify(apiUrl, jwt, biscuit, schema, classifyBatchSize, maxClassify);
+      if (!classifyBatch) classifyExhausted = true;
+    }
+
+    // Nothing to dispatch
+    if (!filterBatch && !classifyBatch) break
+
+    // Build trigger inputs
+    const inputs = {};
+    if (filterBatch) inputs.filter_batch_id = filterBatch.batchId;
+    if (classifyBatch) inputs.classify_batch_id = classifyBatch.batchId;
+
+    // Trigger processor
     try {
       const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
       const resp = await fetch(triggerUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputs: { batch_type: 'filter', batch_id: batchId } }),
+        body: JSON.stringify({ inputs }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      dispatchedFilter++;
-      console.log(`[dispatch] Filter batch dispatched: ${batchId} (${claimed} emails, ${totalInFlight} total in-flight)`);
+
+      if (filterBatch) {
+        dispatchedFilter++;
+        console.log(`[dispatch] Filter: ${filterBatch.batchId} (${filterBatch.claimed} emails)`);
+      }
+      if (classifyBatch) {
+        dispatchedClassify++;
+        console.log(`[dispatch] Classify: ${classifyBatch.batchId} (${classifyBatch.claimed} emails)`);
+      }
     } catch (err) {
-      console.log(`[dispatch] Filter trigger failed for ${batchId}: ${err.message}`);
-      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING));
-      break
-    }
-
-    await sleep(100);
-  }
-
-  // Dispatch classify batches: claim → verify → trigger
-  while (true) {
-    const batchId = generateBatchId();
-
-    // 1. Claim batch (by thread)
-    await executeSql(apiUrl, jwt, biscuit, dispatch.claimClassifyBatch(schema, batchId, classifyBatchSize));
-    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, batchId));
-    const claimed = rows[0]?.CNT ?? 0;
-
-    if (claimed === 0) break
-
-    // 2. Verify limit
-    const inflight = await executeSql(apiUrl, jwt, biscuit, dispatch.countInFlight(schema, STATUS.CLASSIFYING));
-    const totalInFlight = inflight[0]?.CNT ?? 0;
-
-    if (totalInFlight > maxClassify) {
-      console.log(`[dispatch] Over classify limit (${totalInFlight}/${maxClassify}), releasing batch ${batchId}`);
-      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING_CLASSIFICATION));
-      break
-    }
-
-    // 3. Trigger processor
-    try {
-      const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
-      const resp = await fetch(triggerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputs: { batch_type: 'classify', batch_id: batchId } }),
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      dispatchedClassify++;
-      console.log(`[dispatch] Classify batch dispatched: ${batchId} (${claimed} emails, ${totalInFlight} total in-flight)`);
-    } catch (err) {
-      console.log(`[dispatch] Classify trigger failed for ${batchId}: ${err.message}`);
-      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING_CLASSIFICATION));
+      console.log(`[dispatch] Trigger failed: ${err.message}`);
+      // Reset both batches on trigger failure
+      if (filterBatch) {
+        await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, filterBatch.batchId, STATUS.PENDING));
+      }
+      if (classifyBatch) {
+        await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, classifyBatch.batchId, STATUS.PENDING_CLASSIFICATION));
+      }
       break
     }
 
@@ -28755,47 +28762,57 @@ async function runFetchAndClassify() {
   // 4. Build AI prompt
   const { systemPrompt, userPrompt } = buildPrompt(allEmails);
 
-  // 5. Call AI (primary + fallback)
+  // 5. Call AI with retry (primary + fallback, 3 attempts each with backoff)
   let aiResponseRaw = null;
 
   for (const model of [primaryModel, fallbackModel]) {
-    try {
-      console.log(`[fetch-and-classify] calling AI: ${model}`);
-      const resp = await fetch(aiApiUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${hyperbolicKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-          ],
-          response_format: { type: 'json_object' },
-        }),
-      });
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        console.log(`[fetch-and-classify] calling AI: ${model} (attempt ${attempt}/3)`);
+        const resp = await fetch(aiApiUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${hyperbolicKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            response_format: { type: 'json_object' },
+          }),
+        });
 
-      if (!resp.ok) {
-        const body = await resp.text();
-        console.log(`[fetch-and-classify] AI ${model} failed: HTTP ${resp.status} ${body.substring(0, 200)}`);
-        continue
-      }
+        if (!resp.ok) {
+          const body = await resp.text();
+          console.log(`[fetch-and-classify] AI ${model} attempt ${attempt} failed: HTTP ${resp.status} ${body.substring(0, 200)}`);
+          if (attempt < 3) {
+            const delay = 2000 * Math.pow(2, attempt - 1); // 2s, 4s
+            await new Promise((r) => setTimeout(r, delay));
+          }
+          continue
+        }
 
-      const result = await resp.json();
-      aiResponseRaw = result.choices?.[0]?.message?.content;
-      if (aiResponseRaw) {
-        console.log(`[fetch-and-classify] AI ${model} responded (${aiResponseRaw.length} chars)`);
-        break
+        const result = await resp.json();
+        aiResponseRaw = result.choices?.[0]?.message?.content;
+        if (aiResponseRaw) {
+          console.log(`[fetch-and-classify] AI ${model} responded (${aiResponseRaw.length} chars)`);
+          break
+        }
+      } catch (err) {
+        console.log(`[fetch-and-classify] AI ${model} attempt ${attempt} error: ${err.message}`);
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 2000 * Math.pow(2, attempt - 1)));
+        }
       }
-    } catch (err) {
-      console.log(`[fetch-and-classify] AI ${model} error: ${err.message}`);
     }
+    if (aiResponseRaw) break // got response, skip fallback
   }
 
   if (!aiResponseRaw) {
-    throw new Error('Both AI models failed to respond')
+    throw new Error('All AI models failed after retries')
   }
 
   // 6. Parse AI response (strip markdown fences)
