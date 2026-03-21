@@ -6,7 +6,7 @@ import {
   sanitizeString,
   sanitizeSchema,
 } from '../../shared/queries.js'
-import { authenticate, executeSql } from './sxt-client.js'
+import { authenticate, executeSql, withTimeout } from './sxt-client.js'
 
 /**
  * Step 1: Fetch content + call AI + save audit checkpoint.
@@ -65,16 +65,19 @@ export async function runFetchAndClassify() {
   const syncStateId = metadataRows[0].SYNC_STATE_ID
   const messageIds = metadataRows.map((r) => r.MESSAGE_ID)
 
-  const MAX_PER_BATCH = 50
+  const MAX_PER_CHUNK = 10
   const allEmails = []
-  for (let i = 0; i < messageIds.length; i += MAX_PER_BATCH) {
-    const chunk = messageIds.slice(i, i + MAX_PER_BATCH)
+  for (let i = 0; i < messageIds.length; i += MAX_PER_CHUNK) {
+    const chunk = messageIds.slice(i, i + MAX_PER_CHUNK)
     try {
+      const { signal, clear } = withTimeout()
       const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId, syncStateId, messageIds: chunk }),
+        signal,
       })
+      clear()
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
       const result = await resp.json()
       const emails = result.data || result
