@@ -147,9 +147,9 @@ export const saveResults = {
     { id, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation },
   ) =>
     `INSERT INTO ${schema}.AI_EVALUATION_AUDITS
-      (ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT, UPDATED_AT)
+      (ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT)
     VALUES
-      ('${id}', ${threadCount}, ${emailCount}, ${cost}, ${inputTokens}, ${outputTokens}, '${model}', '${evaluation}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      ('${id}', ${threadCount}, ${emailCount}, ${cost}, ${inputTokens}, ${outputTokens}, '${model}', '${evaluation}', CURRENT_TIMESTAMP)`,
 
   deleteThreadEvaluation: (schema, threadId) =>
     `DELETE FROM ${schema}.EMAIL_THREAD_EVALUATIONS WHERE THREAD_ID = '${threadId}'`,
