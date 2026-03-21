@@ -65,6 +65,7 @@ export async function runClassify() {
 
   let dealsCreated = 0
   let emailsClassified = 0
+  let failedThreads = 0
   const dealIdList = []
   const notDealIdList = []
 
@@ -205,13 +206,19 @@ export async function runClassify() {
         emailsClassified += threadEmails.length
       }
     } catch (err) {
+      failedThreads++
       core.error(`Failed to process thread ${thread.thread_id}: ${err.message}`)
     }
+  }
+
+  if (failedThreads > 0 && emailsClassified === 0) {
+    throw new Error(`All ${failedThreads} thread(s) failed to classify`)
   }
 
   return {
     deals_created: dealsCreated,
     emails_classified: emailsClassified,
+    failed_threads: failedThreads,
     deal_ids: dealIdList.length > 0 ? toSqlIdList(dealIdList) : '',
     not_deal_ids: notDealIdList.length > 0 ? toSqlIdList(notDealIdList) : '',
   }
