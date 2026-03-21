@@ -27787,11 +27787,11 @@ const detection = {
 
   /** Move deal deal_states to deal status */
   updateDeals: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.DEAL}', BATCH_ID = NULL WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.DEAL}' WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 
   /** Move non-deal deal_states to not_deal status */
   updateNotDeal: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.NOT_DEAL}', BATCH_ID = NULL WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.NOT_DEAL}' WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 };
 
 // ============================================================

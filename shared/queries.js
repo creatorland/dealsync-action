@@ -116,11 +116,11 @@ export const filter = {
 
   /** Move filtered deal_states to pending_classification */
   updateFiltered: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.PENDING_CLASSIFICATION}', BATCH_ID = NULL, ATTEMPTS = 0 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.PENDING_CLASSIFICATION}', ATTEMPTS = 0 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 
   /** Move rejected deal_states to filter_rejected */
   updateRejected: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTER_REJECTED}', BATCH_ID = NULL WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTER_REJECTED}' WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 }
 
 // ============================================================
@@ -144,11 +144,11 @@ export const detection = {
 
   /** Move deal deal_states to deal status */
   updateDeals: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.DEAL}', BATCH_ID = NULL WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.DEAL}' WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 
   /** Move non-deal deal_states to not_deal status */
   updateNotDeal: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.NOT_DEAL}', BATCH_ID = NULL WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.NOT_DEAL}' WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 }
 
 // ============================================================
