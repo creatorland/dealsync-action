@@ -83,6 +83,10 @@ export const dispatch = {
   countClaimed: (schema, batchId) =>
     `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
 
+  /** Count total in-flight deal_states at a given status */
+  countInFlight: (schema, status) =>
+    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE STATUS = '${status}'`,
+
   /** Reset claimed deal_states back to original status on trigger failure */
   resetClaimed: (schema, batchId, resetStatus) =>
     `UPDATE ${schema}.DEAL_STATES SET STATUS = '${resetStatus}', BATCH_ID = NULL WHERE BATCH_ID = '${batchId}'`,

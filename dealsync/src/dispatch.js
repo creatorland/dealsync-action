@@ -13,18 +13,24 @@ function parseNonNegativeInt(value, name) {
 }
 
 function generateBatchId() {
-  // UUIDv7: timestamp-based, sortable
   const now = Date.now()
   const hex = (n, len) => n.toString(16).padStart(len, '0')
   const rand = () => Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0')
   const ts = hex(now, 12)
-  // version 7 (4 bits) + 12 random bits
   const ver = '7' + rand().slice(1)
-  // variant 10 (2 bits) + 14 random bits
   const variant = (0x8 | (Math.random() * 4) | 0).toString(16) + rand().slice(1)
   return `${ts.slice(0, 8)}-${ts.slice(8, 12)}-${ver}-${variant}-${rand()}${rand()}${rand()}`
 }
 
+/**
+ * Dispatch command — claim-then-verify pattern.
+ *
+ * No separate concurrency check step needed. The dispatch:
+ * 1. Claims a batch (atomic UPDATE with unique batch_id)
+ * 2. Counts total in-flight to verify we're under the limit
+ * 3. If over limit, releases the batch
+ * 4. If under limit, triggers the processor
+ */
 export async function runDispatch() {
   const authUrl = core.getInput('auth-url')
   const authSecret = core.getInput('auth-secret')
@@ -34,10 +40,6 @@ export async function runDispatch() {
   const w3RpcUrl = core.getInput('w3-rpc-url')
   const processorName = core.getInput('processor-name') || 'Dealsync Processor'
 
-  const activeFilter = parseNonNegativeInt(core.getInput('active-filter'), 'active-filter')
-  const activeClassify = parseNonNegativeInt(core.getInput('active-classify'), 'active-classify')
-  const pendingFilter = parseNonNegativeInt(core.getInput('pending-filter'), 'pending-filter')
-  const pendingClassify = parseNonNegativeInt(core.getInput('pending-classify'), 'pending-classify')
   const maxFilter = parseNonNegativeInt(core.getInput('max-filter') || '30000', 'max-filter')
   const maxClassify = parseNonNegativeInt(core.getInput('max-classify') || '750', 'max-classify')
   const filterBatchSize = parseNonNegativeInt(
@@ -49,108 +51,94 @@ export async function runDispatch() {
     'classify-batch-size',
   )
 
-  if (pendingFilter === 0 && pendingClassify === 0) {
-    core.info('No pending emails to dispatch')
-    return { dispatched_filter_count: 0, dispatched_classify_count: 0 }
-  }
-
-  core.info('Authenticating...')
+  console.log('[dispatch] Authenticating...')
   const jwt = await authenticate(authUrl, authSecret)
 
-  let filterSlots = maxFilter - activeFilter
-  let classifySlots = maxClassify - activeClassify
   let dispatchedFilter = 0
   let dispatchedClassify = 0
 
-  // Dispatch filter batches: claim first, then trigger
-  while (filterSlots > 0 && pendingFilter > 0) {
-    const batchId = generateBatchId()
-
-    // 1. Claim batch with generated batch ID
-    await executeSql(
-      apiUrl,
-      jwt,
-      biscuit,
-      dispatch.claimFilterBatch(schema, batchId, filterBatchSize),
-    )
-
-    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, batchId))
-    const claimed = rows[0]?.CNT ?? 0
-
-    if (claimed === 0) break
-
-    // 2. Trigger processor with batch ID so it knows which rows to process
-    try {
-      const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`
-      const resp = await fetch(triggerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          inputs: { batch_type: 'filter', batch_id: batchId },
-        }),
-      })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      dispatchedFilter++
-      core.info(`Filter batch: batchId=${batchId}, claimed=${claimed}`)
-    } catch (err) {
-      core.error(`Filter trigger failed for ${batchId}: ${err.message}`)
-      await executeSql(
-        apiUrl,
-        jwt,
-        biscuit,
-        dispatch.resetClaimed(schema, batchId, STATUS.PENDING),
-      )
-      break
-    }
-
-    filterSlots -= claimed
-    await sleep(100)
-  }
-
-  // Dispatch classify batches: claim first, then trigger
-  while (classifySlots > 0 && pendingClassify > 0) {
+  // Dispatch filter batches: claim → verify → trigger
+  while (true) {
     const batchId = generateBatchId()
 
     // 1. Claim batch
-    await executeSql(
-      apiUrl,
-      jwt,
-      biscuit,
-      dispatch.claimClassifyBatch(schema, batchId, classifyBatchSize),
-    )
-
+    await executeSql(apiUrl, jwt, biscuit, dispatch.claimFilterBatch(schema, batchId, filterBatchSize))
     const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, batchId))
     const claimed = rows[0]?.CNT ?? 0
 
-    if (claimed === 0) break
+    if (claimed === 0) break // nothing left to claim
 
-    // 2. Trigger processor
+    // 2. Verify: count total in-flight, release if over limit
+    const inflight = await executeSql(apiUrl, jwt, biscuit, dispatch.countInFlight(schema, STATUS.FILTERING))
+    const totalInFlight = inflight[0]?.CNT ?? 0
+
+    if (totalInFlight > maxFilter) {
+      console.log(`[dispatch] Over filter limit (${totalInFlight}/${maxFilter}), releasing batch ${batchId}`)
+      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING))
+      break
+    }
+
+    // 3. Trigger processor
     try {
       const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`
       const resp = await fetch(triggerUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          inputs: { batch_type: 'classify', batch_id: batchId },
-        }),
+        body: JSON.stringify({ inputs: { batch_type: 'filter', batch_id: batchId } }),
       })
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      dispatchedClassify++
-      core.info(`Classify batch: batchId=${batchId}, claimed=${claimed}`)
+      dispatchedFilter++
+      console.log(`[dispatch] Filter batch dispatched: ${batchId} (${claimed} emails, ${totalInFlight} total in-flight)`)
     } catch (err) {
-      core.error(`Classify trigger failed for ${batchId}: ${err.message}`)
-      await executeSql(
-        apiUrl,
-        jwt,
-        biscuit,
-        dispatch.resetClaimed(schema, batchId, STATUS.PENDING_CLASSIFICATION),
-      )
+      console.log(`[dispatch] Filter trigger failed for ${batchId}: ${err.message}`)
+      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING))
       break
     }
 
-    classifySlots -= claimed
     await sleep(100)
   }
 
+  // Dispatch classify batches: claim → verify → trigger
+  while (true) {
+    const batchId = generateBatchId()
+
+    // 1. Claim batch (by thread)
+    await executeSql(apiUrl, jwt, biscuit, dispatch.claimClassifyBatch(schema, batchId, classifyBatchSize))
+    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, batchId))
+    const claimed = rows[0]?.CNT ?? 0
+
+    if (claimed === 0) break
+
+    // 2. Verify limit
+    const inflight = await executeSql(apiUrl, jwt, biscuit, dispatch.countInFlight(schema, STATUS.CLASSIFYING))
+    const totalInFlight = inflight[0]?.CNT ?? 0
+
+    if (totalInFlight > maxClassify) {
+      console.log(`[dispatch] Over classify limit (${totalInFlight}/${maxClassify}), releasing batch ${batchId}`)
+      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING_CLASSIFICATION))
+      break
+    }
+
+    // 3. Trigger processor
+    try {
+      const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`
+      const resp = await fetch(triggerUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inputs: { batch_type: 'classify', batch_id: batchId } }),
+      })
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+      dispatchedClassify++
+      console.log(`[dispatch] Classify batch dispatched: ${batchId} (${claimed} emails, ${totalInFlight} total in-flight)`)
+    } catch (err) {
+      console.log(`[dispatch] Classify trigger failed for ${batchId}: ${err.message}`)
+      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING_CLASSIFICATION))
+      break
+    }
+
+    await sleep(100)
+  }
+
+  console.log(`[dispatch] Done: ${dispatchedFilter} filter, ${dispatchedClassify} classify`)
   return { dispatched_filter_count: dispatchedFilter, dispatched_classify_count: dispatchedClassify }
 }

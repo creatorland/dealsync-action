@@ -26,14 +26,6 @@ inputs:
   processor-name:
     description: 'Processor workflow name to trigger (dispatch)'
     default: 'Dealsync Processor'
-  active-filter:
-    description: 'Current active filter count (dispatch)'
-  active-classify:
-    description: 'Current active detect count (dispatch)'
-  pending-filter:
-    description: 'Pending filter count (dispatch)'
-  pending-classify:
-    description: 'Pending detect count (dispatch)'
   max-filter:
     description: 'Max emails in filtering status at once (dispatch)'
     default: '30000'
