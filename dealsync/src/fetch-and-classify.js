@@ -126,7 +126,8 @@ export async function runFetchAndClassify() {
         clearTimeout(timeout)
 
         if (!resp.ok) {
-          console.log(`[classify] AI ${model} attempt ${attempt}: HTTP ${resp.status}`)
+          const errBody = await resp.text().catch(() => '')
+          console.log(`[classify] AI ${model} attempt ${attempt}: HTTP ${resp.status} ${errBody.substring(0, 200)}`)
           if (attempt < 2) await new Promise((r) => setTimeout(r, 3000))
           continue
         }
