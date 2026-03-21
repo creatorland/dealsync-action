@@ -1,4 +1,3 @@
-import * as crypto from 'crypto'
 import * as core from '@actions/core'
 import { dispatch, STATUS, sanitizeSchema } from '../../shared/queries.js'
 import { authenticate, executeSql } from './sxt-client.js'
@@ -16,23 +15,14 @@ function parseNonNegativeInt(value, name) {
 function generateBatchId() {
   // UUIDv7: timestamp-based, sortable
   const now = Date.now()
-  const bytes = new Uint8Array(16)
-  // Timestamp (48 bits)
-  bytes[0] = (now / 2 ** 40) & 0xff
-  bytes[1] = (now / 2 ** 32) & 0xff
-  bytes[2] = (now / 2 ** 24) & 0xff
-  bytes[3] = (now / 2 ** 16) & 0xff
-  bytes[4] = (now / 2 ** 8) & 0xff
-  bytes[5] = now & 0xff
-  // Version 7 + random
-  const rand = crypto.randomBytes(10)
-  bytes[6] = 0x70 | (rand[0] & 0x0f)
-  bytes[7] = rand[1]
-  bytes[8] = 0x80 | (rand[2] & 0x3f)
-  for (let i = 9; i < 16; i++) bytes[i] = rand[i - 6]
-  // Format as UUID
-  const hex = Buffer.from(bytes).toString('hex')
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  const hex = (n, len) => n.toString(16).padStart(len, '0')
+  const rand = () => Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0')
+  const ts = hex(now, 12)
+  // version 7 (4 bits) + 12 random bits
+  const ver = '7' + rand().slice(1)
+  // variant 10 (2 bits) + 14 random bits
+  const variant = (0x8 | (Math.random() * 4) | 0).toString(16) + rand().slice(1)
+  return `${ts.slice(0, 8)}-${ts.slice(8, 12)}-${ver}-${variant}-${rand()}${rand()}${rand()}`
 }
 
 export async function runDispatch() {
