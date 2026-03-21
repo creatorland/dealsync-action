@@ -147,13 +147,23 @@ export async function runFetchAndClassify() {
 
   const auditId = crypto.randomUUID()
   const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400))
-  await executeSql(apiUrl, jwt, biscuit,
-    saveResults.insertAudit(schema, {
-      id: auditId, batchId, threadCount: (aiOutput.threads || []).length,
-      emailCount: metadataRows.length, cost: 0, inputTokens: 0,
-      outputTokens: 0, model: primaryModel, evaluation,
-    }))
+  try {
+    await executeSql(apiUrl, jwt, biscuit,
+      saveResults.insertAudit(schema, {
+        id: auditId, batchId, threadCount: (aiOutput.threads || []).length,
+        emailCount: metadataRows.length, cost: 0, inputTokens: 0,
+        outputTokens: 0, model: primaryModel, evaluation,
+      }))
+    console.log(`[classify] audit saved: ${auditId}`)
+  } catch (err) {
+    // Unique constraint on batch_id — another run already saved the audit
+    if (err.message.includes('integrity constraint') || err.message.includes('unique') || err.message.includes('duplicate')) {
+      console.log(`[classify] audit already exists for batch (concurrent run), continuing`)
+    } else {
+      throw err
+    }
+  }
 
-  console.log(`[classify] audit saved: ${auditId}, ${(aiOutput.threads || []).length} threads`)
+  console.log(`[classify] ${(aiOutput.threads || []).length} threads ready for processing`)
   return { skipped: false, thread_count: (aiOutput.threads || []).length }
 }
