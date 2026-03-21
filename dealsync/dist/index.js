@@ -28271,8 +28271,10 @@ async function runSxtQuery() {
 
   if (schema) sanitizeSchema(schema);
 
+  coreExports.info(`sxt-query: schema=${schema || '(none)'}, sql=${sql.substring(0, 100)}...`);
   const jwt = await authenticate(authUrl, authSecret);
   const result = await executeSql(apiUrl, jwt, biscuit, sql);
+  coreExports.info(`sxt-query: returned ${Array.isArray(result) ? result.length : 0} rows`);
 
   return { result }
 }
@@ -28482,6 +28484,8 @@ async function run() {
     coreExports.setOutput('result', JSON.stringify(result));
   } catch (error) {
     coreExports.setOutput('success', 'false');
+    coreExports.setOutput('error', error.message);
+    coreExports.setOutput('error_stack', error.stack || '');
     coreExports.setFailed(error.message);
   }
 }

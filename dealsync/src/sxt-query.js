@@ -16,8 +16,10 @@ export async function runSxtQuery() {
 
   if (schema) sanitizeSchema(schema)
 
+  core.info(`sxt-query: schema=${schema || '(none)'}, sql=${sql.substring(0, 100)}...`)
   const jwt = await authenticate(authUrl, authSecret)
   const result = await executeSql(apiUrl, jwt, biscuit, sql)
+  core.info(`sxt-query: returned ${Array.isArray(result) ? result.length : 0} rows`)
 
   return { result }
 }

@@ -35,6 +35,8 @@ export async function run() {
     core.setOutput('result', JSON.stringify(result))
   } catch (error) {
     core.setOutput('success', 'false')
+    core.setOutput('error', error.message)
+    core.setOutput('error_stack', error.stack || '')
     core.setFailed(error.message)
   }
 }
