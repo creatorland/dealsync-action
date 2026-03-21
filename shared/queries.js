@@ -5,28 +5,51 @@
  * All column names UPPERCASE (SxT convention).
  * Schema is passed as a parameter — never hardcoded.
  * IDs must be sanitized before interpolation.
+ *
+ * Status-based state machine:
+ *   pending → filtering → pending_classification → classifying → deal | not_deal
+ *   filtering → filter_rejected (terminal)
+ *   filtering/classifying → retry via attempts increment
  */
+
+// ============================================================
+// STATUS CONSTANTS
+// ============================================================
+
+export const STATUS = {
+  PENDING: 'pending',
+  FILTERING: 'filtering',
+  PENDING_CLASSIFICATION: 'pending_classification',
+  CLASSIFYING: 'classifying',
+  DEAL: 'deal',
+  NOT_DEAL: 'not_deal',
+  FILTER_REJECTED: 'filter_rejected',
+}
 
 // ============================================================
 // ORCHESTRATOR QUERIES
 // ============================================================
 
 export const orchestrator = {
-  /** Count deal_states at each stage for concurrency and pending checks */
+  /** Count deal_states at each status for concurrency and pending checks */
   checkConcurrency: (schema) =>
     `SELECT
-      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STAGE BETWEEN 1001 AND 10000) AS ACTIVE_FILTER,
-      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STAGE BETWEEN 11001 AND 60000) AS ACTIVE_DETECT,
-      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STAGE = 2) AS PENDING_FILTER,
-      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STAGE = 3) AS PENDING_DETECT`,
+      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.FILTERING}') AS ACTIVE_FILTER,
+      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.CLASSIFYING}') AS ACTIVE_DETECT,
+      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}') AS PENDING_FILTER,
+      (SELECT COUNT(*) FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING_CLASSIFICATION}') AS PENDING_DETECT`,
 
-  /** Reset stale filter transitions back to stage 2, stale detect back to stage 3 */
-  expireStale: (schema, minutes = 10) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = CASE
-      WHEN STAGE BETWEEN 1001 AND 10000 THEN 2
-      WHEN STAGE BETWEEN 11001 AND 60000 THEN 3
-    END
-    WHERE (STAGE BETWEEN 1001 AND 10000 OR STAGE BETWEEN 11001 AND 60000)
+  /** Reset stale filtering back to pending, stale classifying back to pending_classification (with attempts) */
+  expireStale: (schema, minutes = 10, maxAttempts = 3) =>
+    `UPDATE ${schema}.DEAL_STATES SET
+      STATUS = CASE
+        WHEN STATUS = '${STATUS.FILTERING}' AND ATTEMPTS < ${maxAttempts} THEN '${STATUS.PENDING}'
+        WHEN STATUS = '${STATUS.CLASSIFYING}' AND ATTEMPTS < ${maxAttempts} THEN '${STATUS.PENDING_CLASSIFICATION}'
+        ELSE STATUS
+      END,
+      ATTEMPTS = ATTEMPTS + 1,
+      ACTIVE_TRIGGER_HASH = NULL
+    WHERE STATUS IN ('${STATUS.FILTERING}', '${STATUS.CLASSIFYING}')
     AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${minutes}' MINUTE`,
 }
 
@@ -35,35 +58,35 @@ export const orchestrator = {
 // ============================================================
 
 export const dispatch = {
-  /** Atomically claim stage-2 deal_states into a filter transition stage */
-  claimFilterBatch: (schema, transitionStage, batchSize) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = ${transitionStage}
+  /** Atomically claim pending deal_states into filtering with a trigger hash */
+  claimFilterBatch: (schema, triggerHash, batchSize) =>
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTERING}', ACTIVE_TRIGGER_HASH = '${triggerHash}'
     WHERE EMAIL_METADATA_ID IN (
-      SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STAGE = 2 LIMIT ${batchSize}
+      SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}' LIMIT ${batchSize}
     )`,
 
-  /** Atomically claim stage-3 deal_states into a detect transition stage (with thread-completeness check) */
-  claimDetectBatch: (schema, transitionStage, batchSize) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = ${transitionStage}
+  /** Atomically claim pending_classification deal_states into classifying (with thread-completeness check) */
+  claimDetectBatch: (schema, triggerHash, batchSize) =>
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.CLASSIFYING}', ACTIVE_TRIGGER_HASH = '${triggerHash}'
     WHERE EMAIL_METADATA_ID IN (
       SELECT ds.EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES ds
-      WHERE ds.STAGE = 3
+      WHERE ds.STATUS = '${STATUS.PENDING_CLASSIFICATION}'
         AND NOT EXISTS (
           SELECT 1 FROM ${schema}.DEAL_STATES ds2
           WHERE ds2.THREAD_ID = ds.THREAD_ID
             AND ds2.USER_ID = ds.USER_ID
-            AND ds2.STAGE IN (1, 2)
+            AND ds2.STATUS IN ('${STATUS.PENDING}', '${STATUS.FILTERING}')
         )
       LIMIT ${batchSize}
     )`,
 
-  /** Count deal_states at a transition stage (verify claim) */
-  countAtStage: (schema, stage) =>
-    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE STAGE = ${stage}`,
+  /** Count deal_states claimed by a trigger hash (verify claim) */
+  countClaimed: (schema, triggerHash) =>
+    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE ACTIVE_TRIGGER_HASH = '${triggerHash}'`,
 
-  /** Reset claimed deal_states back to original stage on trigger failure */
-  resetClaimedEmails: (schema, transitionStage, resetStage) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = ${resetStage} WHERE STAGE = ${transitionStage}`,
+  /** Reset claimed deal_states back to original status on trigger failure */
+  resetClaimed: (schema, triggerHash, resetStatus) =>
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${resetStatus}', ACTIVE_TRIGGER_HASH = NULL WHERE ACTIVE_TRIGGER_HASH = '${triggerHash}'`,
 }
 
 // ============================================================
@@ -71,23 +94,19 @@ export const dispatch = {
 // ============================================================
 
 export const filter = {
-  /** Fetch deal_states at a transition stage for filtering */
-  fetchMetadata: (schema, transitionStage) =>
+  /** Fetch deal_states claimed by a trigger hash for filtering */
+  fetchBatch: (schema, triggerHash) =>
     `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, SYNC_STATE_ID, THREAD_ID
     FROM ${schema}.DEAL_STATES
-    WHERE STAGE = ${transitionStage}`,
+    WHERE ACTIVE_TRIGGER_HASH = '${triggerHash}'`,
 
-  /** Move filtered deal_states to stage 3 */
+  /** Move filtered deal_states to pending_classification */
   updateFiltered: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = 3 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.PENDING_CLASSIFICATION}', ACTIVE_TRIGGER_HASH = NULL, ATTEMPTS = 0 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 
-  /** Move rejected deal_states to stage 106 */
+  /** Move rejected deal_states to filter_rejected */
   updateRejected: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = 106 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
-
-  /** Move failed content fetch deal_states to stage 666 */
-  updateFailed: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = 666 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTER_REJECTED}', ACTIVE_TRIGGER_HASH = NULL WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 }
 
 // ============================================================
@@ -96,7 +115,7 @@ export const filter = {
 
 export const detection = {
   /** Fetch deal_states + AI context for detection */
-  fetchMetadataWithContext: (schema, transitionStage) =>
+  fetchBatchWithContext: (schema, triggerHash) =>
     `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID,
       latest_eval.AI_SUMMARY AS PREVIOUS_AI_SUMMARY,
       d.ID AS EXISTING_DEAL_ID
@@ -107,19 +126,15 @@ export const detection = {
       FROM ${schema}.EMAIL_THREAD_EVALUATIONS
     ) latest_eval ON latest_eval.THREAD_ID = ds.THREAD_ID AND latest_eval.RN = 1
     LEFT JOIN ${schema}.DEALS d ON d.THREAD_ID = ds.THREAD_ID AND d.USER_ID = ds.USER_ID
-    WHERE ds.STAGE = ${transitionStage}`,
+    WHERE ds.ACTIVE_TRIGGER_HASH = '${triggerHash}'`,
 
-  /** Move deal deal_states to stage 4 */
+  /** Move deal deal_states to deal status */
   updateDeals: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = 4 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.DEAL}', ACTIVE_TRIGGER_HASH = NULL WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 
-  /** Move non-deal deal_states to stage 106 */
-  updateRejected: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = 106 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
-
-  /** Move non-English deal_states to stage 107 */
-  updateNonEnglish: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = 107 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+  /** Move non-deal deal_states to not_deal status */
+  updateNotDeal: (schema, sqlQuotedIds) =>
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.NOT_DEAL}', ACTIVE_TRIGGER_HASH = NULL WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 }
 
 // ============================================================
@@ -183,9 +198,9 @@ export const saveResults = {
 // ============================================================
 
 export const finalize = {
-  /** Reset any deal_states still at a transition stage back to their pre-claim stage */
-  resetLeftovers: (schema, transitionStage, resetStage) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = ${resetStage} WHERE STAGE = ${transitionStage}`,
+  /** Reset any deal_states still claimed by a trigger hash back to their pre-claim status */
+  resetLeftovers: (schema, triggerHash, resetStatus) =>
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${resetStatus}', ACTIVE_TRIGGER_HASH = NULL WHERE ACTIVE_TRIGGER_HASH = '${triggerHash}'`,
 }
 
 // ============================================================

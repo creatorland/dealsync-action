@@ -1,5 +1,5 @@
 import * as core from '@actions/core'
-import { dispatch, sanitizeSchema } from '../../shared/queries.js'
+import { dispatch, STATUS, sanitizeSchema } from '../../shared/queries.js'
 import { authenticate, executeSql } from './sxt-client.js'
 
 function sleep(ms) {
@@ -46,102 +46,103 @@ export async function runDispatch() {
 
   let filterSlots = maxFilter - activeFilter
   let detectSlots = maxDetect - activeDetect
-  const filterBatches = []
-  const detectBatches = []
-
-  // Claim filter batches
-  let batchIndex = 0
-  while (filterSlots > 0 && pendingFilter > 0) {
-    const stage = 1001 + batchIndex
-    await executeSql(
-      apiUrl,
-      jwt,
-      biscuit,
-      dispatch.claimFilterBatch(schema, stage, filterBatchSize),
-    )
-
-    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countAtStage(schema, stage))
-    const claimed = rows[0]?.CNT ?? 0
-
-    if (claimed === 0) break
-    filterBatches.push({ stage, count: claimed })
-    filterSlots -= claimed
-    batchIndex++
-    core.info(`Filter batch: stage=${stage}, claimed=${claimed}`)
-  }
-
-  // Claim detection batches
-  batchIndex = 0
-  while (detectSlots > 0 && pendingDetect > 0) {
-    const stage = 11001 + batchIndex
-    await executeSql(
-      apiUrl,
-      jwt,
-      biscuit,
-      dispatch.claimDetectBatch(schema, stage, detectBatchSize),
-    )
-
-    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countAtStage(schema, stage))
-    const claimed = rows[0]?.CNT ?? 0
-
-    if (claimed === 0) break
-    detectBatches.push({ stage, count: claimed })
-    detectSlots -= claimed
-    batchIndex++
-    core.info(`Detect batch: stage=${stage}, claimed=${claimed}`)
-  }
-
-  // Trigger processors
   let dispatchedFilter = 0
   let dispatchedDetect = 0
 
-  for (const batch of filterBatches) {
+  // Dispatch filter batches
+  while (filterSlots > 0 && pendingFilter > 0) {
+    // 1. Trigger processor to get a trigger hash
+    let triggerHash
     try {
       const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`
       const resp = await fetch(triggerUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          inputs: {
-            batch_type: 'filter',
-            transition_stage: String(batch.stage),
-            reset_stage: '2',
-          },
+          inputs: { batch_type: 'filter' },
         }),
       })
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
       const result = await resp.json()
-      dispatchedFilter++
-      core.info(`Triggered filter processor: stage=${batch.stage}, hash=${result.triggerHash}`)
+      triggerHash = result.triggerHash
     } catch (err) {
-      core.error(`Filter trigger failed for stage ${batch.stage}: ${err.message}`)
-      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimedEmails(schema, batch.stage, 2))
+      core.error(`Filter trigger failed: ${err.message}`)
+      break
     }
+
+    // 2. Claim batch using trigger hash
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      dispatch.claimFilterBatch(schema, triggerHash, filterBatchSize),
+    )
+
+    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, triggerHash))
+    const claimed = rows[0]?.CNT ?? 0
+
+    if (claimed === 0) {
+      // Nothing claimed — reset and stop
+      await executeSql(
+        apiUrl,
+        jwt,
+        biscuit,
+        dispatch.resetClaimed(schema, triggerHash, STATUS.PENDING),
+      )
+      break
+    }
+
+    filterSlots -= claimed
+    dispatchedFilter++
+    core.info(`Filter batch: triggerHash=${triggerHash}, claimed=${claimed}`)
     await sleep(100)
   }
 
-  for (const batch of detectBatches) {
+  // Dispatch detection batches
+  while (detectSlots > 0 && pendingDetect > 0) {
+    // 1. Trigger processor to get a trigger hash
+    let triggerHash
     try {
       const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`
       const resp = await fetch(triggerUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          inputs: {
-            batch_type: 'detection',
-            transition_stage: String(batch.stage),
-            reset_stage: '3',
-          },
+          inputs: { batch_type: 'detection' },
         }),
       })
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
       const result = await resp.json()
-      dispatchedDetect++
-      core.info(`Triggered detect processor: stage=${batch.stage}, hash=${result.triggerHash}`)
+      triggerHash = result.triggerHash
     } catch (err) {
-      core.error(`Detect trigger failed for stage ${batch.stage}: ${err.message}`)
-      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimedEmails(schema, batch.stage, 3))
+      core.error(`Detect trigger failed: ${err.message}`)
+      break
     }
+
+    // 2. Claim batch using trigger hash
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      dispatch.claimDetectBatch(schema, triggerHash, detectBatchSize),
+    )
+
+    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, triggerHash))
+    const claimed = rows[0]?.CNT ?? 0
+
+    if (claimed === 0) {
+      await executeSql(
+        apiUrl,
+        jwt,
+        biscuit,
+        dispatch.resetClaimed(schema, triggerHash, STATUS.PENDING_CLASSIFICATION),
+      )
+      break
+    }
+
+    detectSlots -= claimed
+    dispatchedDetect++
+    core.info(`Detect batch: triggerHash=${triggerHash}, claimed=${claimed}`)
     await sleep(100)
   }
 
