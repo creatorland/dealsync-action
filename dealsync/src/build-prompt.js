@@ -87,16 +87,6 @@ export async function runBuildPrompt() {
     return { system_prompt: '', user_prompt: '' }
   }
 
-  // If input is a JSON object with .emails key (from fetch-content result), extract it
-  try {
-    const parsed = JSON.parse(emailsJson)
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.emails) {
-      emailsJson = typeof parsed.emails === 'string' ? parsed.emails : JSON.stringify(parsed.emails)
-    }
-  } catch {
-    // Not JSON wrapper, treat as raw emails input
-  }
-
   // Decrypt emails input if encrypted
   if (encryptionKey) {
     const decrypted = tryDecrypt(emailsJson, encryptionKey)

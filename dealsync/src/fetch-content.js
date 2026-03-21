@@ -104,14 +104,12 @@ export async function runFetchContent() {
   core.info(`Total: ${allEmails.length} fetched, ${errors.length} failed`)
 
   const emailsJson = JSON.stringify(allEmails)
-  const result = {
-    emails: encryptionKey ? encryptValue(emailsJson, encryptionKey) : emailsJson,
-    count: allEmails.length,
-  }
 
+  // Output emails directly — no wrapper object
+  // Downstream commands (filter, build-prompt, classify) expect the emails array directly
   if (errors.length > 0) {
-    result.failed_ids = errors.map((id) => `'${id}'`).join(',')
+    core.setOutput('failed_ids', errors.map((id) => `'${id}'`).join(','))
   }
 
-  return result
+  return encryptionKey ? encryptValue(emailsJson, encryptionKey) : emailsJson
 }

@@ -27522,16 +27522,6 @@ async function runFilter() {
     return { filtered_ids: '', rejected_ids: '' }
   }
 
-  // If input is a JSON object with .emails key (from fetch-content result), extract it
-  try {
-    const parsed = JSON.parse(emailsJson);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.emails) {
-      emailsJson = typeof parsed.emails === 'string' ? parsed.emails : JSON.stringify(parsed.emails);
-    }
-  } catch {
-    // Not JSON wrapper, treat as raw emails input
-  }
-
   // Decrypt emails input if encrypted
   if (encryptionKey) {
     const decrypted = tryDecrypt(emailsJson, encryptionKey);
@@ -27649,16 +27639,6 @@ async function runBuildPrompt() {
   let emailsJson = coreExports.getInput('emails');
   if (!emailsJson || emailsJson === '[]') {
     return { system_prompt: '', user_prompt: '' }
-  }
-
-  // If input is a JSON object with .emails key (from fetch-content result), extract it
-  try {
-    const parsed = JSON.parse(emailsJson);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && parsed.emails) {
-      emailsJson = typeof parsed.emails === 'string' ? parsed.emails : JSON.stringify(parsed.emails);
-    }
-  } catch {
-    // Not JSON wrapper, treat as raw emails input
   }
 
   // Decrypt emails input if encrypted
@@ -28402,16 +28382,14 @@ async function runFetchContent() {
   coreExports.info(`Total: ${allEmails.length} fetched, ${errors.length} failed`);
 
   const emailsJson = JSON.stringify(allEmails);
-  const result = {
-    emails: encryptionKey ? encryptValue(emailsJson, encryptionKey) : emailsJson,
-    count: allEmails.length,
-  };
 
+  // Output emails directly — no wrapper object
+  // Downstream commands (filter, build-prompt, classify) expect the emails array directly
   if (errors.length > 0) {
-    result.failed_ids = errors.map((id) => `'${id}'`).join(',');
+    coreExports.setOutput('failed_ids', errors.map((id) => `'${id}'`).join(','));
   }
 
-  return result
+  return encryptionKey ? encryptValue(emailsJson, encryptionKey) : emailsJson
 }
 
 /**
@@ -28515,7 +28493,8 @@ async function run() {
     const result = await handler();
     console.log(`[dealsync] command=${command} success`);
     coreExports.setOutput('success', 'true');
-    coreExports.setOutput('result', JSON.stringify(result));
+    // If result is already a string (e.g. encrypted output), don't double-stringify
+    coreExports.setOutput('result', typeof result === 'string' ? result : JSON.stringify(result));
   } catch (error) {
     console.log(`[dealsync] command=${command} FAILED: ${error.message}`);
     console.log(`[dealsync] stack: ${error.stack}`);

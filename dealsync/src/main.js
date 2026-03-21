@@ -35,7 +35,8 @@ export async function run() {
     const result = await handler()
     console.log(`[dealsync] command=${command} success`)
     core.setOutput('success', 'true')
-    core.setOutput('result', JSON.stringify(result))
+    // If result is already a string (e.g. encrypted output), don't double-stringify
+    core.setOutput('result', typeof result === 'string' ? result : JSON.stringify(result))
   } catch (error) {
     console.log(`[dealsync] command=${command} FAILED: ${error.message}`)
     console.log(`[dealsync] stack: ${error.stack}`)
