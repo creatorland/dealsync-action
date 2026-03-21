@@ -54,6 +54,8 @@ inputs:
     description: 'JSON deal_states metadata (classify, extract-metadata, fetch-content)'
   content-fetcher-url:
     description: 'Content fetcher service URL (fetch-content)'
+  fields:
+    description: 'Comma-separated fields to keep from fetched content (fetch-content). Strips body/attachments when set.'
   sql:
     description: 'SQL statement (sxt-query, sxt-execute)'
   sxt-command:

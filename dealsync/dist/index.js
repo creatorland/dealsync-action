@@ -28302,6 +28302,7 @@ async function runFetchContent() {
   const encrypt = coreExports.getInput('encrypt') !== 'false';
   const encryptionKey = encrypt ? coreExports.getInput('encryption-key') : null;
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
+  const fieldsInput = coreExports.getInput('fields'); // comma-separated field names, e.g. "messageId,labelIds,topLevelHeaders"
 
   let metadataRaw = coreExports.getInput('metadata');
   if (!metadataRaw || metadataRaw === '[]') {
@@ -28352,8 +28353,16 @@ async function runFetchContent() {
       const result = await resp.json();
       const emails = result.data || result;
 
+      // If fields specified, strip unnecessary data (e.g. body, replyBody, attachments)
+      const fields = fieldsInput ? fieldsInput.split(',').map((f) => f.trim()) : null;
+
       // Merge metadata (threadId, emailMetadataId, previousAiSummary) into each email
       for (const email of emails) {
+        if (fields) {
+          for (const key of Object.keys(email)) {
+            if (!fields.includes(key) && key !== 'messageId') delete email[key];
+          }
+        }
         const meta = rows.find((r) => r.MESSAGE_ID === email.messageId);
         if (meta) {
           email.id = meta.EMAIL_METADATA_ID;
