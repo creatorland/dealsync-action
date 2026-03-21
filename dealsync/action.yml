@@ -58,6 +58,17 @@ inputs:
     description: 'Action for workflow-triggers: start or complete'
   trigger-type:
     description: 'Type for workflow-triggers: filter or classify'
+  hyperbolic-key:
+    description: 'Hyperbolic API key for AI classification (fetch-and-classify)'
+  primary-model:
+    description: 'Primary AI model ID (fetch-and-classify)'
+    default: 'deepseek-ai/DeepSeek-V3'
+  fallback-model:
+    description: 'Fallback AI model ID (fetch-and-classify)'
+    default: 'Qwen/Qwen2.5-72B-Instruct'
+  ai-api-url:
+    description: 'AI API URL (fetch-and-classify)'
+    default: 'https://api.hyperbolic.xyz/v1/chat/completions'
 
 outputs:
   success:

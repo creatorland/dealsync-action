@@ -8,6 +8,7 @@ import { runSxtQuery } from './sxt-query.js'
 import { runFetchContent } from './fetch-content.js'
 import { runWorkflowTriggers } from './workflow-triggers.js'
 import { runFetchAndFilter } from './fetch-and-filter.js'
+import { runFetchAndClassify } from './fetch-and-classify.js'
 
 const COMMANDS = {
   filter: runFilter,
@@ -20,6 +21,7 @@ const COMMANDS = {
   'fetch-content': runFetchContent,
   'workflow-triggers': runWorkflowTriggers,
   'fetch-and-filter': runFetchAndFilter,
+  'fetch-and-classify': runFetchAndClassify,
 }
 
 export async function run() {
