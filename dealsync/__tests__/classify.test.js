@@ -103,9 +103,9 @@ describe('classify command', () => {
     fetchSpy.mockRestore()
   })
 
-  it('creates all records for a deal and sets stage to 4', async () => {
+  it('creates all records for a deal and sets status to deal', async () => {
     mockInputs()
-    // Deal: audit(1) + eval_del(2) + eval_ins(3) + contact_del(4) + contact_ins(5) + deal_del(6) + deal_ins(7) + dc_del(8) + dc_ins(9) + stage(10) = 10
+    // Deal: audit(1) + eval_del(2) + eval_ins(3) + contact_del(4) + contact_ins(5) + deal_del(6) + deal_ins(7) + dc_del(8) + dc_ins(9) + status(10) = 10
     mockAuthAndSql(fetchSpy, 10)
 
     const result = await runClassify()
@@ -141,18 +141,18 @@ describe('classify command', () => {
     expect(getSqlText(sqlCalls[6])).toContain('Big Deal')
     expect(getSqlText(sqlCalls[6])).toContain('50000')
 
-    // Stage UPDATE to 4
-    expect(getSqlText(sqlCalls[9])).toContain('SET STAGE = 4')
+    // Status UPDATE to 'deal'
+    expect(getSqlText(sqlCalls[9])).toContain("STATUS = 'deal'")
     expect(getSqlText(sqlCalls[9])).toContain("'email-id-001'")
   })
 
-  it('sets stage to 106 for non-deal', async () => {
+  it('sets status to not_deal for non-deal', async () => {
     mockInputs({
       'ai-response': JSON.stringify({
         threads: [makeThread({ is_deal: false, main_contact: null, category: 'not_a_deal' })],
       }),
     })
-    mockAuthAndSql(fetchSpy, 4) // audit + eval_del + eval_ins + stage
+    mockAuthAndSql(fetchSpy, 4) // audit + eval_del + eval_ins + status
 
     const result = await runClassify()
 
@@ -160,10 +160,10 @@ describe('classify command', () => {
     expect(result.emails_classified).toBe(1)
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    expect(getSqlText(sqlCalls[3])).toContain('SET STAGE = 106')
+    expect(getSqlText(sqlCalls[3])).toContain("STATUS = 'not_deal'")
   })
 
-  it('sets stage to 107 for non-English', async () => {
+  it('sets status to not_deal for non-English (no separate stage)', async () => {
     mockInputs({
       'ai-response': JSON.stringify({
         threads: [makeThread({ is_deal: false, main_contact: null, language: 'es' })],
@@ -174,7 +174,7 @@ describe('classify command', () => {
     const result = await runClassify()
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    expect(getSqlText(sqlCalls[3])).toContain('SET STAGE = 107')
+    expect(getSqlText(sqlCalls[3])).toContain("STATUS = 'not_deal'")
   })
 
   it('authenticates via proxy with x-shared-secret', async () => {
@@ -297,7 +297,7 @@ describe('classify command', () => {
     await expect(runClassify()).rejects.toThrow('Invalid schema')
   })
 
-  it('stage 107 for non-English even if is_deal is true', async () => {
+  it('non-English deal still gets deal status', async () => {
     mockInputs({
       'ai-response': JSON.stringify({
         threads: [makeThread({ is_deal: true, language: 'zh' })],
@@ -308,7 +308,7 @@ describe('classify command', () => {
     const result = await runClassify()
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    const stageSql = getSqlText(sqlCalls[sqlCalls.length - 1])
-    expect(stageSql).toContain('SET STAGE = 107')
+    const statusSql = getSqlText(sqlCalls[sqlCalls.length - 1])
+    expect(statusSql).toContain("STATUS = 'deal'")
   })
 })
