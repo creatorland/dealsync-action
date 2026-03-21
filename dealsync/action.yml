@@ -51,7 +51,9 @@ inputs:
   ai-response:
     description: 'AI classification JSON (classify)'
   metadata:
-    description: 'JSON deal_states metadata (classify, extract-metadata)'
+    description: 'JSON deal_states metadata (classify, extract-metadata, fetch-content)'
+  content-fetcher-url:
+    description: 'Content fetcher service URL (fetch-content)'
   sql:
     description: 'SQL statement (sxt-query, sxt-execute)'
   sxt-command:

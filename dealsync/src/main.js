@@ -5,6 +5,7 @@ import { runClassify } from './classify.js'
 import { runDispatch } from './dispatch.js'
 import { runExtractMetadata } from './extract-metadata.js'
 import { runSxtQuery } from './sxt-query.js'
+import { runFetchContent } from './fetch-content.js'
 
 const COMMANDS = {
   filter: runFilter,
@@ -14,6 +15,7 @@ const COMMANDS = {
   'extract-metadata': runExtractMetadata,
   'sxt-query': runSxtQuery,
   'sxt-execute': runSxtQuery,
+  'fetch-content': runFetchContent,
 }
 
 export async function run() {
