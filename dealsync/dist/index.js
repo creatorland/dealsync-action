@@ -27668,43 +27668,61 @@ async function runBuildPrompt() {
  * All column names UPPERCASE (SxT convention).
  * Schema is passed as a parameter — never hardcoded.
  * IDs must be sanitized before interpolation.
+ *
+ * Status-based state machine:
+ *   pending → filtering → pending_classification → classifying → deal | not_deal
+ *   filtering → filter_rejected (terminal)
+ *   filtering/classifying → retry via attempts increment
  */
 
+// ============================================================
+// STATUS CONSTANTS
+// ============================================================
+
+const STATUS = {
+  PENDING: 'pending',
+  FILTERING: 'filtering',
+  PENDING_CLASSIFICATION: 'pending_classification',
+  CLASSIFYING: 'classifying',
+  DEAL: 'deal',
+  NOT_DEAL: 'not_deal',
+  FILTER_REJECTED: 'filter_rejected',
+};
 
 // ============================================================
 // DISPATCH QUERIES
 // ============================================================
 
 const dispatch = {
-  /** Atomically claim stage-2 deal_states into a filter transition stage */
-  claimFilterBatch: (schema, transitionStage, batchSize) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = ${transitionStage}
+  /** Atomically claim pending deal_states into filtering with a trigger hash */
+  claimFilterBatch: (schema, triggerHash, batchSize) =>
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTERING}', ACTIVE_TRIGGER_HASH = '${triggerHash}'
     WHERE EMAIL_METADATA_ID IN (
-      SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STAGE = 2 LIMIT ${batchSize}
+      SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}' LIMIT ${batchSize}
     )`,
 
-  /** Atomically claim stage-3 deal_states into a detect transition stage (with thread-completeness check) */
-  claimDetectBatch: (schema, transitionStage, batchSize) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = ${transitionStage}
+  /** Atomically claim pending_classification deal_states into classifying (with thread-completeness check) */
+  claimDetectBatch: (schema, triggerHash, batchSize) =>
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.CLASSIFYING}', ACTIVE_TRIGGER_HASH = '${triggerHash}'
     WHERE EMAIL_METADATA_ID IN (
       SELECT ds.EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES ds
-      WHERE ds.STAGE = 3
+      WHERE ds.STATUS = '${STATUS.PENDING_CLASSIFICATION}'
         AND NOT EXISTS (
           SELECT 1 FROM ${schema}.DEAL_STATES ds2
           WHERE ds2.THREAD_ID = ds.THREAD_ID
             AND ds2.USER_ID = ds.USER_ID
-            AND ds2.STAGE IN (1, 2)
+            AND ds2.STATUS IN ('${STATUS.PENDING}', '${STATUS.FILTERING}')
         )
       LIMIT ${batchSize}
     )`,
 
-  /** Count deal_states at a transition stage (verify claim) */
-  countAtStage: (schema, stage) =>
-    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE STAGE = ${stage}`,
+  /** Count deal_states claimed by a trigger hash (verify claim) */
+  countClaimed: (schema, triggerHash) =>
+    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE ACTIVE_TRIGGER_HASH = '${triggerHash}'`,
 
-  /** Reset claimed deal_states back to original stage on trigger failure */
-  resetClaimedEmails: (schema, transitionStage, resetStage) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = ${resetStage} WHERE STAGE = ${transitionStage}`,
+  /** Reset claimed deal_states back to original status on trigger failure */
+  resetClaimed: (schema, triggerHash, resetStatus) =>
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${resetStatus}', ACTIVE_TRIGGER_HASH = NULL WHERE ACTIVE_TRIGGER_HASH = '${triggerHash}'`,
 };
 
 // ============================================================
@@ -27713,7 +27731,7 @@ const dispatch = {
 
 const detection = {
   /** Fetch deal_states + AI context for detection */
-  fetchMetadataWithContext: (schema, transitionStage) =>
+  fetchBatchWithContext: (schema, triggerHash) =>
     `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID,
       latest_eval.AI_SUMMARY AS PREVIOUS_AI_SUMMARY,
       d.ID AS EXISTING_DEAL_ID
@@ -27724,19 +27742,15 @@ const detection = {
       FROM ${schema}.EMAIL_THREAD_EVALUATIONS
     ) latest_eval ON latest_eval.THREAD_ID = ds.THREAD_ID AND latest_eval.RN = 1
     LEFT JOIN ${schema}.DEALS d ON d.THREAD_ID = ds.THREAD_ID AND d.USER_ID = ds.USER_ID
-    WHERE ds.STAGE = ${transitionStage}`,
+    WHERE ds.ACTIVE_TRIGGER_HASH = '${triggerHash}'`,
 
-  /** Move deal deal_states to stage 4 */
+  /** Move deal deal_states to deal status */
   updateDeals: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = 4 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.DEAL}', ACTIVE_TRIGGER_HASH = NULL WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 
-  /** Move non-deal deal_states to stage 106 */
-  updateRejected: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = 106 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
-
-  /** Move non-English deal_states to stage 107 */
-  updateNonEnglish: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STAGE = 107 WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
+  /** Move non-deal deal_states to not_deal status */
+  updateNotDeal: (schema, sqlQuotedIds) =>
+    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.NOT_DEAL}', ACTIVE_TRIGGER_HASH = NULL WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
 };
 
 // ============================================================
@@ -27796,6 +27810,20 @@ const saveResults = {
 };
 
 // ============================================================
+// WORKFLOW TRIGGERS QUERIES
+// ============================================================
+
+const workflowTriggers = {
+  /** Fetch current workflow_triggers for all deal_states claimed by a trigger hash */
+  fetchByTriggerHash: (schema, triggerHash) =>
+    `SELECT EMAIL_METADATA_ID, WORKFLOW_TRIGGERS FROM ${schema}.DEAL_STATES WHERE ACTIVE_TRIGGER_HASH = '${triggerHash}'`,
+
+  /** Update workflow_triggers for a single deal_state */
+  update: (schema, emailMetadataId, serializedJson) =>
+    `UPDATE ${schema}.DEAL_STATES SET WORKFLOW_TRIGGERS = '${serializedJson}' WHERE EMAIL_METADATA_ID = '${emailMetadataId}'`,
+};
+
+// ============================================================
 // UTILITIES
 // ============================================================
 
@@ -27849,10 +27877,9 @@ async function executeSql(apiUrl, jwt, biscuit, sql) {
   return resp.json()
 }
 
-function resolveStage(thread) {
-  if (thread.language && thread.language.toLowerCase() !== 'en') return 107
-  if (thread.is_deal) return 4
-  return 106
+function resolveStatus(thread) {
+  if (thread.is_deal) return STATUS.DEAL
+  return STATUS.NOT_DEAL
 }
 
 async function runClassify() {
@@ -27892,8 +27919,7 @@ async function runClassify() {
       deals_created: 0,
       emails_classified: 0,
       deal_ids: '',
-      rejected_ids: '',
-      non_english_ids: '',
+      not_deal_ids: '',
     }
   }
 
@@ -27902,8 +27928,7 @@ async function runClassify() {
   let dealsCreated = 0;
   let emailsClassified = 0;
   const dealIdList = [];
-  const rejectedIdList = [];
-  const nonEnglishIdList = [];
+  const notDealIdList = [];
 
   for (const thread of threads) {
     try {
@@ -28026,21 +28051,18 @@ async function runClassify() {
         dealsCreated++;
       }
 
-      // d. Update DEAL_STATES stages
+      // d. Update DEAL_STATES status
       if (threadEmails.length > 0) {
-        const newStage = resolveStage(thread);
+        const newStatus = resolveStatus(thread);
         const emailIds = threadEmails.map((e) => e.EMAIL_METADATA_ID);
         const sqlQuotedIds = toSqlIdList(emailIds);
 
-        if (newStage === 4) {
+        if (newStatus === STATUS.DEAL) {
           await executeSql(apiUrl, jwt, biscuit, detection.updateDeals(schema, sqlQuotedIds));
           dealIdList.push(...emailIds);
-        } else if (newStage === 107) {
-          await executeSql(apiUrl, jwt, biscuit, detection.updateNonEnglish(schema, sqlQuotedIds));
-          nonEnglishIdList.push(...emailIds);
         } else {
-          await executeSql(apiUrl, jwt, biscuit, detection.updateRejected(schema, sqlQuotedIds));
-          rejectedIdList.push(...emailIds);
+          await executeSql(apiUrl, jwt, biscuit, detection.updateNotDeal(schema, sqlQuotedIds));
+          notDealIdList.push(...emailIds);
         }
         emailsClassified += threadEmails.length;
       }
@@ -28053,8 +28075,7 @@ async function runClassify() {
     deals_created: dealsCreated,
     emails_classified: emailsClassified,
     deal_ids: dealIdList.length > 0 ? toSqlIdList(dealIdList) : '',
-    rejected_ids: rejectedIdList.length > 0 ? toSqlIdList(rejectedIdList) : '',
-    non_english_ids: nonEnglishIdList.length > 0 ? toSqlIdList(nonEnglishIdList) : '',
+    not_deal_ids: notDealIdList.length > 0 ? toSqlIdList(notDealIdList) : '',
   }
 }
 
@@ -28102,102 +28123,103 @@ async function runDispatch() {
 
   let filterSlots = maxFilter - activeFilter;
   let detectSlots = maxDetect - activeDetect;
-  const filterBatches = [];
-  const detectBatches = [];
-
-  // Claim filter batches
-  let batchIndex = 0;
-  while (filterSlots > 0 && pendingFilter > 0) {
-    const stage = 1001 + batchIndex;
-    await executeSql(
-      apiUrl,
-      jwt,
-      biscuit,
-      dispatch.claimFilterBatch(schema, stage, filterBatchSize),
-    );
-
-    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countAtStage(schema, stage));
-    const claimed = rows[0]?.CNT ?? 0;
-
-    if (claimed === 0) break
-    filterBatches.push({ stage, count: claimed });
-    filterSlots -= claimed;
-    batchIndex++;
-    coreExports.info(`Filter batch: stage=${stage}, claimed=${claimed}`);
-  }
-
-  // Claim detection batches
-  batchIndex = 0;
-  while (detectSlots > 0 && pendingDetect > 0) {
-    const stage = 11001 + batchIndex;
-    await executeSql(
-      apiUrl,
-      jwt,
-      biscuit,
-      dispatch.claimDetectBatch(schema, stage, detectBatchSize),
-    );
-
-    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countAtStage(schema, stage));
-    const claimed = rows[0]?.CNT ?? 0;
-
-    if (claimed === 0) break
-    detectBatches.push({ stage, count: claimed });
-    detectSlots -= claimed;
-    batchIndex++;
-    coreExports.info(`Detect batch: stage=${stage}, claimed=${claimed}`);
-  }
-
-  // Trigger processors
   let dispatchedFilter = 0;
   let dispatchedDetect = 0;
 
-  for (const batch of filterBatches) {
+  // Dispatch filter batches
+  while (filterSlots > 0 && pendingFilter > 0) {
+    // 1. Trigger processor to get a trigger hash
+    let triggerHash;
     try {
       const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
       const resp = await fetch(triggerUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          inputs: {
-            batch_type: 'filter',
-            transition_stage: String(batch.stage),
-            reset_stage: '2',
-          },
+          inputs: { batch_type: 'filter' },
         }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
       const result = await resp.json();
-      dispatchedFilter++;
-      coreExports.info(`Triggered filter processor: stage=${batch.stage}, hash=${result.triggerHash}`);
+      triggerHash = result.triggerHash;
     } catch (err) {
-      coreExports.error(`Filter trigger failed for stage ${batch.stage}: ${err.message}`);
-      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimedEmails(schema, batch.stage, 2));
+      coreExports.error(`Filter trigger failed: ${err.message}`);
+      break
     }
+
+    // 2. Claim batch using trigger hash
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      dispatch.claimFilterBatch(schema, triggerHash, filterBatchSize),
+    );
+
+    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, triggerHash));
+    const claimed = rows[0]?.CNT ?? 0;
+
+    if (claimed === 0) {
+      // Nothing claimed — reset and stop
+      await executeSql(
+        apiUrl,
+        jwt,
+        biscuit,
+        dispatch.resetClaimed(schema, triggerHash, STATUS.PENDING),
+      );
+      break
+    }
+
+    filterSlots -= claimed;
+    dispatchedFilter++;
+    coreExports.info(`Filter batch: triggerHash=${triggerHash}, claimed=${claimed}`);
     await sleep(100);
   }
 
-  for (const batch of detectBatches) {
+  // Dispatch detection batches
+  while (detectSlots > 0 && pendingDetect > 0) {
+    // 1. Trigger processor to get a trigger hash
+    let triggerHash;
     try {
       const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
       const resp = await fetch(triggerUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          inputs: {
-            batch_type: 'detection',
-            transition_stage: String(batch.stage),
-            reset_stage: '3',
-          },
+          inputs: { batch_type: 'detection' },
         }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
       const result = await resp.json();
-      dispatchedDetect++;
-      coreExports.info(`Triggered detect processor: stage=${batch.stage}, hash=${result.triggerHash}`);
+      triggerHash = result.triggerHash;
     } catch (err) {
-      coreExports.error(`Detect trigger failed for stage ${batch.stage}: ${err.message}`);
-      await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimedEmails(schema, batch.stage, 3));
+      coreExports.error(`Detect trigger failed: ${err.message}`);
+      break
     }
+
+    // 2. Claim batch using trigger hash
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      dispatch.claimDetectBatch(schema, triggerHash, detectBatchSize),
+    );
+
+    const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, triggerHash));
+    const claimed = rows[0]?.CNT ?? 0;
+
+    if (claimed === 0) {
+      await executeSql(
+        apiUrl,
+        jwt,
+        biscuit,
+        dispatch.resetClaimed(schema, triggerHash, STATUS.PENDING_CLASSIFICATION),
+      );
+      break
+    }
+
+    detectSlots -= claimed;
+    dispatchedDetect++;
+    coreExports.info(`Detect batch: triggerHash=${triggerHash}, claimed=${claimed}`);
     await sleep(100);
   }
 
@@ -28353,6 +28375,82 @@ async function runFetchContent() {
   return result
 }
 
+/**
+ * Append or update workflow_triggers trail on deal_states claimed by a trigger hash.
+ *
+ * Actions:
+ *   - "start": Append a new entry with success=false (called at processor start)
+ *   - "complete": Update the last entry matching this trigger_hash to success=true
+ */
+async function runWorkflowTriggers() {
+  const authUrl = coreExports.getInput('auth-url');
+  const authSecret = coreExports.getInput('auth-secret');
+  const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
+  const schema = sanitizeSchema(coreExports.getInput('schema'));
+
+  const action = coreExports.getInput('trigger-action'); // 'start' or 'complete'
+  const triggerHash = coreExports.getInput('trigger-hash');
+  const parentTriggerHash = coreExports.getInput('parent-trigger-hash') || '';
+  const triggerType = coreExports.getInput('trigger-type') || 'filter'; // 'filter' or 'detection'
+
+  if (!triggerHash) throw new Error('trigger-hash is required')
+  if (!['start', 'complete'].includes(action)) {
+    throw new Error(`trigger-action must be "start" or "complete", got: ${action}`)
+  }
+
+  const jwt = await authenticate(authUrl, authSecret);
+
+  // Fetch current workflow_triggers for claimed rows
+  const rows = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    workflowTriggers.fetchByTriggerHash(schema, triggerHash),
+  );
+
+  let updated = 0;
+  for (const row of rows) {
+    const emailMetadataId = row.EMAIL_METADATA_ID;
+    let triggers = [];
+    try {
+      triggers = row.WORKFLOW_TRIGGERS ? JSON.parse(row.WORKFLOW_TRIGGERS) : [];
+    } catch {
+      triggers = [];
+    }
+
+    if (action === 'start') {
+      triggers.push({
+        type: triggerType,
+        trigger_hash: triggerHash,
+        parent_trigger_hash: parentTriggerHash,
+        timestamp: new Date().toISOString(),
+        success: false,
+      });
+    } else {
+      // complete: find last entry with this trigger_hash and set success=true
+      for (let i = triggers.length - 1; i >= 0; i--) {
+        if (triggers[i].trigger_hash === triggerHash) {
+          triggers[i].success = true;
+          break
+        }
+      }
+    }
+
+    const serialized = sanitizeString(JSON.stringify(triggers));
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      workflowTriggers.update(schema, emailMetadataId, serialized),
+    );
+    updated++;
+  }
+
+  coreExports.info(`workflow-triggers ${action}: updated ${updated} deal_states`);
+  return { updated }
+}
+
 const COMMANDS = {
   filter: runFilter,
   'build-prompt': runBuildPrompt,
@@ -28362,6 +28460,7 @@ const COMMANDS = {
   'sxt-query': runSxtQuery,
   'sxt-execute': runSxtQuery,
   'fetch-content': runFetchContent,
+  'workflow-triggers': runWorkflowTriggers,
 };
 
 async function run() {
