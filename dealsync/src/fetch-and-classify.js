@@ -19,10 +19,12 @@ function resolveStatus(thread) {
 }
 
 /**
- * Combined fetch-content + build-prompt + AI call + classify + save command.
+ * Combined fetch-content + AI classify + save command.
  *
- * Does everything in one step — no data passing between W3 steps.
- * Inputs: batch-id, SxT auth, content-fetcher-url, AI config
+ * Uses ai_evaluation_audits as checkpoint:
+ * - If audit exists for batch_id → skip AI, use saved evaluation
+ * - If no audit → call AI, save audit on successful JSON parse
+ * - Thread evals + deals use ON CONFLICT upsert (idempotent on retry)
  */
 export async function runFetchAndClassify() {
   const authUrl = core.getInput('auth-url')
@@ -39,9 +41,9 @@ export async function runFetchAndClassify() {
 
   if (!batchId) throw new Error('batch-id is required')
 
-  console.log(`[fetch-and-classify] starting for batch ${batchId}`)
+  console.log(`[classify] starting batch ${batchId}`)
 
-  // 1. Authenticate + fetch metadata from SxT
+  // 1. Auth + fetch metadata
   const jwt = await authenticate(authUrl, authSecret)
   const metadataRows = await executeSql(
     apiUrl, jwt, biscuit,
@@ -59,121 +61,130 @@ export async function runFetchAndClassify() {
   )
 
   if (!metadataRows || metadataRows.length === 0) {
-    console.log('[fetch-and-classify] no rows found for batch')
+    console.log('[classify] no rows for batch (already completed?)')
     return { deals_created: 0, emails_classified: 0 }
   }
 
-  console.log(`[fetch-and-classify] found ${metadataRows.length} deal_states`)
+  console.log(`[classify] ${metadataRows.length} deal_states`)
 
   // 2. Increment attempts
   await executeSql(apiUrl, jwt, biscuit, processor.incrementAttempts(schema, batchId))
 
-  // 3. Fetch full email content
-  const userId = metadataRows[0].USER_ID
-  const syncStateId = metadataRows[0].SYNC_STATE_ID
-  const messageIds = metadataRows.map((r) => r.MESSAGE_ID)
+  // 3. Check for existing audit (checkpoint)
+  let aiOutput = null
+  const existingAudit = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId))
 
-  const MAX_PER_BATCH = 50
-  const allEmails = []
-
-  for (let i = 0; i < messageIds.length; i += MAX_PER_BATCH) {
-    const chunk = messageIds.slice(i, i + MAX_PER_BATCH)
+  if (existingAudit.length > 0 && existingAudit[0].AI_EVALUATION) {
+    console.log('[classify] found existing audit — skipping AI call')
     try {
-      const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, syncStateId, messageIds: chunk }),
-      })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      const result = await resp.json()
-      const emails = result.data || result
-
-      for (const email of emails) {
-        const meta = metadataRows.find((r) => r.MESSAGE_ID === email.messageId)
-        if (meta) {
-          email.id = meta.EMAIL_METADATA_ID
-          email.threadId = meta.THREAD_ID
-          if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY
-          if (meta.EXISTING_DEAL_ID) email.existingDealId = meta.EXISTING_DEAL_ID
-        }
-        allEmails.push(email)
-      }
-    } catch (err) {
-      console.log(`[fetch-and-classify] content fetch failed: ${err.message}`)
+      aiOutput = JSON.parse(existingAudit[0].AI_EVALUATION)
+    } catch {
+      console.log('[classify] existing audit has invalid JSON, re-running AI')
     }
   }
 
-  if (allEmails.length === 0) {
-    throw new Error('No email content fetched')
-  }
+  // 4. If no audit, fetch content + call AI
+  if (!aiOutput) {
+    const userId = metadataRows[0].USER_ID
+    const syncStateId = metadataRows[0].SYNC_STATE_ID
+    const messageIds = metadataRows.map((r) => r.MESSAGE_ID)
 
-  console.log(`[fetch-and-classify] fetched ${allEmails.length} emails, building prompt`)
-
-  // 4. Build AI prompt
-  const { systemPrompt, userPrompt } = buildPrompt(allEmails)
-
-  // 5. Call AI with retry (primary + fallback, 3 attempts each with backoff)
-  let aiResponseRaw = null
-
-  for (const model of [primaryModel, fallbackModel]) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    // Fetch content
+    const MAX_PER_BATCH = 50
+    const allEmails = []
+    for (let i = 0; i < messageIds.length; i += MAX_PER_BATCH) {
+      const chunk = messageIds.slice(i, i + MAX_PER_BATCH)
       try {
-        console.log(`[fetch-and-classify] calling AI: ${model} (attempt ${attempt}/3)`)
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 60000) // 60s timeout
-        const resp = await fetch(aiApiUrl, {
+        const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
           method: 'POST',
-          headers: {
-            Authorization: `Bearer ${hyperbolicKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt },
-            ],
-            response_format: { type: 'json_object' },
-          }),
-          signal: controller.signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId, syncStateId, messageIds: chunk }),
         })
-        clearTimeout(timeout)
-
-        if (!resp.ok) {
-          const body = await resp.text()
-          console.log(`[fetch-and-classify] AI ${model} attempt ${attempt} failed: HTTP ${resp.status} ${body.substring(0, 200)}`)
-          if (attempt < 2) {
-            const delay = 2000 * Math.pow(2, attempt - 1) // 2s, 4s
-            await new Promise((r) => setTimeout(r, delay))
-          }
-          continue
-        }
-
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
         const result = await resp.json()
-        aiResponseRaw = result.choices?.[0]?.message?.content
-        if (aiResponseRaw) {
-          console.log(`[fetch-and-classify] AI ${model} responded (${aiResponseRaw.length} chars)`)
-          break
+        const emails = result.data || result
+        for (const email of emails) {
+          const meta = metadataRows.find((r) => r.MESSAGE_ID === email.messageId)
+          if (meta) {
+            email.id = meta.EMAIL_METADATA_ID
+            email.threadId = meta.THREAD_ID
+            if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY
+            if (meta.EXISTING_DEAL_ID) email.existingDealId = meta.EXISTING_DEAL_ID
+          }
+          allEmails.push(email)
         }
       } catch (err) {
-        console.log(`[fetch-and-classify] AI ${model} attempt ${attempt} error: ${err.message}`)
-        if (attempt < 2) {
-          await new Promise((r) => setTimeout(r, 2000 * Math.pow(2, attempt - 1)))
-        }
+        console.log(`[classify] content fetch failed: ${err.message}`)
       }
     }
-    if (aiResponseRaw) break // got response, skip fallback
+
+    if (allEmails.length === 0) throw new Error('No email content fetched')
+
+    // Build prompt
+    const { systemPrompt, userPrompt } = buildPrompt(allEmails)
+
+    // Call AI with retry
+    let aiResponseRaw = null
+    for (const model of [primaryModel, fallbackModel]) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          console.log(`[classify] AI: ${model} (attempt ${attempt}/2)`)
+          const controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 90000)
+          const resp = await fetch(aiApiUrl, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${hyperbolicKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model,
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: userPrompt },
+              ],
+              response_format: { type: 'json_object' },
+            }),
+            signal: controller.signal,
+          })
+          clearTimeout(timeout)
+
+          if (!resp.ok) {
+            console.log(`[classify] AI ${model} attempt ${attempt}: HTTP ${resp.status}`)
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 3000))
+            continue
+          }
+
+          const result = await resp.json()
+          aiResponseRaw = result.choices?.[0]?.message?.content
+          if (aiResponseRaw) break
+        } catch (err) {
+          console.log(`[classify] AI ${model} attempt ${attempt}: ${err.message}`)
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 3000))
+        }
+      }
+      if (aiResponseRaw) break
+    }
+
+    if (!aiResponseRaw) throw new Error('All AI models failed')
+
+    // Parse response
+    aiResponseRaw = aiResponseRaw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '')
+    aiOutput = JSON.parse(aiResponseRaw)
+
+    // Save audit as checkpoint (only after successful parse)
+    const auditId = crypto.randomUUID()
+    const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400))
+    await executeSql(apiUrl, jwt, biscuit,
+      saveResults.insertAudit(schema, {
+        id: auditId, batchId, threadCount: (aiOutput.threads || []).length,
+        emailCount: metadataRows.length, cost: 0, inputTokens: 0,
+        outputTokens: 0, model: primaryModel, evaluation,
+      }))
+    console.log(`[classify] audit saved: ${auditId}`)
   }
 
-  if (!aiResponseRaw) {
-    throw new Error('All AI models failed after retries')
-  }
-
-  // 6. Parse AI response (strip markdown fences)
-  aiResponseRaw = aiResponseRaw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '')
-  const aiOutput = JSON.parse(aiResponseRaw)
-
-  // 7. Save results — same logic as classify.js
+  // 5. Process threads — upsert evals + deals
   const metadataByThread = {}
   for (const row of metadataRows) {
     const tid = row.THREAD_ID
@@ -192,19 +203,9 @@ export async function runFetchAndClassify() {
     try {
       const threadId = sanitizeId(thread.thread_id)
       const threadEmails = metadataByThread[threadId] || []
-      const emailCount = threadEmails.length
       const threadUserId = threadEmails.length > 0 ? sanitizeId(threadEmails[0].USER_ID) : ''
 
-      // a. INSERT AI_EVALUATION_AUDITS
-      const auditId = crypto.randomUUID()
-      const rawJson = sanitizeString(JSON.stringify(thread).substring(0, 6400))
-      await executeSql(apiUrl, jwt, biscuit,
-        saveResults.insertAudit(schema, {
-          id: auditId, threadCount: threads.length, emailCount,
-          cost: 0, inputTokens: 0, outputTokens: 0, model: '', evaluation: rawJson,
-        }))
-
-      // b. DELETE + INSERT EMAIL_THREAD_EVALUATIONS
+      // Upsert thread evaluation
       const evalId = crypto.randomUUID()
       const category = sanitizeString(thread.category || '')
       const aiSummary = sanitizeString(thread.ai_summary || '')
@@ -212,14 +213,13 @@ export async function runFetchAndClassify() {
       const isLikelyScam = (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'
       const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0
 
-      await executeSql(apiUrl, jwt, biscuit, saveResults.deleteThreadEvaluation(schema, threadId))
       await executeSql(apiUrl, jwt, biscuit,
-        saveResults.insertThreadEvaluation(schema, {
-          id: evalId, threadId, auditId, category, summary: aiSummary,
+        saveResults.upsertThreadEvaluation(schema, {
+          id: evalId, threadId, auditId: '', category, summary: aiSummary,
           isDeal, likelyScam: isLikelyScam, score: aiScore,
         }))
 
-      // c. If is_deal — create deal + deal_contact
+      // Upsert deal (or delete if not_deal)
       if (thread.is_deal) {
         const dealId = crypto.randomUUID()
         const dealName = sanitizeString(thread.deal_name || '')
@@ -229,9 +229,8 @@ export async function runFetchAndClassify() {
         const contactEmail = thread.main_contact ? sanitizeString(thread.main_contact.email || '') : ''
         const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : ''
 
-        await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDeal(schema, threadId))
         await executeSql(apiUrl, jwt, biscuit,
-          saveResults.insertDeal(schema, {
+          saveResults.upsertDeal(schema, {
             id: dealId, userId: threadUserId, threadId, evalId, dealName, dealType,
             category, value: dealValue, currency, brand,
           }))
@@ -243,9 +242,12 @@ export async function runFetchAndClassify() {
         }
 
         dealsCreated++
+      } else {
+        // If previously was a deal, remove it
+        await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDeal(schema, threadId))
       }
 
-      // d. Update DEAL_STATES status
+      // Update deal_states
       if (threadEmails.length > 0) {
         const newStatus = resolveStatus(thread)
         const emailIds = threadEmails.map((e) => e.EMAIL_METADATA_ID)
@@ -262,15 +264,11 @@ export async function runFetchAndClassify() {
       }
     } catch (err) {
       failedThreads++
-      core.error(`Failed to process thread ${thread.thread_id}: ${err.message}`)
+      core.error(`Failed thread ${thread.thread_id}: ${err.message}`)
     }
   }
 
-  if (failedThreads > 0) {
-    throw new Error(`${failedThreads} thread(s) failed to classify (${emailsClassified} succeeded)`)
-  }
-
-  console.log(`[fetch-and-classify] done: ${dealsCreated} deals, ${emailsClassified} classified, ${failedThreads} failed`)
+  console.log(`[classify] done: ${dealsCreated} deals, ${emailsClassified} classified, ${failedThreads} failed`)
 
   return {
     deals_created: dealsCreated,

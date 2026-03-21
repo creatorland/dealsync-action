@@ -157,39 +157,60 @@ export const detection = {
 // ============================================================
 
 export const saveResults = {
+  /** Check if audit already exists for this batch (checkpoint) */
+  getAuditByBatchId: (schema, batchId) =>
+    `SELECT AI_EVALUATION FROM ${schema}.AI_EVALUATION_AUDITS WHERE BATCH_ID = '${batchId}'`,
+
+  /** Insert audit — only after successful AI JSON parse (checkpoint) */
   insertAudit: (
     schema,
-    { id, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation },
+    { id, batchId, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation },
   ) =>
     `INSERT INTO ${schema}.AI_EVALUATION_AUDITS
-      (ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT)
+      (ID, BATCH_ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT)
     VALUES
-      ('${id}', ${threadCount}, ${emailCount}, ${cost}, ${inputTokens}, ${outputTokens}, '${model}', '${evaluation}', CURRENT_TIMESTAMP)`,
+      ('${id}', '${batchId}', ${threadCount}, ${emailCount}, ${cost}, ${inputTokens}, ${outputTokens}, '${model}', '${evaluation}', CURRENT_TIMESTAMP)`,
 
-  deleteThreadEvaluation: (schema, threadId) =>
-    `DELETE FROM ${schema}.EMAIL_THREAD_EVALUATIONS WHERE THREAD_ID = '${threadId}'`,
-
-  insertThreadEvaluation: (
+  /** Upsert thread evaluation — ON CONFLICT updates existing */
+  upsertThreadEvaluation: (
     schema,
     { id, threadId, auditId, category, summary, isDeal, likelyScam, score },
   ) =>
     `INSERT INTO ${schema}.EMAIL_THREAD_EVALUATIONS
       (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT)
     VALUES
-      ('${id}', '${threadId}', '${auditId}', '${category}', '${summary}', ${isDeal}, ${likelyScam}, ${score}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      ('${id}', '${threadId}', '${auditId}', '${category}', '${summary}', ${isDeal}, ${likelyScam}, ${score}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT (THREAD_ID) DO UPDATE SET
+      AI_EVALUATION_AUDIT_ID = EXCLUDED.AI_EVALUATION_AUDIT_ID,
+      AI_INSIGHT = EXCLUDED.AI_INSIGHT,
+      AI_SUMMARY = EXCLUDED.AI_SUMMARY,
+      IS_DEAL = EXCLUDED.IS_DEAL,
+      LIKELY_SCAM = EXCLUDED.LIKELY_SCAM,
+      AI_SCORE = EXCLUDED.AI_SCORE,
+      UPDATED_AT = CURRENT_TIMESTAMP`,
 
-  /** Delete deal by thread_id (one deal per thread) */
-  deleteDeal: (schema, threadId) =>
-    `DELETE FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}'`,
-
-  insertDeal: (
+  /** Upsert deal — one deal per thread, ON CONFLICT updates existing */
+  upsertDeal: (
     schema,
     { id, userId, threadId, evalId, dealName, dealType, category, value, currency, brand },
   ) =>
     `INSERT INTO ${schema}.DEALS
       (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT)
     VALUES
-      ('${id}', '${userId}', '${threadId}', '${evalId}', '${dealName}', '${dealType}', '${category}', ${value}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      ('${id}', '${userId}', '${threadId}', '${evalId}', '${dealName}', '${dealType}', '${category}', ${value}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT (THREAD_ID) DO UPDATE SET
+      EMAIL_THREAD_EVALUATION_ID = EXCLUDED.EMAIL_THREAD_EVALUATION_ID,
+      DEAL_NAME = EXCLUDED.DEAL_NAME,
+      DEAL_TYPE = EXCLUDED.DEAL_TYPE,
+      CATEGORY = EXCLUDED.CATEGORY,
+      VALUE = EXCLUDED.VALUE,
+      CURRENCY = EXCLUDED.CURRENCY,
+      BRAND = EXCLUDED.BRAND,
+      UPDATED_AT = CURRENT_TIMESTAMP`,
+
+  /** Delete deal by thread_id (for removing deals when reclassified as not_deal) */
+  deleteDeal: (schema, threadId) =>
+    `DELETE FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}'`,
 
   /** Delete deal contacts by deal_id */
   deleteDealContact: (schema, dealId) =>
