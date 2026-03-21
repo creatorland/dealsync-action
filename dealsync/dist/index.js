@@ -28913,6 +28913,7 @@ async function runSaveEvals() {
   const threads = aiOutput.threads || [];
 
   let upserted = 0;
+  let failed = 0;
   for (const thread of threads) {
     try {
       const threadId = sanitizeId$1(thread.thread_id);
@@ -28930,11 +28931,13 @@ async function runSaveEvals() {
         }));
       upserted++;
     } catch (err) {
+      failed++;
       coreExports.error(`Failed eval for thread ${thread.thread_id}: ${err.message}`);
     }
   }
 
-  console.log(`[save-evals] upserted ${upserted}/${threads.length} thread evaluations`);
+  console.log(`[save-evals] upserted ${upserted}/${threads.length}, failed ${failed}`);
+  if (failed > 0) throw new Error(`${failed}/${threads.length} thread eval(s) failed`)
   return { upserted, total: threads.length }
 }
 
@@ -28974,6 +28977,7 @@ async function runSaveDeals() {
   }
 
   let dealsCreated = 0;
+  let failed = 0;
   for (const thread of threads) {
     try {
       const threadId = sanitizeId$1(thread.thread_id);
@@ -29008,11 +29012,13 @@ async function runSaveDeals() {
         await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDeal(schema, threadId));
       }
     } catch (err) {
+      failed++;
       coreExports.error(`Failed deal for thread ${thread.thread_id}: ${err.message}`);
     }
   }
 
-  console.log(`[save-deals] ${dealsCreated} deals created/updated`);
+  console.log(`[save-deals] ${dealsCreated} created, ${failed} failed`);
+  if (failed > 0) throw new Error(`${failed} deal(s) failed to save`)
   return { deals_created: dealsCreated }
 }
 
@@ -29054,6 +29060,7 @@ async function runUpdateDealStates() {
 
   let dealCount = 0;
   let notDealCount = 0;
+  let failed = 0;
 
   for (const thread of threads) {
     try {
@@ -29072,11 +29079,13 @@ async function runUpdateDealStates() {
         notDealCount += emailIds.length;
       }
     } catch (err) {
+      failed++;
       coreExports.error(`Failed to update states for thread ${thread.thread_id}: ${err.message}`);
     }
   }
 
-  console.log(`[update-states] ${dealCount} → deal, ${notDealCount} → not_deal`);
+  console.log(`[update-states] ${dealCount} → deal, ${notDealCount} → not_deal, ${failed} failed`);
+  if (failed > 0) throw new Error(`${failed} state update(s) failed`)
   return { deal: dealCount, not_deal: notDealCount }
 }
 

@@ -35,6 +35,7 @@ export async function runSaveEvals() {
   const threads = aiOutput.threads || []
 
   let upserted = 0
+  let failed = 0
   for (const thread of threads) {
     try {
       const threadId = sanitizeId(thread.thread_id)
@@ -52,10 +53,12 @@ export async function runSaveEvals() {
         }))
       upserted++
     } catch (err) {
+      failed++
       core.error(`Failed eval for thread ${thread.thread_id}: ${err.message}`)
     }
   }
 
-  console.log(`[save-evals] upserted ${upserted}/${threads.length} thread evaluations`)
+  console.log(`[save-evals] upserted ${upserted}/${threads.length}, failed ${failed}`)
+  if (failed > 0) throw new Error(`${failed}/${threads.length} thread eval(s) failed`)
   return { upserted, total: threads.length }
 }

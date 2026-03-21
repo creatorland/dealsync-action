@@ -44,6 +44,7 @@ export async function runSaveDeals() {
   }
 
   let dealsCreated = 0
+  let failed = 0
   for (const thread of threads) {
     try {
       const threadId = sanitizeId(thread.thread_id)
@@ -78,10 +79,12 @@ export async function runSaveDeals() {
         await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDeal(schema, threadId))
       }
     } catch (err) {
+      failed++
       core.error(`Failed deal for thread ${thread.thread_id}: ${err.message}`)
     }
   }
 
-  console.log(`[save-deals] ${dealsCreated} deals created/updated`)
+  console.log(`[save-deals] ${dealsCreated} created, ${failed} failed`)
+  if (failed > 0) throw new Error(`${failed} deal(s) failed to save`)
   return { deals_created: dealsCreated }
 }

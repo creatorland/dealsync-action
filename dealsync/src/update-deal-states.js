@@ -47,6 +47,7 @@ export async function runUpdateDealStates() {
 
   let dealCount = 0
   let notDealCount = 0
+  let failed = 0
 
   for (const thread of threads) {
     try {
@@ -65,10 +66,12 @@ export async function runUpdateDealStates() {
         notDealCount += emailIds.length
       }
     } catch (err) {
+      failed++
       core.error(`Failed to update states for thread ${thread.thread_id}: ${err.message}`)
     }
   }
 
-  console.log(`[update-states] ${dealCount} → deal, ${notDealCount} → not_deal`)
+  console.log(`[update-states] ${dealCount} → deal, ${notDealCount} → not_deal, ${failed} failed`)
+  if (failed > 0) throw new Error(`${failed} state update(s) failed`)
   return { deal: dealCount, not_deal: notDealCount }
 }
