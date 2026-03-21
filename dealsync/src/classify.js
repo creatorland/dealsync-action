@@ -37,6 +37,9 @@ export async function runClassify() {
     if (decryptedMeta !== null) metadataRaw = decryptedMeta
   }
 
+  // Strip markdown code fences if AI wrapped response in ```json ... ```
+  aiResponseRaw = aiResponseRaw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '')
+
   const aiOutput = JSON.parse(aiResponseRaw)
   const metadata = JSON.parse(metadataRaw)
 
