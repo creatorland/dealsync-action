@@ -204,6 +204,20 @@ export const finalize = {
 }
 
 // ============================================================
+// WORKFLOW TRIGGERS QUERIES
+// ============================================================
+
+export const workflowTriggers = {
+  /** Fetch current workflow_triggers for all deal_states claimed by a trigger hash */
+  fetchByTriggerHash: (schema, triggerHash) =>
+    `SELECT EMAIL_METADATA_ID, WORKFLOW_TRIGGERS FROM ${schema}.DEAL_STATES WHERE ACTIVE_TRIGGER_HASH = '${triggerHash}'`,
+
+  /** Update workflow_triggers for a single deal_state */
+  update: (schema, emailMetadataId, serializedJson) =>
+    `UPDATE ${schema}.DEAL_STATES SET WORKFLOW_TRIGGERS = '${serializedJson}' WHERE EMAIL_METADATA_ID = '${emailMetadataId}'`,
+}
+
+// ============================================================
 // UTILITIES
 // ============================================================
 

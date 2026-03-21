@@ -4,6 +4,7 @@ import { tryDecrypt } from '../../shared/crypto.js'
 import {
   saveResults,
   detection,
+  STATUS,
   sanitizeId,
   sanitizeString,
   sanitizeSchema,
@@ -11,10 +12,9 @@ import {
 } from '../../shared/queries.js'
 import { authenticate, executeSql } from './sxt-client.js'
 
-function resolveStage(thread) {
-  if (thread.language && thread.language.toLowerCase() !== 'en') return 107
-  if (thread.is_deal) return 4
-  return 106
+function resolveStatus(thread) {
+  if (thread.is_deal) return STATUS.DEAL
+  return STATUS.NOT_DEAL
 }
 
 export async function runClassify() {
@@ -54,8 +54,7 @@ export async function runClassify() {
       deals_created: 0,
       emails_classified: 0,
       deal_ids: '',
-      rejected_ids: '',
-      non_english_ids: '',
+      not_deal_ids: '',
     }
   }
 
@@ -64,8 +63,7 @@ export async function runClassify() {
   let dealsCreated = 0
   let emailsClassified = 0
   const dealIdList = []
-  const rejectedIdList = []
-  const nonEnglishIdList = []
+  const notDealIdList = []
 
   for (const thread of threads) {
     try {
@@ -188,21 +186,18 @@ export async function runClassify() {
         dealsCreated++
       }
 
-      // d. Update DEAL_STATES stages
+      // d. Update DEAL_STATES status
       if (threadEmails.length > 0) {
-        const newStage = resolveStage(thread)
+        const newStatus = resolveStatus(thread)
         const emailIds = threadEmails.map((e) => e.EMAIL_METADATA_ID)
         const sqlQuotedIds = toSqlIdList(emailIds)
 
-        if (newStage === 4) {
+        if (newStatus === STATUS.DEAL) {
           await executeSql(apiUrl, jwt, biscuit, detection.updateDeals(schema, sqlQuotedIds))
           dealIdList.push(...emailIds)
-        } else if (newStage === 107) {
-          await executeSql(apiUrl, jwt, biscuit, detection.updateNonEnglish(schema, sqlQuotedIds))
-          nonEnglishIdList.push(...emailIds)
         } else {
-          await executeSql(apiUrl, jwt, biscuit, detection.updateRejected(schema, sqlQuotedIds))
-          rejectedIdList.push(...emailIds)
+          await executeSql(apiUrl, jwt, biscuit, detection.updateNotDeal(schema, sqlQuotedIds))
+          notDealIdList.push(...emailIds)
         }
         emailsClassified += threadEmails.length
       }
@@ -215,7 +210,6 @@ export async function runClassify() {
     deals_created: dealsCreated,
     emails_classified: emailsClassified,
     deal_ids: dealIdList.length > 0 ? toSqlIdList(dealIdList) : '',
-    rejected_ids: rejectedIdList.length > 0 ? toSqlIdList(rejectedIdList) : '',
-    non_english_ids: nonEnglishIdList.length > 0 ? toSqlIdList(nonEnglishIdList) : '',
+    not_deal_ids: notDealIdList.length > 0 ? toSqlIdList(notDealIdList) : '',
   }
 }
