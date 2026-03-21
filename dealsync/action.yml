@@ -35,11 +35,11 @@ inputs:
   pending-classify:
     description: 'Pending detect count (dispatch)'
   max-filter:
-    description: 'Max filter concurrency (dispatch)'
-    default: '600'
+    description: 'Max emails in filtering status at once (dispatch)'
+    default: '30000'
   max-classify:
-    description: 'Max detect concurrency (dispatch)'
-    default: '300'
+    description: 'Max emails in classifying status at once (dispatch)'
+    default: '750'
   filter-batch-size:
     description: 'Emails per filter batch (dispatch)'
     default: '200'

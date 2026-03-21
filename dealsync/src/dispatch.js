@@ -38,8 +38,8 @@ export async function runDispatch() {
   const activeClassify = parseNonNegativeInt(core.getInput('active-classify'), 'active-classify')
   const pendingFilter = parseNonNegativeInt(core.getInput('pending-filter'), 'pending-filter')
   const pendingClassify = parseNonNegativeInt(core.getInput('pending-classify'), 'pending-classify')
-  const maxFilter = parseNonNegativeInt(core.getInput('max-filter') || '600', 'max-filter')
-  const maxClassify = parseNonNegativeInt(core.getInput('max-classify') || '300', 'max-classify')
+  const maxFilter = parseNonNegativeInt(core.getInput('max-filter') || '30000', 'max-filter')
+  const maxClassify = parseNonNegativeInt(core.getInput('max-classify') || '750', 'max-classify')
   const filterBatchSize = parseNonNegativeInt(
     core.getInput('filter-batch-size') || '200',
     'filter-batch-size',

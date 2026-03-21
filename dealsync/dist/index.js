@@ -28108,8 +28108,8 @@ async function runDispatch() {
   const activeClassify = parseNonNegativeInt(coreExports.getInput('active-classify'), 'active-classify');
   const pendingFilter = parseNonNegativeInt(coreExports.getInput('pending-filter'), 'pending-filter');
   const pendingClassify = parseNonNegativeInt(coreExports.getInput('pending-classify'), 'pending-classify');
-  const maxFilter = parseNonNegativeInt(coreExports.getInput('max-filter') || '600', 'max-filter');
-  const maxClassify = parseNonNegativeInt(coreExports.getInput('max-classify') || '300', 'max-classify');
+  const maxFilter = parseNonNegativeInt(coreExports.getInput('max-filter') || '30000', 'max-filter');
+  const maxClassify = parseNonNegativeInt(coreExports.getInput('max-classify') || '750', 'max-classify');
   const filterBatchSize = parseNonNegativeInt(
     coreExports.getInput('filter-batch-size') || '200',
     'filter-batch-size',
