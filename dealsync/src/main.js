@@ -30,10 +30,14 @@ export async function run() {
       )
       return
     }
+    console.log(`[dealsync] command=${command} starting`)
     const result = await handler()
+    console.log(`[dealsync] command=${command} success`)
     core.setOutput('success', 'true')
     core.setOutput('result', JSON.stringify(result))
   } catch (error) {
+    console.log(`[dealsync] command=${command} FAILED: ${error.message}`)
+    console.log(`[dealsync] stack: ${error.stack}`)
     core.setOutput('success', 'false')
     core.setOutput('error', error.message)
     core.setOutput('error_stack', error.stack || '')
