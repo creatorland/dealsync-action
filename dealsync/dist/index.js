@@ -27564,6 +27564,7 @@ async function runCreateDealStates() {
 FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
 WHERE em.PROCESSING_STATUS != 'pending'
   AND em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)
+ORDER BY em.RECEIVED_AT ASC
 LIMIT ${limit} OFFSET ${offset}`;
 
   const rows = await executeSql(apiUrl, jwt, biscuit, diffSql);
