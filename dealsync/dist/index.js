@@ -28166,11 +28166,11 @@ async function runClassify() {
   }
 }
 
-function sleep(ms) {
+function sleep$1(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
 
-function parseNonNegativeInt(value, name) {
+function parseNonNegativeInt$1(value, name) {
   const n = parseInt(value, 10);
   if (isNaN(n) || n < 0) throw new Error(`${name} must be non-negative integer, got: ${value}`)
   return n
@@ -28230,10 +28230,10 @@ async function runDispatch() {
   const w3RpcUrl = coreExports.getInput('w3-rpc-url');
   const processorName = coreExports.getInput('processor-name') || 'Dealsync Processor';
 
-  const maxFilter = parseNonNegativeInt(coreExports.getInput('max-filter') || '30000', 'max-filter');
-  const maxClassify = parseNonNegativeInt(coreExports.getInput('max-classify') || '750', 'max-classify');
-  const filterBatchSize = parseNonNegativeInt(coreExports.getInput('filter-batch-size') || '200', 'filter-batch-size');
-  const classifyBatchSize = parseNonNegativeInt(coreExports.getInput('classify-batch-size') || '5', 'classify-batch-size');
+  const maxFilter = parseNonNegativeInt$1(coreExports.getInput('max-filter') || '30000', 'max-filter');
+  const maxClassify = parseNonNegativeInt$1(coreExports.getInput('max-classify') || '750', 'max-classify');
+  const filterBatchSize = parseNonNegativeInt$1(coreExports.getInput('filter-batch-size') || '200', 'filter-batch-size');
+  const classifyBatchSize = parseNonNegativeInt$1(coreExports.getInput('classify-batch-size') || '5', 'classify-batch-size');
 
   console.log('[dispatch] Authenticating...');
   const jwt = await authenticate(authUrl, authSecret);
@@ -28304,7 +28304,7 @@ async function runDispatch() {
       break
     }
 
-    await sleep(100);
+    await sleep$1(100);
   }
 
   console.log(`[dispatch] Done: ${dispatchedFilter} filter, ${dispatchedClassify} classify`);
@@ -29165,6 +29165,163 @@ async function runUpdateDealStates() {
   return { deal: dealCount, not_deal: notDealCount }
 }
 
+const BATCH_SIZE = 100;
+
+/**
+ * Query the diff between email_metadata and deal_states,
+ * then insert missing deal_states rows with status='pending'.
+ */
+async function runCreateDealStates() {
+  const authUrl = coreExports.getInput('auth-url');
+  const authSecret = coreExports.getInput('auth-secret');
+  const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
+  const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const offset = parseInt(coreExports.getInput('offset') || '0', 10);
+  const limit = parseInt(coreExports.getInput('limit') || '1000', 10);
+
+  console.log(`[create-deal-states] querying diff (limit=${limit}, offset=${offset})`);
+  const jwt = await authenticate(authUrl, authSecret);
+
+  const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
+FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
+WHERE em.PROCESSING_STATUS != 'pending'
+  AND em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)
+LIMIT ${limit} OFFSET ${offset}`;
+
+  const rows = await executeSql(apiUrl, jwt, biscuit, diffSql);
+
+  if (!rows || rows.length === 0) {
+    console.log('[create-deal-states] no new emails to process');
+    return { created_count: 0, skipped_count: 0 }
+  }
+
+  console.log(`[create-deal-states] found ${rows.length} new email(s) to insert`);
+
+  let createdCount = 0;
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const chunk = rows.slice(i, i + BATCH_SIZE);
+    const values = chunk
+      .map((em) => {
+        const id = crypto.randomUUID();
+        return `('${id}', '${em.ID}', '${em.USER_ID}', '${em.THREAD_ID}', '${em.MESSAGE_ID}', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      })
+      .join(',\n');
+
+    const insertSql = `INSERT INTO ${schema}.DEAL_STATES (ID, EMAIL_METADATA_ID, USER_ID, THREAD_ID, MESSAGE_ID, STATUS, CREATED_AT, UPDATED_AT)
+VALUES ${values}
+ON CONFLICT (EMAIL_METADATA_ID) DO NOTHING`;
+
+    await executeSql(apiUrl, jwt, biscuit, insertSql);
+    createdCount += chunk.length;
+    console.log(`[create-deal-states] inserted batch ${Math.floor(i / BATCH_SIZE) + 1} (${chunk.length} rows)`);
+  }
+
+  console.log(`[create-deal-states] done: created=${createdCount}`);
+  return { created_count: createdCount, skipped_count: 0 }
+}
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+function parseNonNegativeInt(value, name) {
+  const n = parseInt(value, 10);
+  if (isNaN(n) || n < 0) throw new Error(`${name} must be non-negative integer, got: ${value}`)
+  return n
+}
+
+/**
+ * Dispatch deal-state worker workflows.
+ *
+ * Counts emails in EMAIL_METADATA that have no corresponding DEAL_STATES row,
+ * calculates how many worker batches are needed, and triggers each via W3 JSON-RPC.
+ */
+async function runDispatchDealStates() {
+  const authUrl = coreExports.getInput('auth-url');
+  const authSecret = coreExports.getInput('auth-secret');
+  const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
+  const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const w3RpcUrl = coreExports.getInput('w3-rpc-url');
+  const creatorName = coreExports.getInput('creator-name');
+  const batchSize = parseNonNegativeInt(
+    coreExports.getInput('deal-state-batch-size') || '500',
+    'deal-state-batch-size',
+  );
+  const maxEmails = parseNonNegativeInt(
+    coreExports.getInput('deal-state-max-emails') || '5000',
+    'deal-state-max-emails',
+  );
+
+  console.log('[dispatch-deal-states] Authenticating...');
+  const jwt = await authenticate(authUrl, authSecret);
+
+  // Count emails without deal_states
+  const countSql = `SELECT COUNT(*) AS CNT FROM EMAIL_CORE_STAGING.EMAIL_METADATA em WHERE em.PROCESSING_STATUS != 'pending' AND em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)`;
+  const rows = await executeSql(apiUrl, jwt, biscuit, countSql);
+  const diffCount = rows[0]?.CNT ?? 0;
+
+  console.log(`[dispatch-deal-states] ${diffCount} emails without deal_states`);
+
+  if (diffCount === 0) {
+    console.log('[dispatch-deal-states] Nothing to dispatch');
+    return { workers_triggered: 0, total_emails: 0 }
+  }
+
+  const emailsToProcess = Math.min(diffCount, maxEmails);
+  const numWorkers = Math.ceil(emailsToProcess / batchSize);
+
+  console.log(
+    `[dispatch-deal-states] Dispatching ${numWorkers} worker(s) for ${emailsToProcess} emails (batch=${batchSize})`,
+  );
+
+  let workersTriggered = 0;
+  for (let i = 0; i < numWorkers; i++) {
+    const offset = i * batchSize;
+    const limit = batchSize;
+
+    const payload = {
+      jsonrpc: '2.0',
+      method: 'w3_triggerWorkflow',
+      params: {
+        workflowName: creatorName,
+        body: { offset: String(offset), limit: String(limit) },
+      },
+      id: i + 1,
+    };
+
+    try {
+      const resp = await fetch(w3RpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+      const result = await resp.json();
+      const triggerHash = result.result?.triggerHash || result.triggerHash || '';
+
+      workersTriggered++;
+      console.log(
+        `[dispatch-deal-states] Worker ${i + 1}/${numWorkers}: offset=${offset} limit=${limit} trigger=${triggerHash.substring(0, 16)}`,
+      );
+    } catch (err) {
+      console.warn(
+        `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} trigger failed: ${err.message}`,
+      );
+    }
+
+    if (i < numWorkers - 1) {
+      await sleep(100);
+    }
+  }
+
+  console.log(
+    `[dispatch-deal-states] Done: ${workersTriggered}/${numWorkers} workers triggered for ${emailsToProcess} emails`,
+  );
+  return { workers_triggered: workersTriggered, total_emails: emailsToProcess }
+}
+
 const COMMANDS = {
   filter: runFilter,
   'build-prompt': runBuildPrompt,
@@ -29181,6 +29338,8 @@ const COMMANDS = {
   'save-evals': runSaveEvals,
   'save-deals': runSaveDeals,
   'update-deal-states': runUpdateDealStates,
+  'create-deal-states': runCreateDealStates,
+  'dispatch-deal-states': runDispatchDealStates,
 };
 
 async function run() {
