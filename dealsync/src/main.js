@@ -13,6 +13,7 @@ import { runFetchAndClassify } from './fetch-and-classify.js'
 import { runSaveEvals } from './save-evals.js'
 import { runSaveDeals } from './save-deals.js'
 import { runUpdateDealStates } from './update-deal-states.js'
+import { runCreateDealStates } from './create-deal-states.js'
 
 const COMMANDS = {
   filter: runFilter,
@@ -30,6 +31,7 @@ const COMMANDS = {
   'save-evals': runSaveEvals,
   'save-deals': runSaveDeals,
   'update-deal-states': runUpdateDealStates,
+  'create-deal-states': runCreateDealStates,
 }
 
 export async function run() {

@@ -1,0 +1,208 @@
+import { jest } from '@jest/globals'
+
+const outputs = {}
+jest.unstable_mockModule('@actions/core', () => ({
+  getInput: jest.fn(),
+  setOutput: jest.fn((name, value) => {
+    outputs[name] = value
+  }),
+  setFailed: jest.fn(),
+  info: jest.fn(),
+  error: jest.fn(),
+}))
+
+const core = await import('@actions/core')
+const { runCreateDealStates } = await import('../src/create-deal-states.js')
+
+function mockInputs(overrides = {}) {
+  const defaults = {
+    'auth-url': 'https://auth.example.com/token',
+    'auth-secret': 'test-secret',
+    'api-url': 'https://sxt.example.com',
+    biscuit: 'test-biscuit',
+    schema: 'dealsync_stg_v1',
+    offset: '0',
+    limit: '1000',
+    ...overrides,
+  }
+  core.getInput.mockImplementation((name) => defaults[name] ?? '')
+}
+
+function sxtResponse(data = []) {
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+function authResponse() {
+  return new Response(JSON.stringify({ data: 'test-jwt' }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+function getSqlCalls(fetchSpy) {
+  return fetchSpy.mock.calls.filter((c) => c[0].includes('/v1/sql'))
+}
+
+function getSqlText(call) {
+  return JSON.parse(call[1].body).sqlText
+}
+
+describe('create-deal-states command', () => {
+  let fetchSpy
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    for (const key of Object.keys(outputs)) delete outputs[key]
+    fetchSpy = jest.spyOn(globalThis, 'fetch')
+  })
+
+  afterEach(() => {
+    fetchSpy.mockRestore()
+  })
+
+  it('queries diff, inserts 2 rows, returns created_count=2', async () => {
+    mockInputs({ limit: '500', offset: '10' })
+
+    const diffRows = [
+      { ID: 'em-1', USER_ID: 'user-1', THREAD_ID: 'thread-1', MESSAGE_ID: 'msg-1' },
+      { ID: 'em-2', USER_ID: 'user-2', THREAD_ID: 'thread-2', MESSAGE_ID: 'msg-2' },
+    ]
+
+    fetchSpy
+      .mockResolvedValueOnce(authResponse()) // auth
+      .mockResolvedValueOnce(sxtResponse(diffRows)) // diff query
+      .mockResolvedValueOnce(sxtResponse()) // insert
+
+    const result = await runCreateDealStates()
+
+    expect(result).toEqual({ created_count: 2, skipped_count: 0 })
+
+    const sqlCalls = getSqlCalls(fetchSpy)
+    expect(sqlCalls).toHaveLength(2) // diff + insert
+
+    // Verify diff query
+    const diffSql = getSqlText(sqlCalls[0])
+    expect(diffSql).toContain('EMAIL_CORE_STAGING.EMAIL_METADATA')
+    expect(diffSql).toContain('dealsync_stg_v1.DEAL_STATES')
+    expect(diffSql).toContain('LIMIT 500')
+    expect(diffSql).toContain('OFFSET 10')
+    expect(diffSql).toContain("PROCESSING_STATUS != 'pending'")
+
+    // Verify insert query
+    const insertSql = getSqlText(sqlCalls[1])
+    expect(insertSql).toContain('INSERT INTO dealsync_stg_v1.DEAL_STATES')
+    expect(insertSql).toContain('ON CONFLICT (EMAIL_METADATA_ID) DO NOTHING')
+    expect(insertSql).toContain("'em-1'")
+    expect(insertSql).toContain("'em-2'")
+    expect(insertSql).toContain("'pending'")
+    expect(insertSql).toContain('CURRENT_TIMESTAMP')
+  })
+
+  it('returns created_count=0 when no diff rows found', async () => {
+    mockInputs()
+
+    fetchSpy
+      .mockResolvedValueOnce(authResponse()) // auth
+      .mockResolvedValueOnce(sxtResponse([])) // diff query returns empty
+
+    const result = await runCreateDealStates()
+
+    expect(result).toEqual({ created_count: 0, skipped_count: 0 })
+
+    // Should only have the diff query, no insert
+    const sqlCalls = getSqlCalls(fetchSpy)
+    expect(sqlCalls).toHaveLength(1)
+  })
+
+  it('batches inserts in chunks of 100', async () => {
+    mockInputs()
+
+    // Generate 150 rows to test chunking
+    const diffRows = Array.from({ length: 150 }, (_, i) => ({
+      ID: `em-${i}`,
+      USER_ID: `user-${i}`,
+      THREAD_ID: `thread-${i}`,
+      MESSAGE_ID: `msg-${i}`,
+    }))
+
+    fetchSpy
+      .mockResolvedValueOnce(authResponse()) // auth
+      .mockResolvedValueOnce(sxtResponse(diffRows)) // diff query
+      .mockResolvedValueOnce(sxtResponse()) // insert batch 1 (100)
+      .mockResolvedValueOnce(sxtResponse()) // insert batch 2 (50)
+
+    const result = await runCreateDealStates()
+
+    expect(result).toEqual({ created_count: 150, skipped_count: 0 })
+
+    const sqlCalls = getSqlCalls(fetchSpy)
+    expect(sqlCalls).toHaveLength(3) // diff + 2 inserts
+
+    // Verify first insert batch has 100 rows
+    const firstInsertSql = getSqlText(sqlCalls[1])
+    expect(firstInsertSql).toContain("'em-0'")
+    expect(firstInsertSql).toContain("'em-99'")
+
+    // Verify second insert batch has 50 rows
+    const secondInsertSql = getSqlText(sqlCalls[2])
+    expect(secondInsertSql).toContain("'em-100'")
+    expect(secondInsertSql).toContain("'em-149'")
+  })
+
+  it('rejects invalid schema', async () => {
+    mockInputs({ schema: 'schema; DROP TABLE' })
+    await expect(runCreateDealStates()).rejects.toThrow('Invalid schema')
+  })
+
+  it('authenticates via proxy with x-shared-secret', async () => {
+    mockInputs()
+
+    fetchSpy
+      .mockResolvedValueOnce(authResponse())
+      .mockResolvedValueOnce(sxtResponse([]))
+
+    await runCreateDealStates()
+
+    const authCall = fetchSpy.mock.calls[0]
+    expect(authCall[0]).toBe('https://auth.example.com/token')
+    expect(authCall[1].method).toBe('GET')
+    expect(authCall[1].headers['x-shared-secret']).toBe('test-secret')
+  })
+
+  it('uses correct SQL column names in diff and insert', async () => {
+    mockInputs()
+
+    const diffRows = [
+      { ID: 'em-abc', USER_ID: 'u-1', THREAD_ID: 't-1', MESSAGE_ID: 'm-1' },
+    ]
+
+    fetchSpy
+      .mockResolvedValueOnce(authResponse())
+      .mockResolvedValueOnce(sxtResponse(diffRows))
+      .mockResolvedValueOnce(sxtResponse())
+
+    await runCreateDealStates()
+
+    const sqlCalls = getSqlCalls(fetchSpy)
+
+    // Diff query selects correct columns
+    const diffSql = getSqlText(sqlCalls[0])
+    expect(diffSql).toContain('em.ID')
+    expect(diffSql).toContain('em.USER_ID')
+    expect(diffSql).toContain('em.THREAD_ID')
+    expect(diffSql).toContain('em.MESSAGE_ID')
+
+    // Insert uses correct column order
+    const insertSql = getSqlText(sqlCalls[1])
+    expect(insertSql).toContain(
+      'ID, EMAIL_METADATA_ID, USER_ID, THREAD_ID, MESSAGE_ID, STATUS, CREATED_AT, UPDATED_AT',
+    )
+    expect(insertSql).toContain("'em-abc'")
+    expect(insertSql).toContain("'u-1'")
+    expect(insertSql).toContain("'t-1'")
+    expect(insertSql).toContain("'m-1'")
+  })
+})
