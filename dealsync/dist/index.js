@@ -1,6 +1,6 @@
 import require$$0 from 'os';
 import * as crypto from 'crypto';
-import crypto__default, { randomBytes, createCipheriv, createDecipheriv, createHash } from 'crypto';
+import crypto__default from 'crypto';
 import require$$1 from 'fs';
 import require$$1$4 from 'path';
 import require$$2 from 'http';
@@ -27255,413 +27255,6 @@ function requireCore () {
 var coreExports = requireCore();
 
 /**
- * Derive a 32-byte key from a passphrase using SHA-256.
- */
-function deriveKey(passphrase) {
-  return createHash('sha256').update(passphrase).digest()
-}
-
-/**
- * Encrypt a string using AES-256-GCM.
- * Returns base64(iv + authTag + ciphertext).
- */
-function encryptValue(plaintext, key) {
-  const keyHash = deriveKey(key);
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', keyHash, iv);
-
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf-8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-
-  return Buffer.concat([iv, tag, encrypted]).toString('base64')
-}
-
-/**
- * Decrypt an AES-256-GCM ciphertext.
- * Expects base64(iv + authTag + ciphertext).
- */
-function decryptValue(ciphertext, key) {
-  const keyHash = deriveKey(key);
-  const buf = Buffer.from(ciphertext, 'base64');
-
-  const iv = buf.subarray(0, 12);
-  const tag = buf.subarray(12, 28);
-  const encrypted = buf.subarray(28);
-
-  const decipher = createDecipheriv('aes-256-gcm', keyHash, iv);
-  decipher.setAuthTag(tag);
-
-  return Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf-8')
-}
-
-/**
- * Try to decrypt a value. Returns decrypted string on success, null on failure.
- */
-function tryDecrypt(value, key) {
-  try {
-    return decryptValue(value, key)
-  } catch {
-    return null
-  }
-}
-
-var blockedDomains = [
-	".gov",
-	"automations.",
-	"crm.",
-	"email.",
-	"mailer.",
-	"marketing.",
-	"news.",
-	"newsletter.",
-	"transactional.",
-	"updates.",
-	"mailer-"
-];
-
-var blockedPrefixes = [
-	"accountservices@",
-	"accounts@",
-	"admin@",
-	"alerts@",
-	"auto@",
-	"automated@",
-	"billing@",
-	"care@",
-	"contact@",
-	"customerservice@",
-	"do-not-reply@",
-	"do_not_reply@",
-	"donotreply@",
-	"edm.support@",
-	"help@",
-	"imports@",
-	"info@",
-	"invitations@",
-	"mailer@",
-	"marketing@",
-	"meetings-noreply@google.com",
-	"no-reply@",
-	"noreply@",
-	"notification@",
-	"notify@",
-	"promotions@",
-	"quickbooks@",
-	"robot@",
-	"sales@",
-	"service@",
-	"social@",
-	"socials@",
-	"subscriptions@",
-	"support@",
-	"team@",
-	"updates@",
-	"verify@",
-	"welcome@"
-];
-
-var automatedSubjects = [
-	"newsletter",
-	"order confirmation",
-	"promo",
-	"promotion",
-	"receipt for your purchase",
-	"special offer",
-	"subscription confirmation",
-	"thank you for your order",
-	"updates",
-	"weekly digest"
-];
-
-var freeEmailPatterns = [
-	"^(info|support|updates|no-?reply|notifications|newsletter|promo)[a-z0-9]*@(gmail|yahoo|outlook|hotmail)\\.(com|net)$"
-];
-
-var nonPersonalizedNames = [
-	"ad",
-	"customer support",
-	"daily update",
-	"digest",
-	"mailing list",
-	"newsletter",
-	"promo",
-	"subscription",
-	"system notifications",
-	"the team",
-	"updates team",
-	"weekly update"
-];
-
-var headers = [
-	"list-id",
-	"precedence",
-	"x-mailing-list"
-];
-var values = [
-	"auto_reply",
-	"bulk"
-];
-var tools = [
-	"activecampaign",
-	"constantcontact",
-	"hubspot",
-	"mailchimp",
-	"sendgrid"
-];
-var marketingHeaders = {
-	headers: headers,
-	values: values,
-	tools: tools
-};
-
-function sanitizeId$2(id) {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
-    throw new Error(`Invalid ID format: ${id}`)
-  }
-  return id
-}
-
-function getHeader$2(email, name) {
-  const header = email.topLevelHeaders?.find((h) => h.name.toLowerCase() === name.toLowerCase());
-  return header?.value || ''
-}
-
-function extractEmailAddress$1(from) {
-  const match = from.match(/<([^>]+)>/);
-  return (match ? match[1] : from).trim().toLowerCase()
-}
-
-function extractDisplayName$1(from) {
-  const match = from.match(/^(.+?)\s*</);
-  return match
-    ? match[1]
-        .trim()
-        .replace(/^["']|["']$/g, '')
-        .toLowerCase()
-    : ''
-}
-
-function checkAuthenticationResults(email) {
-  const authResults = getHeader$2(email, 'authentication-results');
-  if (!authResults) return false
-  const hasDkim = authResults.includes('dkim=pass');
-  const hasSpf = authResults.includes('spf=pass');
-  const hasDmarc = authResults.includes('dmarc=pass');
-  return !hasDkim && !hasSpf && !hasDmarc
-}
-
-function checkSender(email) {
-  const fromValue = getHeader$2(email, 'from');
-  if (!fromValue) return false
-  const emailAddr = extractEmailAddress$1(fromValue);
-  for (const prefix of blockedPrefixes) {
-    if (emailAddr.startsWith(prefix)) return true
-  }
-  const atIndex = emailAddr.indexOf('@');
-  if (atIndex === -1) return false
-  const domain = emailAddr.slice(atIndex + 1);
-  for (const blockedDomain of blockedDomains) {
-    if (domain.includes(blockedDomain)) return true
-  }
-  return false
-}
-
-function checkBulkHeaders(email) {
-  const headers = email.topLevelHeaders || [];
-  for (const bulkHeader of marketingHeaders.headers) {
-    const found = headers.find((h) => h.name.toLowerCase() === bulkHeader.toLowerCase());
-    if (found) return true
-  }
-  for (const header of headers) {
-    const value = (header.value || '').toLowerCase();
-    for (const tool of marketingHeaders.tools) {
-      if (value.includes(tool)) return true
-    }
-  }
-  const precedence = getHeader$2(email, 'precedence').toLowerCase();
-  for (const val of marketingHeaders.values) {
-    if (precedence.includes(val)) return true
-  }
-  return false
-}
-
-function checkSubject(email) {
-  const subject = getHeader$2(email, 'subject').toLowerCase();
-  if (!subject) return false
-  for (const term of automatedSubjects) {
-    if (subject.includes(term.toLowerCase())) return true
-  }
-  return false
-}
-
-function checkSenderName(email) {
-  const fromValue = getHeader$2(email, 'from');
-  if (!fromValue) return false
-  const displayName = extractDisplayName$1(fromValue);
-  if (!displayName) return false
-  return nonPersonalizedNames.some((name) => displayName === name.toLowerCase())
-}
-
-function checkFreeEmail(email) {
-  const fromValue = getHeader$2(email, 'from');
-  if (!fromValue) return false
-  const emailAddr = extractEmailAddress$1(fromValue);
-  for (const pattern of freeEmailPatterns) {
-    const regex = new RegExp(pattern, 'i');
-    if (regex.test(emailAddr)) return true
-  }
-  return false
-}
-
-async function runFilter() {
-  const encrypt = coreExports.getInput('encrypt') !== 'false';
-  const encryptionKey = encrypt ? coreExports.getInput('encryption-key') : null;
-
-  let emailsJson = coreExports.getInput('emails');
-  if (!emailsJson || emailsJson === '[]') {
-    return { filtered_ids: '', rejected_ids: '' }
-  }
-
-  // Decrypt emails input if encrypted
-  if (encryptionKey) {
-    const decrypted = tryDecrypt(emailsJson, encryptionKey);
-    if (decrypted !== null) emailsJson = decrypted;
-  }
-
-  const emails = JSON.parse(emailsJson);
-  const filteredIds = [];
-  const rejectedIds = [];
-
-  for (const email of emails) {
-    const rejected =
-      checkAuthenticationResults(email) ||
-      checkSender(email) ||
-      checkBulkHeaders(email) ||
-      checkSubject(email) ||
-      checkSenderName(email) ||
-      checkFreeEmail(email);
-
-    if (rejected) {
-      rejectedIds.push(email.id);
-    } else {
-      filteredIds.push(email.id);
-    }
-  }
-
-  return {
-    filtered_ids: filteredIds.map((id) => `'${sanitizeId$2(id)}'`).join(','),
-    rejected_ids: rejectedIds.map((id) => `'${sanitizeId$2(id)}'`).join(','),
-  }
-}
-
-var classificationInstructions = "# Classification Instructions\n\n## What is a Deal?\n\nA deal is any business opportunity, partnership, sponsorship, collaboration,\nor commercial arrangement discussed in the email thread. Look for:\n\n- Explicit mentions of payment, compensation, rates, or fees\n- Brand partnership or sponsorship proposals\n- Product collaboration or gifting arrangements\n- Event appearance or speaking engagement offers\n- Licensing or content creation agreements\n\n## What is NOT a Deal?\n\n- Newsletters, automated notifications, marketing blasts\n- Social media notifications or follower alerts\n- Shipping/tracking/order confirmations\n- Support tickets or customer service threads\n- Personal conversations unrelated to business\n\n## Scoring Guide (ai_score 1-10)\n\n- 1-3: Unlikely deal, vague or tangential business mention\n- 4-6: Possible deal, some indicators but not confirmed\n- 7-9: Likely deal, clear business intent with specifics\n- 10: Confirmed deal, explicit terms or signed agreement\n\n## Category Definitions\n\n- new: First contact, deal not yet discussed in depth\n- in_progress: Active negotiation, terms being discussed\n- completed: Deal closed, agreement reached or signed\n- likely_scam: Suspicious patterns, too-good-to-be-true offers\n- low_confidence: Ambiguous, cannot determine with confidence\n\n## Language Detection\n\nIf the primary language of the email thread is not English,\nset language to the ISO 639-1 code and is_deal to false\nunless the deal context is clearly understandable.\n";
-
-const STRUCTURAL_TEMPLATE = `You are a deal classification engine. You MUST respond with valid JSON matching this exact schema:
-
-{
-  "threads": [
-    {
-      "thread_id": "<thread_id>",
-      "is_deal": boolean,
-      "ai_score": number (1-10),
-      "category": "new" | "in_progress" | "completed" | "likely_scam" | "low_confidence",
-      "deal_name": string | null,
-      "deal_type": string | null,
-      "deal_value": string | null,
-      "currency": string | null,
-      "main_contact": { "name": string, "email": string, "company": string | null, "title": string | null } | null,
-      "ai_summary": string,
-      "language": string (ISO 639-1)
-    }
-  ]
-}
-
-Rules:
-- Respond ONLY with the JSON object. No markdown, no explanation.
-- One entry per thread_id in the input.
-- If is_deal is false, set deal_name/deal_type/deal_value/main_contact to null.
-- ai_summary must be a concise summary of the thread's deal relevance (max 500 chars).
-
-{{CLASSIFICATION_INSTRUCTIONS}}`;
-
-function getHeader$1(email, name) {
-  const header = email.topLevelHeaders?.find((h) => h.name.toLowerCase() === name.toLowerCase());
-  return header?.value || ''
-}
-
-function groupByThread(emails) {
-  const threads = {};
-  for (const email of emails) {
-    const threadId = email.threadId || email.id;
-    if (!threads[threadId]) threads[threadId] = [];
-    threads[threadId].push(email);
-  }
-  return threads
-}
-
-function buildPrompt(emails) {
-  const threads = groupByThread(emails);
-  let threadData = '';
-
-  for (const [threadId, threadEmails] of Object.entries(threads)) {
-    const isIncremental =
-      threadEmails[0].previousAiSummary != null && threadEmails[0].previousAiSummary !== '';
-
-    if (isIncremental) {
-      threadData += `--- Thread: ${threadId} (isIncremental: true) ---\n`;
-      threadData += `Previous AI Summary: ${threadEmails[0].previousAiSummary}\n\n`;
-    } else {
-      threadData += `--- Thread: ${threadId} (isIncremental: false) ---\n`;
-    }
-
-    threadEmails.forEach((email, i) => {
-      const from = getHeader$1(email, 'from');
-      const subject = getHeader$1(email, 'subject');
-      const date = getHeader$1(email, 'date');
-      threadData += `Email ${i + 1}: From: ${from} | Subject: ${subject} | Date: ${date}\n`;
-      const body = email.body || email.replyBody || '[no body]';
-      threadData += `Body: ${body}\n\n`;
-    });
-  }
-
-  const systemPrompt = STRUCTURAL_TEMPLATE.replace(
-    '{{CLASSIFICATION_INSTRUCTIONS}}',
-    classificationInstructions,
-  );
-
-  return { systemPrompt, userPrompt: threadData.trim() }
-}
-
-async function runBuildPrompt() {
-  const encrypt = coreExports.getInput('encrypt') !== 'false';
-  const encryptionKey = encrypt ? coreExports.getInput('encryption-key') : null;
-
-  let emailsJson = coreExports.getInput('emails');
-  if (!emailsJson || emailsJson === '[]') {
-    return { system_prompt: '', user_prompt: '' }
-  }
-
-  // Decrypt emails input if encrypted
-  if (encryptionKey) {
-    const decrypted = tryDecrypt(emailsJson, encryptionKey);
-    if (decrypted !== null) emailsJson = decrypted;
-  }
-
-  const emails = JSON.parse(emailsJson);
-  const { systemPrompt, userPrompt } = buildPrompt(emails);
-
-  const result = { system_prompt: systemPrompt, user_prompt: userPrompt };
-
-  // Encrypt prompts if requested
-  if (encryptionKey) {
-    result.system_prompt = encryptValue(systemPrompt, encryptionKey);
-    result.user_prompt = encryptValue(userPrompt, encryptionKey);
-  }
-
-  return result
-}
-
-/**
  * Shared SQL queries for Dealsync W3 workflow actions.
  *
  * All queries target DEAL_STATES (not EMAIL_METADATA).
@@ -27685,9 +27278,7 @@ const STATUS = {
   PENDING_CLASSIFICATION: 'pending_classification',
   CLASSIFYING: 'classifying',
   DEAL: 'deal',
-  NOT_DEAL: 'not_deal',
-  FILTER_REJECTED: 'filter_rejected',
-};
+  NOT_DEAL: 'not_deal'};
 
 // ============================================================
 // ORCHESTRATOR QUERIES
@@ -27866,20 +27457,6 @@ const saveResults = {
 };
 
 // ============================================================
-// WORKFLOW TRIGGERS QUERIES
-// ============================================================
-
-const workflowTriggers = {
-  /** Fetch current workflow_triggers for all deal_states claimed by a trigger hash */
-  fetchByBatchId: (schema, batchId) =>
-    `SELECT EMAIL_METADATA_ID, WORKFLOW_TRIGGERS FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
-
-  /** Update workflow_triggers for a single deal_state */
-  update: (schema, emailMetadataId, serializedJson) =>
-    `UPDATE ${schema}.DEAL_STATES SET WORKFLOW_TRIGGERS = '${serializedJson}' WHERE EMAIL_METADATA_ID = '${emailMetadataId}'`,
-};
-
-// ============================================================
 // BATCH EVENTS (append-only audit log)
 // ============================================================
 
@@ -27965,205 +27542,60 @@ async function executeSql(apiUrl, jwt, biscuit, sql) {
   }
 }
 
-function resolveStatus(thread) {
-  if (thread.is_deal) return STATUS.DEAL
-  return STATUS.NOT_DEAL
-}
+const BATCH_SIZE = 100;
 
-async function runClassify() {
-  const encrypt = coreExports.getInput('encrypt') !== 'false';
-  const encryptionKey = encrypt ? coreExports.getInput('encryption-key') : null;
-
+/**
+ * Query the diff between email_metadata and deal_states,
+ * then insert missing deal_states rows with status='pending'.
+ */
+async function runCreateDealStates() {
   const authUrl = coreExports.getInput('auth-url');
   const authSecret = coreExports.getInput('auth-secret');
   const apiUrl = coreExports.getInput('api-url');
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const offset = parseInt(coreExports.getInput('offset') || '0', 10);
+  const limit = parseInt(coreExports.getInput('limit') || '1000', 10);
 
-  // Decrypt inputs
-  let aiResponseRaw = coreExports.getInput('ai-response');
-  let metadataRaw = coreExports.getInput('metadata');
-  if (encryptionKey) {
-    const decryptedAi = tryDecrypt(aiResponseRaw, encryptionKey);
-    if (decryptedAi !== null) aiResponseRaw = decryptedAi;
-    const decryptedMeta = tryDecrypt(metadataRaw, encryptionKey);
-    if (decryptedMeta !== null) metadataRaw = decryptedMeta;
-  }
-
-  // Strip markdown code fences if AI wrapped response in ```json ... ```
-  aiResponseRaw = aiResponseRaw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
-
-  const aiOutput = JSON.parse(aiResponseRaw);
-  const metadata = JSON.parse(metadataRaw);
-
-  const metadataByThread = {};
-  for (const row of metadata) {
-    const tid = row.THREAD_ID;
-    if (!metadataByThread[tid]) metadataByThread[tid] = [];
-    metadataByThread[tid].push(row);
-  }
-
-  const threads = aiOutput.threads || [];
-  if (threads.length === 0) {
-    coreExports.info('No threads to process');
-    return {
-      deals_created: 0,
-      emails_classified: 0,
-      deal_ids: '',
-      not_deal_ids: '',
-    }
-  }
-
+  console.log(`[create-deal-states] querying diff (limit=${limit}, offset=${offset})`);
   const jwt = await authenticate(authUrl, authSecret);
 
-  let dealsCreated = 0;
-  let emailsClassified = 0;
-  let failedThreads = 0;
-  const dealIdList = [];
-  const notDealIdList = [];
+  const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
+FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
+WHERE em.PROCESSING_STATUS != 'pending'
+  AND em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)
+LIMIT ${limit} OFFSET ${offset}`;
 
-  for (const thread of threads) {
-    try {
-      const threadId = sanitizeId$1(thread.thread_id);
-      const threadEmails = metadataByThread[threadId] || [];
-      const emailCount = threadEmails.length;
-      const userId = threadEmails.length > 0 ? sanitizeId$1(threadEmails[0].USER_ID) : '';
+  const rows = await executeSql(apiUrl, jwt, biscuit, diffSql);
 
-      // a. INSERT AI_EVALUATION_AUDITS
-      const auditId = crypto.randomUUID();
-      const rawJson = sanitizeString(JSON.stringify(thread).substring(0, 6400));
-      await executeSql(
-        apiUrl,
-        jwt,
-        biscuit,
-        saveResults.insertAudit(schema, {
-          id: auditId,
-          threadCount: threads.length,
-          emailCount,
-          cost: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          model: '',
-          evaluation: rawJson,
-        }),
-      );
-
-      // b. DELETE + INSERT EMAIL_THREAD_EVALUATIONS
-      const evalId = crypto.randomUUID();
-      const category = sanitizeString(thread.category || '');
-      const aiSummary = sanitizeString(thread.ai_summary || '');
-      const isDeal = thread.is_deal ? 'true' : 'false';
-      const isLikelyScam =
-        (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false';
-      const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0;
-
-      await executeSql(apiUrl, jwt, biscuit, saveResults.deleteThreadEvaluation(schema, threadId));
-      await executeSql(
-        apiUrl,
-        jwt,
-        biscuit,
-        saveResults.insertThreadEvaluation(schema, {
-          id: evalId,
-          threadId,
-          auditId,
-          category,
-          summary: aiSummary,
-          isDeal,
-          likelyScam: isLikelyScam,
-          score: aiScore,
-        }),
-      );
-
-      // c. If is_deal — create deal + deal_contact (one deal per thread)
-      if (thread.is_deal) {
-        const dealId = crypto.randomUUID();
-        const dealName = sanitizeString(thread.deal_name || '');
-        const dealType = sanitizeString(thread.deal_type || '');
-        const dealValue =
-          typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
-        const currency = sanitizeString(thread.currency || 'USD');
-        const contactEmail = thread.main_contact
-          ? sanitizeString(thread.main_contact.email || '')
-          : '';
-        const brand = thread.main_contact
-          ? sanitizeString(thread.main_contact.company || '')
-          : '';
-
-        // One deal per thread — delete existing, insert new
-        await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDeal(schema, threadId));
-        await executeSql(
-          apiUrl,
-          jwt,
-          biscuit,
-          saveResults.insertDeal(schema, {
-            id: dealId,
-            userId,
-            threadId,
-            evalId,
-            dealName,
-            dealType,
-            category,
-            value: dealValue,
-            currency,
-            brand,
-          }),
-        );
-
-        // Deal contact — use email directly, no contact_id FK
-        if (contactEmail) {
-          await executeSql(
-            apiUrl,
-            jwt,
-            biscuit,
-            saveResults.deleteDealContact(schema, dealId),
-          );
-          await executeSql(
-            apiUrl,
-            jwt,
-            biscuit,
-            saveResults.insertDealContact(schema, {
-              id: crypto.randomUUID(),
-              dealId,
-              contactEmail,
-            }),
-          );
-        }
-
-        dealsCreated++;
-      }
-
-      // d. Update DEAL_STATES status
-      if (threadEmails.length > 0) {
-        const newStatus = resolveStatus(thread);
-        const emailIds = threadEmails.map((e) => e.EMAIL_METADATA_ID);
-        const sqlQuotedIds = toSqlIdList(emailIds);
-
-        if (newStatus === STATUS.DEAL) {
-          await executeSql(apiUrl, jwt, biscuit, detection.updateDeals(schema, sqlQuotedIds));
-          dealIdList.push(...emailIds);
-        } else {
-          await executeSql(apiUrl, jwt, biscuit, detection.updateNotDeal(schema, sqlQuotedIds));
-          notDealIdList.push(...emailIds);
-        }
-        emailsClassified += threadEmails.length;
-      }
-    } catch (err) {
-      failedThreads++;
-      coreExports.error(`Failed to process thread ${thread.thread_id}: ${err.message}`);
-    }
+  if (!rows || rows.length === 0) {
+    console.log('[create-deal-states] no new emails to process');
+    return { created_count: 0, skipped_count: 0 }
   }
 
-  if (failedThreads > 0) {
-    throw new Error(`${failedThreads} thread(s) failed to classify (${emailsClassified} succeeded)`)
+  console.log(`[create-deal-states] found ${rows.length} new email(s) to insert`);
+
+  let createdCount = 0;
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const chunk = rows.slice(i, i + BATCH_SIZE);
+    const values = chunk
+      .map((em) => {
+        const id = crypto.randomUUID();
+        return `('${id}', '${em.ID}', '${em.USER_ID}', '${em.THREAD_ID}', '${em.MESSAGE_ID}', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      })
+      .join(',\n');
+
+    const insertSql = `INSERT INTO ${schema}.DEAL_STATES (ID, EMAIL_METADATA_ID, USER_ID, THREAD_ID, MESSAGE_ID, STATUS, CREATED_AT, UPDATED_AT)
+VALUES ${values}
+ON CONFLICT (EMAIL_METADATA_ID) DO NOTHING`;
+
+    await executeSql(apiUrl, jwt, biscuit, insertSql);
+    createdCount += chunk.length;
+    console.log(`[create-deal-states] inserted batch ${Math.floor(i / BATCH_SIZE) + 1} (${chunk.length} rows)`);
   }
 
-  return {
-    deals_created: dealsCreated,
-    emails_classified: emailsClassified,
-    failed_threads: failedThreads,
-    deal_ids: dealIdList.length > 0 ? toSqlIdList(dealIdList) : '',
-    not_deal_ids: notDealIdList.length > 0 ? toSqlIdList(notDealIdList) : '',
-  }
+  console.log(`[create-deal-states] done: created=${createdCount}`);
+  return { created_count: createdCount, skipped_count: 0 }
 }
 
 function sleep$1(ms) {
@@ -28311,239 +27743,457 @@ async function runDispatch() {
   return { dispatched_filter_count: dispatchedFilter, dispatched_classify_count: dispatchedClassify }
 }
 
-/**
- * Extract userId, messageIds, and syncStateId from SxT metadata rows.
- * Replaces the GHA-only `fromJSON(x).*.FIELD` wildcard syntax that W3 doesn't support.
- *
- * Input: metadata (JSON array of rows with USER_ID, MESSAGE_ID, SYNC_STATE_ID)
- * Output: { userId, messageIds, syncStateId, metadata } — ready to POST to content fetcher
- */
-async function runExtractMetadata() {
-  const metadataRaw = coreExports.getInput('metadata');
-  if (!metadataRaw || metadataRaw === '[]') {
-    return { userId: '', messageIds: [], syncStateId: '', metadata: '[]' }
-  }
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms))
+}
 
-  const rows = JSON.parse(metadataRaw);
-  if (rows.length === 0) {
-    return { userId: '', messageIds: [], syncStateId: '', metadata: '[]' }
-  }
-
-  const userId = rows[0].USER_ID;
-  const syncStateId = rows[0].SYNC_STATE_ID;
-  const messageIds = rows.map((r) => r.MESSAGE_ID);
-
-  return { userId, messageIds, syncStateId, metadata: metadataRaw }
+function parseNonNegativeInt(value, name) {
+  const n = parseInt(value, 10);
+  if (isNaN(n) || n < 0) throw new Error(`${name} must be non-negative integer, got: ${value}`)
+  return n
 }
 
 /**
- * Standalone SxT query/execute command.
- * Authenticates via proxy, uses pre-generated biscuit from input.
- */
-async function runSxtQuery() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = coreExports.getInput('schema');
-  const sql = coreExports.getInput('sql');
-
-  if (schema) sanitizeSchema(schema);
-
-  coreExports.info(`sxt-query: schema=${schema || '(none)'}, sql=${sql.substring(0, 100)}...`);
-  const jwt = await authenticate(authUrl, authSecret);
-  const result = await executeSql(apiUrl, jwt, biscuit, sql);
-  coreExports.info(`sxt-query: returned ${Array.isArray(result) ? result.length : 0} rows`);
-
-  return { result }
-}
-
-const MAX_MESSAGE_IDS = 50;
-
-/**
- * Fetch email content from the content fetcher service.
- * Handles chunking (max 50 messageIds per call) and result merging.
+ * Dispatch deal-state worker workflows.
  *
- * Input: metadata (JSON array from SxT), content-fetcher-url, encryption-key
- * Output: array of email content objects (optionally encrypted)
+ * Counts emails in EMAIL_METADATA that have no corresponding DEAL_STATES row,
+ * calculates how many worker batches are needed, and triggers each via W3 JSON-RPC.
  */
-async function runFetchContent() {
-  const encrypt = coreExports.getInput('encrypt') !== 'false';
-  const encryptionKey = encrypt ? coreExports.getInput('encryption-key') : null;
-  const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
-  const fieldsInput = coreExports.getInput('fields'); // comma-separated field names, e.g. "messageId,labelIds,topLevelHeaders"
-
-  let metadataRaw = coreExports.getInput('metadata');
-  if (!metadataRaw || metadataRaw === '[]') {
-    return '[]'
-  }
-
-  // Decrypt metadata if encrypted
-  if (encryptionKey) {
-    const decrypted = tryDecrypt(metadataRaw, encryptionKey);
-    if (decrypted !== null) metadataRaw = decrypted;
-  }
-
-  const rows = JSON.parse(metadataRaw);
-  if (rows.length === 0) {
-    return '[]'
-  }
-
-  const userId = rows[0].USER_ID;
-  const syncStateId = rows[0].SYNC_STATE_ID;
-  const allMessageIds = rows.map((r) => r.MESSAGE_ID);
-
-  // Chunk messageIds into batches of 50
-  const chunks = [];
-  for (let i = 0; i < allMessageIds.length; i += MAX_MESSAGE_IDS) {
-    chunks.push(allMessageIds.slice(i, i + MAX_MESSAGE_IDS));
-  }
-
-  console.log(`[fetch-content] ${allMessageIds.length} messages in ${chunks.length} batch(es), url=${contentFetcherUrl}`);
-  coreExports.info(`Fetching content: ${allMessageIds.length} messages in ${chunks.length} batch(es)`);
-
-  const allEmails = [];
-  const errors = [];
-
-  for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i];
-    try {
-      const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, syncStateId, messageIds: chunk }),
-      });
-
-      if (!resp.ok) {
-        const body = await resp.text();
-        throw new Error(`HTTP ${resp.status}: ${body}`)
-      }
-
-      const result = await resp.json();
-      const emails = result.data || result;
-
-      // If fields specified, strip unnecessary data (e.g. body, replyBody, attachments)
-      const fields = fieldsInput ? fieldsInput.split(',').map((f) => f.trim()) : null;
-
-      // Merge metadata (threadId, emailMetadataId, previousAiSummary) into each email
-      for (const email of emails) {
-        if (fields) {
-          for (const key of Object.keys(email)) {
-            if (!fields.includes(key) && key !== 'messageId') delete email[key];
-          }
-        }
-        const meta = rows.find((r) => r.MESSAGE_ID === email.messageId);
-        if (meta) {
-          email.id = meta.EMAIL_METADATA_ID;
-          email.threadId = meta.THREAD_ID;
-          if (meta.PREVIOUS_AI_SUMMARY) {
-            email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY;
-          }
-          if (meta.EXISTING_DEAL_ID) {
-            email.existingDealId = meta.EXISTING_DEAL_ID;
-          }
-        }
-        allEmails.push(email);
-      }
-
-      console.log(`[fetch-content] batch ${i + 1}/${chunks.length}: fetched ${emails.length} emails`);
-    } catch (err) {
-      console.log(`[fetch-content] batch ${i + 1}/${chunks.length} FAILED: ${err.message}`);
-      coreExports.error(`Batch ${i + 1}/${chunks.length} failed: ${err.message}`);
-      // Track failed messageIds for the batch
-      for (const msgId of chunk) {
-        const meta = rows.find((r) => r.MESSAGE_ID === msgId);
-        if (meta) errors.push(meta.EMAIL_METADATA_ID);
-      }
-    }
-  }
-
-  coreExports.info(`Total: ${allEmails.length} fetched, ${errors.length} failed`);
-
-  const emailsJson = JSON.stringify(allEmails);
-
-  // Output emails directly — no wrapper object
-  // Downstream commands (filter, build-prompt, classify) expect the emails array directly
-  if (errors.length > 0) {
-    coreExports.setOutput('failed_ids', errors.map((id) => `'${id}'`).join(','));
-  }
-
-  return encryptionKey ? encryptValue(emailsJson, encryptionKey) : emailsJson
-}
-
-/**
- * Append or update workflow_triggers trail on deal_states claimed by a batch ID.
- *
- * Actions:
- *   - "start": Append a new entry with success=false (called at processor start)
- *   - "complete": Update the last entry matching this batch_id to success=true
- */
-async function runWorkflowTriggers() {
+async function runDispatchDealStates() {
   const authUrl = coreExports.getInput('auth-url');
   const authSecret = coreExports.getInput('auth-secret');
   const apiUrl = coreExports.getInput('api-url');
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const w3RpcUrl = coreExports.getInput('w3-rpc-url');
+  const creatorName = coreExports.getInput('creator-name');
+  const batchSize = parseNonNegativeInt(
+    coreExports.getInput('deal-state-batch-size') || '500',
+    'deal-state-batch-size',
+  );
+  const maxEmails = parseNonNegativeInt(
+    coreExports.getInput('deal-state-max-emails') || '5000',
+    'deal-state-max-emails',
+  );
 
-  const action = coreExports.getInput('trigger-action'); // 'start' or 'complete'
+  console.log('[dispatch-deal-states] Authenticating...');
+  const jwt = await authenticate(authUrl, authSecret);
+
+  // Count emails without deal_states
+  const countSql = `SELECT COUNT(*) AS CNT FROM EMAIL_CORE_STAGING.EMAIL_METADATA em WHERE em.PROCESSING_STATUS != 'pending' AND em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)`;
+  const rows = await executeSql(apiUrl, jwt, biscuit, countSql);
+  const diffCount = rows[0]?.CNT ?? 0;
+
+  console.log(`[dispatch-deal-states] ${diffCount} emails without deal_states`);
+
+  if (diffCount === 0) {
+    console.log('[dispatch-deal-states] Nothing to dispatch');
+    return { workers_triggered: 0, total_emails: 0 }
+  }
+
+  const emailsToProcess = Math.min(diffCount, maxEmails);
+  const numWorkers = Math.ceil(emailsToProcess / batchSize);
+
+  console.log(
+    `[dispatch-deal-states] Dispatching ${numWorkers} worker(s) for ${emailsToProcess} emails (batch=${batchSize})`,
+  );
+
+  let workersTriggered = 0;
+  for (let i = 0; i < numWorkers; i++) {
+    const offset = i * batchSize;
+    const limit = batchSize;
+
+    const payload = {
+      jsonrpc: '2.0',
+      method: 'w3_triggerWorkflow',
+      params: {
+        workflowName: creatorName,
+        body: { offset: String(offset), limit: String(limit) },
+      },
+      id: i + 1,
+    };
+
+    try {
+      const resp = await fetch(w3RpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+      const result = await resp.json();
+      const triggerHash = result.result?.triggerHash || result.triggerHash || '';
+
+      workersTriggered++;
+      console.log(
+        `[dispatch-deal-states] Worker ${i + 1}/${numWorkers}: offset=${offset} limit=${limit} trigger=${triggerHash.substring(0, 16)}`,
+      );
+    } catch (err) {
+      console.warn(
+        `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} trigger failed: ${err.message}`,
+      );
+    }
+
+    if (i < numWorkers - 1) {
+      await sleep(100);
+    }
+  }
+
+  console.log(
+    `[dispatch-deal-states] Done: ${workersTriggered}/${numWorkers} workers triggered for ${emailsToProcess} emails`,
+  );
+  return { workers_triggered: workersTriggered, total_emails: emailsToProcess }
+}
+
+var classificationInstructions = "# Classification Instructions\n\n## What is a Deal?\n\nA deal is any business opportunity, partnership, sponsorship, collaboration,\nor commercial arrangement discussed in the email thread. Look for:\n\n- Explicit mentions of payment, compensation, rates, or fees\n- Brand partnership or sponsorship proposals\n- Product collaboration or gifting arrangements\n- Event appearance or speaking engagement offers\n- Licensing or content creation agreements\n\n## What is NOT a Deal?\n\n- Newsletters, automated notifications, marketing blasts\n- Social media notifications or follower alerts\n- Shipping/tracking/order confirmations\n- Support tickets or customer service threads\n- Personal conversations unrelated to business\n\n## Scoring Guide (ai_score 1-10)\n\n- 1-3: Unlikely deal, vague or tangential business mention\n- 4-6: Possible deal, some indicators but not confirmed\n- 7-9: Likely deal, clear business intent with specifics\n- 10: Confirmed deal, explicit terms or signed agreement\n\n## Category Definitions\n\n- new: First contact, deal not yet discussed in depth\n- in_progress: Active negotiation, terms being discussed\n- completed: Deal closed, agreement reached or signed\n- likely_scam: Suspicious patterns, too-good-to-be-true offers\n- low_confidence: Ambiguous, cannot determine with confidence\n\n## Language Detection\n\nIf the primary language of the email thread is not English,\nset language to the ISO 639-1 code and is_deal to false\nunless the deal context is clearly understandable.\n";
+
+const STRUCTURAL_TEMPLATE = `You are a deal classification engine. You MUST respond with valid JSON matching this exact schema:
+
+{
+  "threads": [
+    {
+      "thread_id": "<thread_id>",
+      "is_deal": boolean,
+      "ai_score": number (1-10),
+      "category": "new" | "in_progress" | "completed" | "likely_scam" | "low_confidence",
+      "deal_name": string | null,
+      "deal_type": string | null,
+      "deal_value": string | null,
+      "currency": string | null,
+      "main_contact": { "name": string, "email": string, "company": string | null, "title": string | null } | null,
+      "ai_summary": string,
+      "language": string (ISO 639-1)
+    }
+  ]
+}
+
+Rules:
+- Respond ONLY with the JSON object. No markdown, no explanation.
+- One entry per thread_id in the input.
+- If is_deal is false, set deal_name/deal_type/deal_value/main_contact to null.
+- ai_summary must be a concise summary of the thread's deal relevance (max 500 chars).
+
+{{CLASSIFICATION_INSTRUCTIONS}}`;
+
+function getHeader$1(email, name) {
+  const header = email.topLevelHeaders?.find((h) => h.name.toLowerCase() === name.toLowerCase());
+  return header?.value || ''
+}
+
+function groupByThread(emails) {
+  const threads = {};
+  for (const email of emails) {
+    const threadId = email.threadId || email.id;
+    if (!threads[threadId]) threads[threadId] = [];
+    threads[threadId].push(email);
+  }
+  return threads
+}
+
+function buildPrompt(emails) {
+  const threads = groupByThread(emails);
+  let threadData = '';
+
+  for (const [threadId, threadEmails] of Object.entries(threads)) {
+    const isIncremental =
+      threadEmails[0].previousAiSummary != null && threadEmails[0].previousAiSummary !== '';
+
+    if (isIncremental) {
+      threadData += `--- Thread: ${threadId} (isIncremental: true) ---\n`;
+      threadData += `Previous AI Summary: ${threadEmails[0].previousAiSummary}\n\n`;
+    } else {
+      threadData += `--- Thread: ${threadId} (isIncremental: false) ---\n`;
+    }
+
+    threadEmails.forEach((email, i) => {
+      const from = getHeader$1(email, 'from');
+      const subject = getHeader$1(email, 'subject');
+      const date = getHeader$1(email, 'date');
+      threadData += `Email ${i + 1}: From: ${from} | Subject: ${subject} | Date: ${date}\n`;
+      const body = email.body || email.replyBody || '[no body]';
+      threadData += `Body: ${body}\n\n`;
+    });
+  }
+
+  const systemPrompt = STRUCTURAL_TEMPLATE.replace(
+    '{{CLASSIFICATION_INSTRUCTIONS}}',
+    classificationInstructions,
+  );
+
+  return { systemPrompt, userPrompt: threadData.trim() }
+}
+
+/**
+ * Step 1: Fetch content + call AI + save audit checkpoint.
+ *
+ * If audit already exists for batch_id → skip AI, return immediately.
+ * Otherwise: fetch content → build prompt → call AI → parse JSON → save audit.
+ *
+ * Output: { skipped: boolean, thread_count: number }
+ */
+async function runFetchAndClassify() {
+  const authUrl = coreExports.getInput('auth-url');
+  const authSecret = coreExports.getInput('auth-secret');
+  const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
+  const schema = sanitizeSchema(coreExports.getInput('schema'));
   const batchId = coreExports.getInput('batch-id');
-  const triggerType = coreExports.getInput('trigger-type') || 'filter'; // 'filter' or 'detection'
+  const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
+  const hyperbolicKey = coreExports.getInput('hyperbolic-key');
+  const primaryModel = coreExports.getInput('primary-model') || 'deepseek-ai/DeepSeek-V3';
+  const fallbackModel = coreExports.getInput('fallback-model') || 'Qwen/Qwen2.5-72B-Instruct';
+  const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
 
   if (!batchId) throw new Error('batch-id is required')
-  if (!['start', 'complete'].includes(action)) {
-    throw new Error(`trigger-action must be "start" or "complete", got: ${action}`)
-  }
+
+  console.log(`[classify] starting batch ${batchId}`);
 
   const jwt = await authenticate(authUrl, authSecret);
 
-  // Fetch current workflow_triggers for claimed rows
-  const rows = await executeSql(
-    apiUrl,
-    jwt,
-    biscuit,
-    workflowTriggers.fetchByBatchId(schema, batchId),
-  );
+  // Check metadata exists
+  const metadataRows = await executeSql(apiUrl, jwt, biscuit,
+    `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, SYNC_STATE_ID, THREAD_ID
+    FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`);
 
-  let updated = 0;
-  for (const row of rows) {
-    const emailMetadataId = row.EMAIL_METADATA_ID;
-    let triggers = [];
-    try {
-      triggers = row.WORKFLOW_TRIGGERS ? JSON.parse(row.WORKFLOW_TRIGGERS) : [];
-    } catch {
-      triggers = [];
-    }
-
-    if (action === 'start') {
-      triggers.push({
-        type: triggerType,
-        batch_id: batchId,
-        timestamp: new Date().toISOString(),
-        success: false,
-      });
-    } else {
-      // complete: find last entry with this batch_id and set success=true
-      for (let i = triggers.length - 1; i >= 0; i--) {
-        if (triggers[i].batch_id === batchId) {
-          triggers[i].success = true;
-          break
-        }
-      }
-    }
-
-    const serialized = sanitizeString(JSON.stringify(triggers));
-    await executeSql(
-      apiUrl,
-      jwt,
-      biscuit,
-      workflowTriggers.update(schema, emailMetadataId, serialized),
-    );
-    updated++;
+  if (!metadataRows || metadataRows.length === 0) {
+    console.log('[classify] no rows for batch (already completed?)');
+    return { skipped: true, thread_count: 0 }
   }
 
-  coreExports.info(`workflow-triggers ${action}: updated ${updated} deal_states`);
-  return { updated }
+  console.log(`[classify] ${metadataRows.length} deal_states`);
+
+  // Check for existing audit (checkpoint)
+  const existingAudit = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId));
+
+  if (existingAudit.length > 0 && existingAudit[0].AI_EVALUATION) {
+    console.log('[classify] audit exists — skipping AI call');
+    try {
+      const parsed = JSON.parse(existingAudit[0].AI_EVALUATION);
+      return { skipped: true, thread_count: (parsed.threads || []).length }
+    } catch {
+      console.log('[classify] existing audit has invalid JSON, re-running AI');
+    }
+  }
+
+  // Fetch content
+  const userId = metadataRows[0].USER_ID;
+  const syncStateId = metadataRows[0].SYNC_STATE_ID;
+  const messageIds = metadataRows.map((r) => r.MESSAGE_ID);
+
+  const MAX_PER_CHUNK = 10;
+  const allEmails = [];
+  for (let i = 0; i < messageIds.length; i += MAX_PER_CHUNK) {
+    const chunk = messageIds.slice(i, i + MAX_PER_CHUNK);
+    try {
+      const { signal, clear } = withTimeout();
+      const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, syncStateId, messageIds: chunk }),
+        signal,
+      });
+      clear();
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+      const result = await resp.json();
+      const emails = result.data || result;
+      for (const email of emails) {
+        const meta = metadataRows.find((r) => r.MESSAGE_ID === email.messageId);
+        if (meta) {
+          email.id = meta.EMAIL_METADATA_ID;
+          email.threadId = meta.THREAD_ID;
+          if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY;
+        }
+        allEmails.push(email);
+      }
+    } catch (err) {
+      console.log(`[classify] content fetch failed: ${err.message}`);
+    }
+  }
+
+  if (allEmails.length === 0) throw new Error('No email content fetched')
+
+  // Build prompt + call AI
+  const { systemPrompt, userPrompt } = buildPrompt(allEmails);
+
+  let aiResponseRaw = null;
+  for (const model of [primaryModel, fallbackModel]) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        console.log(`[classify] AI: ${model} (attempt ${attempt}/2)`);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 90000);
+        const resp = await fetch(aiApiUrl, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${hyperbolicKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userPrompt },
+            ],
+            response_format: { type: 'json_object' },
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+
+        if (!resp.ok) {
+          const errBody = await resp.text().catch(() => '');
+          console.log(`[classify] AI ${model} attempt ${attempt}: HTTP ${resp.status} ${errBody.substring(0, 200)}`);
+          if (attempt < 2) await new Promise((r) => setTimeout(r, 3000));
+          continue
+        }
+
+        const result = await resp.json();
+        aiResponseRaw = result.choices?.[0]?.message?.content;
+        if (aiResponseRaw) break
+      } catch (err) {
+        console.log(`[classify] AI ${model} attempt ${attempt}: ${err.message}`);
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 3000));
+      }
+    }
+    if (aiResponseRaw) break
+  }
+
+  if (!aiResponseRaw) throw new Error('All AI models failed')
+
+  // Parse + save audit checkpoint
+  aiResponseRaw = aiResponseRaw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+  const aiOutput = JSON.parse(aiResponseRaw);
+
+  const auditId = crypto.randomUUID();
+  const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400));
+  try {
+    await executeSql(apiUrl, jwt, biscuit,
+      saveResults.insertAudit(schema, {
+        id: auditId, batchId, threadCount: (aiOutput.threads || []).length,
+        emailCount: metadataRows.length, cost: 0, inputTokens: 0,
+        outputTokens: 0, model: primaryModel, evaluation,
+      }));
+    console.log(`[classify] audit saved: ${auditId}`);
+  } catch (err) {
+    // Unique constraint on batch_id — another run already saved the audit
+    if (err.message.includes('integrity constraint') || err.message.includes('unique') || err.message.includes('duplicate')) {
+      console.log(`[classify] audit already exists for batch (concurrent run), continuing`);
+    } else {
+      throw err
+    }
+  }
+
+  console.log(`[classify] ${(aiOutput.threads || []).length} threads ready for processing`);
+  return { skipped: false, thread_count: (aiOutput.threads || []).length }
 }
+
+var blockedDomains = [
+	".gov",
+	"automations.",
+	"crm.",
+	"email.",
+	"mailer.",
+	"marketing.",
+	"news.",
+	"newsletter.",
+	"transactional.",
+	"updates.",
+	"mailer-"
+];
+
+var blockedPrefixes = [
+	"accountservices@",
+	"accounts@",
+	"admin@",
+	"alerts@",
+	"auto@",
+	"automated@",
+	"billing@",
+	"care@",
+	"contact@",
+	"customerservice@",
+	"do-not-reply@",
+	"do_not_reply@",
+	"donotreply@",
+	"edm.support@",
+	"help@",
+	"imports@",
+	"info@",
+	"invitations@",
+	"mailer@",
+	"marketing@",
+	"meetings-noreply@google.com",
+	"no-reply@",
+	"noreply@",
+	"notification@",
+	"notify@",
+	"promotions@",
+	"quickbooks@",
+	"robot@",
+	"sales@",
+	"service@",
+	"social@",
+	"socials@",
+	"subscriptions@",
+	"support@",
+	"team@",
+	"updates@",
+	"verify@",
+	"welcome@"
+];
+
+var automatedSubjects = [
+	"newsletter",
+	"order confirmation",
+	"promo",
+	"promotion",
+	"receipt for your purchase",
+	"special offer",
+	"subscription confirmation",
+	"thank you for your order",
+	"updates",
+	"weekly digest"
+];
+
+var freeEmailPatterns = [
+	"^(info|support|updates|no-?reply|notifications|newsletter|promo)[a-z0-9]*@(gmail|yahoo|outlook|hotmail)\\.(com|net)$"
+];
+
+var nonPersonalizedNames = [
+	"ad",
+	"customer support",
+	"daily update",
+	"digest",
+	"mailing list",
+	"newsletter",
+	"promo",
+	"subscription",
+	"system notifications",
+	"the team",
+	"updates team",
+	"weekly update"
+];
+
+var headers = [
+	"list-id",
+	"precedence",
+	"x-mailing-list"
+];
+var values = [
+	"auto_reply",
+	"bulk"
+];
+var tools = [
+	"activecampaign",
+	"constantcontact",
+	"hubspot",
+	"mailchimp",
+	"sendgrid"
+];
+var marketingHeaders = {
+	headers: headers,
+	values: values,
+	tools: tools
+};
 
 function sanitizeId(id) {
   if (!/^[a-zA-Z0-9_-]+$/.test(id)) throw new Error(`Invalid ID format: ${id}`)
@@ -28799,225 +28449,6 @@ async function runRetriggerStuck() {
 }
 
 /**
- * Step 1: Fetch content + call AI + save audit checkpoint.
- *
- * If audit already exists for batch_id → skip AI, return immediately.
- * Otherwise: fetch content → build prompt → call AI → parse JSON → save audit.
- *
- * Output: { skipped: boolean, thread_count: number }
- */
-async function runFetchAndClassify() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const batchId = coreExports.getInput('batch-id');
-  const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
-  const hyperbolicKey = coreExports.getInput('hyperbolic-key');
-  const primaryModel = coreExports.getInput('primary-model') || 'deepseek-ai/DeepSeek-V3';
-  const fallbackModel = coreExports.getInput('fallback-model') || 'Qwen/Qwen2.5-72B-Instruct';
-  const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
-
-  if (!batchId) throw new Error('batch-id is required')
-
-  console.log(`[classify] starting batch ${batchId}`);
-
-  const jwt = await authenticate(authUrl, authSecret);
-
-  // Check metadata exists
-  const metadataRows = await executeSql(apiUrl, jwt, biscuit,
-    `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, SYNC_STATE_ID, THREAD_ID
-    FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`);
-
-  if (!metadataRows || metadataRows.length === 0) {
-    console.log('[classify] no rows for batch (already completed?)');
-    return { skipped: true, thread_count: 0 }
-  }
-
-  console.log(`[classify] ${metadataRows.length} deal_states`);
-
-  // Check for existing audit (checkpoint)
-  const existingAudit = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId));
-
-  if (existingAudit.length > 0 && existingAudit[0].AI_EVALUATION) {
-    console.log('[classify] audit exists — skipping AI call');
-    try {
-      const parsed = JSON.parse(existingAudit[0].AI_EVALUATION);
-      return { skipped: true, thread_count: (parsed.threads || []).length }
-    } catch {
-      console.log('[classify] existing audit has invalid JSON, re-running AI');
-    }
-  }
-
-  // Fetch content
-  const userId = metadataRows[0].USER_ID;
-  const syncStateId = metadataRows[0].SYNC_STATE_ID;
-  const messageIds = metadataRows.map((r) => r.MESSAGE_ID);
-
-  const MAX_PER_CHUNK = 10;
-  const allEmails = [];
-  for (let i = 0; i < messageIds.length; i += MAX_PER_CHUNK) {
-    const chunk = messageIds.slice(i, i + MAX_PER_CHUNK);
-    try {
-      const { signal, clear } = withTimeout();
-      const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, syncStateId, messageIds: chunk }),
-        signal,
-      });
-      clear();
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      const result = await resp.json();
-      const emails = result.data || result;
-      for (const email of emails) {
-        const meta = metadataRows.find((r) => r.MESSAGE_ID === email.messageId);
-        if (meta) {
-          email.id = meta.EMAIL_METADATA_ID;
-          email.threadId = meta.THREAD_ID;
-          if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY;
-        }
-        allEmails.push(email);
-      }
-    } catch (err) {
-      console.log(`[classify] content fetch failed: ${err.message}`);
-    }
-  }
-
-  if (allEmails.length === 0) throw new Error('No email content fetched')
-
-  // Build prompt + call AI
-  const { systemPrompt, userPrompt } = buildPrompt(allEmails);
-
-  let aiResponseRaw = null;
-  for (const model of [primaryModel, fallbackModel]) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        console.log(`[classify] AI: ${model} (attempt ${attempt}/2)`);
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 90000);
-        const resp = await fetch(aiApiUrl, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${hyperbolicKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt },
-            ],
-            response_format: { type: 'json_object' },
-          }),
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-
-        if (!resp.ok) {
-          const errBody = await resp.text().catch(() => '');
-          console.log(`[classify] AI ${model} attempt ${attempt}: HTTP ${resp.status} ${errBody.substring(0, 200)}`);
-          if (attempt < 2) await new Promise((r) => setTimeout(r, 3000));
-          continue
-        }
-
-        const result = await resp.json();
-        aiResponseRaw = result.choices?.[0]?.message?.content;
-        if (aiResponseRaw) break
-      } catch (err) {
-        console.log(`[classify] AI ${model} attempt ${attempt}: ${err.message}`);
-        if (attempt < 2) await new Promise((r) => setTimeout(r, 3000));
-      }
-    }
-    if (aiResponseRaw) break
-  }
-
-  if (!aiResponseRaw) throw new Error('All AI models failed')
-
-  // Parse + save audit checkpoint
-  aiResponseRaw = aiResponseRaw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
-  const aiOutput = JSON.parse(aiResponseRaw);
-
-  const auditId = crypto.randomUUID();
-  const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400));
-  try {
-    await executeSql(apiUrl, jwt, biscuit,
-      saveResults.insertAudit(schema, {
-        id: auditId, batchId, threadCount: (aiOutput.threads || []).length,
-        emailCount: metadataRows.length, cost: 0, inputTokens: 0,
-        outputTokens: 0, model: primaryModel, evaluation,
-      }));
-    console.log(`[classify] audit saved: ${auditId}`);
-  } catch (err) {
-    // Unique constraint on batch_id — another run already saved the audit
-    if (err.message.includes('integrity constraint') || err.message.includes('unique') || err.message.includes('duplicate')) {
-      console.log(`[classify] audit already exists for batch (concurrent run), continuing`);
-    } else {
-      throw err
-    }
-  }
-
-  console.log(`[classify] ${(aiOutput.threads || []).length} threads ready for processing`);
-  return { skipped: false, thread_count: (aiOutput.threads || []).length }
-}
-
-/**
- * Step 2: Read audit by batch_id → upsert thread evaluations.
- * Idempotent: ON CONFLICT (THREAD_ID) DO UPDATE.
- */
-async function runSaveEvals() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const batchId = coreExports.getInput('batch-id');
-
-  if (!batchId) throw new Error('batch-id is required')
-
-  const jwt = await authenticate(authUrl, authSecret);
-
-  // Read audit
-  const audits = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId));
-  if (audits.length === 0 || !audits[0].AI_EVALUATION) {
-    console.log('[save-evals] no audit found — skipping');
-    return { upserted: 0 }
-  }
-
-  const aiOutput = JSON.parse(audits[0].AI_EVALUATION);
-  const threads = aiOutput.threads || [];
-
-  let upserted = 0;
-  let failed = 0;
-  for (const thread of threads) {
-    try {
-      const threadId = sanitizeId$1(thread.thread_id);
-      const evalId = crypto.randomUUID();
-      const category = sanitizeString(thread.category || '');
-      const aiSummary = sanitizeString(thread.ai_summary || '');
-      const isDeal = thread.is_deal ? 'true' : 'false';
-      const isLikelyScam = (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false';
-      const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0;
-
-      await executeSql(apiUrl, jwt, biscuit,
-        saveResults.upsertThreadEvaluation(schema, {
-          id: evalId, threadId, auditId: '', category, summary: aiSummary,
-          isDeal, likelyScam: isLikelyScam, score: aiScore,
-        }));
-      upserted++;
-    } catch (err) {
-      failed++;
-      coreExports.error(`Failed eval for thread ${thread.thread_id}: ${err.message}`);
-    }
-  }
-
-  console.log(`[save-evals] upserted ${upserted}/${threads.length}, failed ${failed}`);
-  if (failed > 0) throw new Error(`${failed}/${threads.length} thread eval(s) failed`)
-  return { upserted, total: threads.length }
-}
-
-/**
  * Step 3: Read audit by batch_id → upsert deals + deal_contacts.
  * Idempotent: deals use ON CONFLICT (THREAD_ID) DO UPDATE.
  * deal_contacts use DELETE+INSERT (multiple contacts per deal).
@@ -29099,6 +28530,83 @@ async function runSaveDeals() {
 }
 
 /**
+ * Step 2: Read audit by batch_id → upsert thread evaluations.
+ * Idempotent: ON CONFLICT (THREAD_ID) DO UPDATE.
+ */
+async function runSaveEvals() {
+  const authUrl = coreExports.getInput('auth-url');
+  const authSecret = coreExports.getInput('auth-secret');
+  const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
+  const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const batchId = coreExports.getInput('batch-id');
+
+  if (!batchId) throw new Error('batch-id is required')
+
+  const jwt = await authenticate(authUrl, authSecret);
+
+  // Read audit
+  const audits = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId));
+  if (audits.length === 0 || !audits[0].AI_EVALUATION) {
+    console.log('[save-evals] no audit found — skipping');
+    return { upserted: 0 }
+  }
+
+  const aiOutput = JSON.parse(audits[0].AI_EVALUATION);
+  const threads = aiOutput.threads || [];
+
+  let upserted = 0;
+  let failed = 0;
+  for (const thread of threads) {
+    try {
+      const threadId = sanitizeId$1(thread.thread_id);
+      const evalId = crypto.randomUUID();
+      const category = sanitizeString(thread.category || '');
+      const aiSummary = sanitizeString(thread.ai_summary || '');
+      const isDeal = thread.is_deal ? 'true' : 'false';
+      const isLikelyScam = (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false';
+      const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0;
+
+      await executeSql(apiUrl, jwt, biscuit,
+        saveResults.upsertThreadEvaluation(schema, {
+          id: evalId, threadId, auditId: '', category, summary: aiSummary,
+          isDeal, likelyScam: isLikelyScam, score: aiScore,
+        }));
+      upserted++;
+    } catch (err) {
+      failed++;
+      coreExports.error(`Failed eval for thread ${thread.thread_id}: ${err.message}`);
+    }
+  }
+
+  console.log(`[save-evals] upserted ${upserted}/${threads.length}, failed ${failed}`);
+  if (failed > 0) throw new Error(`${failed}/${threads.length} thread eval(s) failed`)
+  return { upserted, total: threads.length }
+}
+
+/**
+ * Standalone SxT query/execute command.
+ * Authenticates via proxy, uses pre-generated biscuit from input.
+ */
+async function runSxtQuery() {
+  const authUrl = coreExports.getInput('auth-url');
+  const authSecret = coreExports.getInput('auth-secret');
+  const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
+  const schema = coreExports.getInput('schema');
+  const sql = coreExports.getInput('sql');
+
+  if (schema) sanitizeSchema(schema);
+
+  coreExports.info(`sxt-query: schema=${schema || '(none)'}, sql=${sql.substring(0, 100)}...`);
+  const jwt = await authenticate(authUrl, authSecret);
+  const result = await executeSql(apiUrl, jwt, biscuit, sql);
+  coreExports.info(`sxt-query: returned ${Array.isArray(result) ? result.length : 0} rows`);
+
+  return { result }
+}
+
+/**
  * Step 4: Read audit by batch_id → update deal_states to terminal status.
  * Idempotent: UPDATE with WHERE clause only affects rows still at 'classifying'.
  */
@@ -29165,173 +28673,9 @@ async function runUpdateDealStates() {
   return { deal: dealCount, not_deal: notDealCount }
 }
 
-const BATCH_SIZE = 100;
-
-/**
- * Query the diff between email_metadata and deal_states,
- * then insert missing deal_states rows with status='pending'.
- */
-async function runCreateDealStates() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const offset = parseInt(coreExports.getInput('offset') || '0', 10);
-  const limit = parseInt(coreExports.getInput('limit') || '1000', 10);
-
-  console.log(`[create-deal-states] querying diff (limit=${limit}, offset=${offset})`);
-  const jwt = await authenticate(authUrl, authSecret);
-
-  const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
-FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
-WHERE em.PROCESSING_STATUS != 'pending'
-  AND em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)
-LIMIT ${limit} OFFSET ${offset}`;
-
-  const rows = await executeSql(apiUrl, jwt, biscuit, diffSql);
-
-  if (!rows || rows.length === 0) {
-    console.log('[create-deal-states] no new emails to process');
-    return { created_count: 0, skipped_count: 0 }
-  }
-
-  console.log(`[create-deal-states] found ${rows.length} new email(s) to insert`);
-
-  let createdCount = 0;
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const chunk = rows.slice(i, i + BATCH_SIZE);
-    const values = chunk
-      .map((em) => {
-        const id = crypto.randomUUID();
-        return `('${id}', '${em.ID}', '${em.USER_ID}', '${em.THREAD_ID}', '${em.MESSAGE_ID}', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-      })
-      .join(',\n');
-
-    const insertSql = `INSERT INTO ${schema}.DEAL_STATES (ID, EMAIL_METADATA_ID, USER_ID, THREAD_ID, MESSAGE_ID, STATUS, CREATED_AT, UPDATED_AT)
-VALUES ${values}
-ON CONFLICT (EMAIL_METADATA_ID) DO NOTHING`;
-
-    await executeSql(apiUrl, jwt, biscuit, insertSql);
-    createdCount += chunk.length;
-    console.log(`[create-deal-states] inserted batch ${Math.floor(i / BATCH_SIZE) + 1} (${chunk.length} rows)`);
-  }
-
-  console.log(`[create-deal-states] done: created=${createdCount}`);
-  return { created_count: createdCount, skipped_count: 0 }
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
-function parseNonNegativeInt(value, name) {
-  const n = parseInt(value, 10);
-  if (isNaN(n) || n < 0) throw new Error(`${name} must be non-negative integer, got: ${value}`)
-  return n
-}
-
-/**
- * Dispatch deal-state worker workflows.
- *
- * Counts emails in EMAIL_METADATA that have no corresponding DEAL_STATES row,
- * calculates how many worker batches are needed, and triggers each via W3 JSON-RPC.
- */
-async function runDispatchDealStates() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const w3RpcUrl = coreExports.getInput('w3-rpc-url');
-  const creatorName = coreExports.getInput('creator-name');
-  const batchSize = parseNonNegativeInt(
-    coreExports.getInput('deal-state-batch-size') || '500',
-    'deal-state-batch-size',
-  );
-  const maxEmails = parseNonNegativeInt(
-    coreExports.getInput('deal-state-max-emails') || '5000',
-    'deal-state-max-emails',
-  );
-
-  console.log('[dispatch-deal-states] Authenticating...');
-  const jwt = await authenticate(authUrl, authSecret);
-
-  // Count emails without deal_states
-  const countSql = `SELECT COUNT(*) AS CNT FROM EMAIL_CORE_STAGING.EMAIL_METADATA em WHERE em.PROCESSING_STATUS != 'pending' AND em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)`;
-  const rows = await executeSql(apiUrl, jwt, biscuit, countSql);
-  const diffCount = rows[0]?.CNT ?? 0;
-
-  console.log(`[dispatch-deal-states] ${diffCount} emails without deal_states`);
-
-  if (diffCount === 0) {
-    console.log('[dispatch-deal-states] Nothing to dispatch');
-    return { workers_triggered: 0, total_emails: 0 }
-  }
-
-  const emailsToProcess = Math.min(diffCount, maxEmails);
-  const numWorkers = Math.ceil(emailsToProcess / batchSize);
-
-  console.log(
-    `[dispatch-deal-states] Dispatching ${numWorkers} worker(s) for ${emailsToProcess} emails (batch=${batchSize})`,
-  );
-
-  let workersTriggered = 0;
-  for (let i = 0; i < numWorkers; i++) {
-    const offset = i * batchSize;
-    const limit = batchSize;
-
-    const payload = {
-      jsonrpc: '2.0',
-      method: 'w3_triggerWorkflow',
-      params: {
-        workflowName: creatorName,
-        body: { offset: String(offset), limit: String(limit) },
-      },
-      id: i + 1,
-    };
-
-    try {
-      const resp = await fetch(w3RpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      const result = await resp.json();
-      const triggerHash = result.result?.triggerHash || result.triggerHash || '';
-
-      workersTriggered++;
-      console.log(
-        `[dispatch-deal-states] Worker ${i + 1}/${numWorkers}: offset=${offset} limit=${limit} trigger=${triggerHash.substring(0, 16)}`,
-      );
-    } catch (err) {
-      console.warn(
-        `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} trigger failed: ${err.message}`,
-      );
-    }
-
-    if (i < numWorkers - 1) {
-      await sleep(100);
-    }
-  }
-
-  console.log(
-    `[dispatch-deal-states] Done: ${workersTriggered}/${numWorkers} workers triggered for ${emailsToProcess} emails`,
-  );
-  return { workers_triggered: workersTriggered, total_emails: emailsToProcess }
-}
-
 const COMMANDS = {
-  filter: runFilter,
-  'build-prompt': runBuildPrompt,
-  classify: runClassify,
   dispatch: runDispatch,
-  'extract-metadata': runExtractMetadata,
-  'sxt-query': runSxtQuery,
   'sxt-execute': runSxtQuery,
-  'fetch-content': runFetchContent,
-  'workflow-triggers': runWorkflowTriggers,
   'fetch-and-filter': runFetchAndFilter,
   'retrigger-stuck': runRetriggerStuck,
   'fetch-and-classify': runFetchAndClassify,

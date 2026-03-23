@@ -1,31 +1,18 @@
 import * as core from '@actions/core'
-import { runFilter } from './filter.js'
-import { runBuildPrompt } from './build-prompt.js'
-import { runClassify } from './classify.js'
+import { runCreateDealStates } from './create-deal-states.js'
 import { runDispatch } from './dispatch.js'
-import { runExtractMetadata } from './extract-metadata.js'
-import { runSxtQuery } from './sxt-query.js'
-import { runFetchContent } from './fetch-content.js'
-import { runWorkflowTriggers } from './workflow-triggers.js'
+import { runDispatchDealStates } from './dispatch-deal-states.js'
+import { runFetchAndClassify } from './fetch-and-classify.js'
 import { runFetchAndFilter } from './fetch-and-filter.js'
 import { runRetriggerStuck } from './retrigger-stuck.js'
-import { runFetchAndClassify } from './fetch-and-classify.js'
-import { runSaveEvals } from './save-evals.js'
 import { runSaveDeals } from './save-deals.js'
+import { runSaveEvals } from './save-evals.js'
+import { runSxtQuery } from './sxt-query.js'
 import { runUpdateDealStates } from './update-deal-states.js'
-import { runCreateDealStates } from './create-deal-states.js'
-import { runDispatchDealStates } from './dispatch-deal-states.js'
 
 const COMMANDS = {
-  filter: runFilter,
-  'build-prompt': runBuildPrompt,
-  classify: runClassify,
   dispatch: runDispatch,
-  'extract-metadata': runExtractMetadata,
-  'sxt-query': runSxtQuery,
   'sxt-execute': runSxtQuery,
-  'fetch-content': runFetchContent,
-  'workflow-triggers': runWorkflowTriggers,
   'fetch-and-filter': runFetchAndFilter,
   'retrigger-stuck': runRetriggerStuck,
   'fetch-and-classify': runFetchAndClassify,
