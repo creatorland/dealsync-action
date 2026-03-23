@@ -14,6 +14,7 @@ import { runSaveEvals } from './save-evals.js'
 import { runSaveDeals } from './save-deals.js'
 import { runUpdateDealStates } from './update-deal-states.js'
 import { runCreateDealStates } from './create-deal-states.js'
+import { runDispatchDealStates } from './dispatch-deal-states.js'
 
 const COMMANDS = {
   filter: runFilter,
@@ -32,6 +33,7 @@ const COMMANDS = {
   'save-deals': runSaveDeals,
   'update-deal-states': runUpdateDealStates,
   'create-deal-states': runCreateDealStates,
+  'dispatch-deal-states': runDispatchDealStates,
 }
 
 export async function run() {
