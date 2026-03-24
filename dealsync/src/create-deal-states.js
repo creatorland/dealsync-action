@@ -23,8 +23,7 @@ export async function runCreateDealStates() {
 
   const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
 FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
-WHERE em.PROCESSING_STATUS != 'pending'
-  AND em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)
+WHERE em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)
 ORDER BY em.RECEIVED_AT ASC
 LIMIT ${limit} OFFSET ${offset}`
 

@@ -89,7 +89,7 @@ describe('create-deal-states command', () => {
     expect(diffSql).toContain('dealsync_stg_v1.DEAL_STATES')
     expect(diffSql).toContain('LIMIT 500')
     expect(diffSql).toContain('OFFSET 10')
-    expect(diffSql).toContain("PROCESSING_STATUS != 'pending'")
+    expect(diffSql).toContain('NOT IN (SELECT EMAIL_METADATA_ID FROM')
 
     // Verify insert query
     const insertSql = getSqlText(sqlCalls[1])

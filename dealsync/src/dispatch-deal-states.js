@@ -39,7 +39,7 @@ export async function runDispatchDealStates() {
   const jwt = await authenticate(authUrl, authSecret)
 
   // Count emails without deal_states
-  const countSql = `SELECT COUNT(*) AS CNT FROM EMAIL_CORE_STAGING.EMAIL_METADATA em WHERE em.PROCESSING_STATUS != 'pending' AND em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)`
+  const countSql = `SELECT COUNT(*) AS CNT FROM EMAIL_CORE_STAGING.EMAIL_METADATA em WHERE em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)`
   const rows = await executeSql(apiUrl, jwt, biscuit, countSql)
   const diffCount = rows[0]?.CNT ?? 0
 
