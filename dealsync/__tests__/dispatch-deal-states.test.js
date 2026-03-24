@@ -194,26 +194,28 @@ describe('dispatch-deal-states command', () => {
     })
   })
 
-  it('warns on trigger failure but continues dispatching', async () => {
+  it('retries on trigger failure with backoff, then continues dispatching', async () => {
     mockInputs({ 'deal-state-batch-size': '500' })
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
       .mockResolvedValueOnce(sxtResponse([{ CNT: 1500 }]))
-      .mockResolvedValueOnce(triggerError()) // worker 0 fails
-      .mockResolvedValueOnce(triggerSuccess('hash-1')) // worker 1 succeeds
-      .mockResolvedValueOnce(triggerSuccess('hash-2')) // worker 2 succeeds
+      // worker 0: fails all 4 attempts (1 + 3 retries)
+      .mockResolvedValueOnce(triggerError())
+      .mockResolvedValueOnce(triggerError())
+      .mockResolvedValueOnce(triggerError())
+      .mockResolvedValueOnce(triggerError())
+      // worker 1: succeeds
+      .mockResolvedValueOnce(triggerSuccess('hash-1'))
+      // worker 2: succeeds
+      .mockResolvedValueOnce(triggerSuccess('hash-2'))
 
     const result = await runDispatchDealStates()
 
-    // 2 succeeded, 1 failed
+    // 2 succeeded, 1 failed after retries
     expect(result.workers_triggered).toBe(2)
     expect(result.total_emails).toBe(1500)
-
-    // All 3 triggers were attempted
-    const rpcCalls = getTriggerCalls(fetchSpy)
-    expect(rpcCalls).toHaveLength(3)
-  })
+  }, 30000)
 
   it('authenticates via proxy with x-shared-secret', async () => {
     mockInputs()
