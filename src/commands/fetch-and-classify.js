@@ -26,7 +26,7 @@ export async function runFetchAndClassify() {
   const batchId = sanitizeId(core.getInput('batch-id'))
   const contentFetcherUrl = core.getInput('content-fetcher-url')
   const hyperbolicKey = core.getInput('hyperbolic-key')
-  const primaryModel = core.getInput('primary-model') || 'deepseek-ai/DeepSeek-V3'
+  const primaryModel = core.getInput('primary-model') || 'deepseek-ai/DeepSeek-V3-0324'
   const fallbackModel = core.getInput('fallback-model') || 'Qwen/Qwen2.5-72B-Instruct'
   const aiApiUrl = core.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions'
 
