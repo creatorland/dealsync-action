@@ -94,7 +94,7 @@ describe('create-deal-states command', () => {
     // Verify insert query
     const insertSql = getSqlText(sqlCalls[1])
     expect(insertSql).toContain('INSERT INTO dealsync_stg_v1.DEAL_STATES')
-    expect(insertSql).toContain('ON CONFLICT (EMAIL_METADATA_ID) DO NOTHING')
+    expect(insertSql).toContain('ON CONFLICT (EMAIL_METADATA_ID) DO UPDATE SET UPDATED_AT')
     expect(insertSql).toContain("'em-1'")
     expect(insertSql).toContain("'em-2'")
     expect(insertSql).toContain("'pending'")
