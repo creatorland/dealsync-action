@@ -109,21 +109,102 @@ Correct classification:
 
 ## Example 3: Ambiguous SaaS pitch with sponsorship angle (is_deal: true)
 
-Thread summary: Mike Chen (mike@editortoolpro.com, Head of Growth at EditorToolPro) says he loves the creator's editing tutorials. Proposes "exploring a partnership, whether that's a sponsored tutorial, an affiliate deal, or just getting your honest feedback on our tool." Offers a free Pro license and says "happy to discuss rates."
+Thread input:
+--- THREAD ---
+Thread ID: ex3
+Message Count: 1
+Previous AI Summary: None
+
+[Message 1]
+From: mike@editortoolpro.com (Mike Chen)
+Date: 2024-06-12
+Direction: Inbound
+Subject: Big fan of your editing tutorials
+
+Hey!
+
+I'm Mike, Head of Growth at EditorToolPro. Been watching your editing breakdowns for months now and honestly your Premiere Pro tips series is what got half our team to rethink our own UI lol.
+
+Anyway, not just writing to fanboy. We've been exploring ways to get in front of the creator community and your audience is exactly who we'd want to reach. Was thinking we could explore some kind of partnership - whether that's a sponsored tutorial featuring our tool, an affiliate setup, or even just getting your honest take on the product. Totally open to whatever format works for you.
+
+Happy to discuss rates if you're interested. And either way, I'd love to set you up with a free Pro license as a thank you for the content.
+
+Let me know if you'd be down to chat!
+
+Mike Chen
+Head of Growth | EditorToolPro
+mike@editortoolpro.com
 
 Correct classification:
 {"thread_id": "ex3", "is_deal": true, "is_english": true, "ai_score": 6, "category": "new", "likely_scam": false, "ai_insight": "EditorToolPro proposes sponsorship or affiliate deal for editing tutorials", "ai_summary": "Mike Chen (mike@editortoolpro.com, Head of Growth, EditorToolPro) proposes partnership options: sponsored tutorial, affiliate deal, or product review. Offers free Pro license. Open to discussing rates. No specific budget mentioned. Status: initial outreach.", "main_contact": {"name": "Mike Chen", "email": "mike@editortoolpro.com", "company": "EditorToolPro", "title": "Head of Growth", "phone_number": null}, "deal_brand": "EditorToolPro", "deal_type": "brand_collaboration", "deal_name": "EditorToolPro Partnership", "deal_value": null, "deal_currency": null}
 
 ## Example 4: Product gifting with implicit content expectation (is_deal: true)
 
-Thread summary: Ava Reyes (pr@luxfashionhouse.com, PR Coordinator at Lux Fashion House) says they are sending the creator a handbag from their spring collection. States "no strings attached" but adds "we'd love to see it on your feed." Includes a tracking number.
+Thread input:
+--- THREAD ---
+Thread ID: ex4
+Message Count: 1
+Previous AI Summary: None
+
+[Message 1]
+From: pr@luxfashionhouse.com (Ava Reyes)
+Date: 2024-09-03
+Direction: Inbound
+Subject: A little something from Lux Fashion House
+
+Hi there!
+
+I'm Ava from the PR team at Lux Fashion House. We've been loving your style content lately, especially the fall lookbook you posted last month - gorgeous!
+
+We'd love to send you one of our new Riviera handbags from the Spring '25 collection. Totally no strings attached, we just think it'd look amazing in your hands.
+
+I've already arranged shipping. Here's your tracking: LFH-2024-09887 (DHL Express, should arrive by Thursday).
+
+Would love to see it on your feed if you're feeling it, but absolutely no pressure at all.
+
+Warmly,
+Ava Reyes
+PR Coordinator
+Lux Fashion House
+pr@luxfashionhouse.com | @luxfashionhouse
 
 Correct classification:
 {"thread_id": "ex4", "is_deal": true, "is_english": true, "ai_score": 4, "category": "new", "likely_scam": false, "ai_insight": "Lux Fashion House sending gifted handbag with implicit content expectation", "ai_summary": "Ava Reyes (pr@luxfashionhouse.com, PR Coordinator, Lux Fashion House) sending gifted handbag from spring collection. States no strings attached but mentions wanting it on creator's feed. Tracking number provided. Status: product shipped, no formal terms discussed.", "main_contact": {"name": "Ava Reyes", "email": "pr@luxfashionhouse.com", "company": "Lux Fashion House", "title": "PR Coordinator", "phone_number": null}, "deal_brand": "Lux Fashion House", "deal_type": "product_seeding", "deal_name": "Lux Fashion House Gifted Handbag", "deal_value": null, "deal_currency": null}
 
 ## Example 5: Likely scam (is_deal: true, category: likely_scam)
 
-Thread summary: partnership@brand-deals-agency.xyz claims to represent "multiple Fortune 500 brands" without naming any. Offers $10,000 for a single Instagram story. Asks the creator to click a link to "verify your PayPal" to receive payment. No company website or LinkedIn presence.
+Thread input:
+--- THREAD ---
+Thread ID: ex5
+Message Count: 1
+Previous AI Summary: None
+
+[Message 1]
+From: partnership@brand-deals-agency.xyz
+Date: 2024-11-20
+Direction: Inbound
+Subject: URGENT: $10,000 Brand Deal - Response Needed Today!!!
+
+Dear Creator,
+
+Congratulations! You have been selected by our agency to participate in an EXCLUSIVE brand campaign with multiple Fortune 500 companies.
+
+COMPENSATION: $10,000 USD for ONE (1) Instagram Story post
+DEADLINE: You must confirm within 24 hours or this offer will be given to another creator
+
+We represent many top brands who are looking for influencers just like you. This is a once-in-a-lifetime opportunity that we are extending to a select few creators.
+
+To secure your spot and receive payment, please verify your PayPal account by clicking the link below:
+
+[VERIFY MY PAYPAL NOW]
+
+Once verified, our team will send your first payment within 48 hours.
+
+Don't miss out!
+
+Best regards,
+The Brand Deals Agency Team
+partnership@brand-deals-agency.xyz
 
 Correct classification:
 {"thread_id": "ex5", "is_deal": true, "is_english": true, "ai_score": 2, "category": "likely_scam", "likely_scam": true, "ai_insight": "Suspicious: unnamed brands, unrealistic payout, PayPal verification request", "ai_summary": "Unknown sender (partnership@brand-deals-agency.xyz) claims to represent unnamed Fortune 500 brands. Offers $10K for single IG story. Requests PayPal verification via link. Red flags: no specific brand named, .xyz domain, unrealistic compensation for single story, urgency pressure, payment verification request before any agreement.", "main_contact": {"name": null, "email": "partnership@brand-deals-agency.xyz", "company": null, "title": null, "phone_number": null}, "deal_brand": null, "deal_type": "sponsorship", "deal_name": "Unknown Brand Deal - Likely Scam", "deal_value": 10000, "deal_currency": "USD"}
