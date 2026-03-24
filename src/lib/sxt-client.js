@@ -41,8 +41,8 @@ export async function authenticate(authUrl, authSecret) {
  * Fail-open: if rate limiter is unavailable after error retries, proceed with query.
  */
 async function acquireRateLimitToken() {
-  const rateLimiterUrl = core.getInput('rate-limiter-url') || process.env.SXT_RATE_LIMITER_URL
-  const apiKey = core.getInput('rate-limiter-api-key') || process.env.SXT_RATE_LIMITER_API_KEY
+  const rateLimiterUrl = core.getInput('rate-limiter-url')
+  const apiKey = core.getInput('rate-limiter-api-key')
 
   if (!rateLimiterUrl || !apiKey) return // No rate limiter configured — skip
 
