@@ -27774,7 +27774,7 @@ async function runDispatchDealStateSync() {
   const jwt = await authenticate(authUrl, authSecret);
 
   // Count emails without deal_states
-  const countSql = `SELECT COUNT(*) AS CNT FROM EMAIL_CORE_STAGING.EMAIL_METADATA em WHERE em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)`;
+  const countSql = `SELECT COUNT(*) AS CNT FROM EMAIL_CORE_STAGING.EMAIL_METADATA em WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID)`;
   const rows = await executeSql(apiUrl, jwt, biscuit, countSql);
   const diffCount = rows[0]?.CNT ?? 0;
 
@@ -27877,7 +27877,7 @@ async function runSyncDealStates() {
 
   const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
 FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
-WHERE em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)
+WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID)
 ORDER BY em.RECEIVED_AT ASC
 LIMIT ${limit} OFFSET ${offset}`;
 
@@ -27889,14 +27889,6 @@ LIMIT ${limit} OFFSET ${offset}`;
   }
 
   console.log(`[sync-deal-states] found ${rows.length} email(s) to sync`);
-
-  // Count existing deal_states before insert to measure conflicts
-  const emailIds = rows.map((em) => `'${sanitizeId(em.ID)}'`).join(', ');
-  const beforeCountResult = await executeSql(
-    apiUrl, jwt, biscuit,
-    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE EMAIL_METADATA_ID IN (${emailIds})`,
-  );
-  const existingBefore = beforeCountResult[0]?.CNT ?? 0;
 
   const values = rows
     .map((em) => {
@@ -27913,11 +27905,8 @@ LIMIT ${limit} OFFSET ${offset}`;
 
   await executeSql(apiUrl, jwt, biscuit, insertSql);
 
-  const newCount = rows.length - existingBefore;
-  const conflictCount = existingBefore;
-
-  console.log(`[sync-deal-states] done: ${newCount} new, ${conflictCount} conflicts (${rows.length} total)`);
-  return { synced_count: newCount, conflict_count: conflictCount }
+  console.log(`[sync-deal-states] done: ${rows.length} synced (2 queries)`);
+  return { synced_count: rows.length, conflict_count: 0 }
 }
 
 /**
@@ -34781,6 +34770,7 @@ async function runFetchAndClassify() {
   const MAX_PER_CHUNK = 10;
   const CONTENT_FETCH_MAX_RETRIES = 3;
   const allEmails = [];
+  const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]));
   for (let i = 0; i < messageIds.length; i += MAX_PER_CHUNK) {
     const chunk = messageIds.slice(i, i + MAX_PER_CHUNK);
     let fetched = false;
@@ -34805,7 +34795,7 @@ async function runFetchAndClassify() {
         const result = await resp.json();
         const emails = result.data || result;
         for (const email of emails) {
-          const meta = metadataRows.find((r) => r.MESSAGE_ID === email.messageId);
+          const meta = metaByMessageId.get(email.messageId);
           if (meta) {
             email.id = meta.EMAIL_METADATA_ID;
             email.threadId = meta.THREAD_ID;
@@ -35155,6 +35145,7 @@ async function runFetchAndFilter() {
 
   const MAX_PER_CHUNK = 10;
   const allEmails = [];
+  const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]));
 
   for (let i = 0; i < messageIds.length; i += MAX_PER_CHUNK) {
     const chunk = messageIds.slice(i, i + MAX_PER_CHUNK);
@@ -35172,7 +35163,7 @@ async function runFetchAndFilter() {
       const emails = result.data || result;
 
       for (const email of emails) {
-        const meta = metadataRows.find((r) => r.MESSAGE_ID === email.messageId);
+        const meta = metaByMessageId.get(email.messageId);
         if (meta) {
           email.id = meta.EMAIL_METADATA_ID;
           // Only keep header fields
@@ -35278,8 +35269,7 @@ async function runRetriggerStuck() {
 
 /**
  * Step 3: Read audit by batch_id → upsert deals + deal_contacts.
- * Idempotent: deals use ON CONFLICT (THREAD_ID) DO UPDATE.
- * deal_contacts use DELETE+INSERT (multiple contacts per deal).
+ * Batched: single multi-row INSERT for deals, single DELETE + INSERT for contacts.
  */
 async function runSaveDeals() {
   const authUrl = coreExports.getInput('auth-url');
@@ -35311,55 +35301,90 @@ async function runSaveDeals() {
     userByThread[row.THREAD_ID] = row.USER_ID;
   }
 
-  let dealsCreated = 0;
-  let failed = 0;
+  // Separate deal vs non-deal threads
+  const dealThreads = [];
+  const notDealThreadIds = [];
+
   for (const thread of threads) {
-    try {
-      const threadId = sanitizeId(thread.thread_id);
-      const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
-
-      if (thread.is_deal) {
-        const dealId = crypto.randomUUID();
-        const evalId = ''; // will be linked via thread_id
-        const dealName = sanitizeString(thread.deal_name || '');
-        const dealType = sanitizeString(thread.deal_type || '');
-        const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
-        const currency = sanitizeString(thread.currency || 'USD');
-        const contactEmail = thread.main_contact ? sanitizeString(thread.main_contact.email || '') : '';
-        const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
-        const category = sanitizeString(thread.category || '');
-
-        await executeSql(apiUrl, jwt, biscuit,
-          saveResults.upsertDeal(schema, {
-            id: dealId, userId, threadId, evalId, dealName, dealType,
-            category, value: dealValue, currency, brand,
-          }));
-
-        if (contactEmail) {
-          await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDealContactByThread(schema, threadId));
-          await executeSql(apiUrl, jwt, biscuit,
-            saveResults.insertDealContact(schema, { id: crypto.randomUUID(), dealId, contactEmail }));
-        }
-
-        dealsCreated++;
-      } else {
-        // Not a deal — remove any existing deal for this thread
-        await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDeal(schema, threadId));
-      }
-    } catch (err) {
-      failed++;
-      coreExports.error(`Failed deal for thread ${thread.thread_id}: ${err.message}`);
+    if (thread.is_deal) {
+      dealThreads.push(thread);
+    } else {
+      notDealThreadIds.push(sanitizeId(thread.thread_id));
     }
   }
 
-  console.log(`[save-deals] ${dealsCreated} created, ${failed} failed`);
-  if (failed > 0) throw new Error(`${failed} deal(s) failed to save`)
-  return { deals_created: dealsCreated }
+  // Batch DELETE non-deal threads (single query)
+  if (notDealThreadIds.length > 0) {
+    const quotedIds = notDealThreadIds.map((id) => `'${id}'`).join(',');
+    await executeSql(apiUrl, jwt, biscuit,
+      `DELETE FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`);
+    console.log(`[save-deals] deleted ${notDealThreadIds.length} non-deal threads (1 query)`);
+  }
+
+  if (dealThreads.length === 0) {
+    console.log('[save-deals] no deal threads to save');
+    return { deals_created: 0 }
+  }
+
+  // Batch upsert deals (single multi-row INSERT)
+  const dealValues = dealThreads.map((thread) => {
+    const threadId = sanitizeId(thread.thread_id);
+    const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
+    const dealId = crypto.randomUUID();
+    const dealName = sanitizeString(thread.deal_name || '');
+    const dealType = sanitizeString(thread.deal_type || '');
+    const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
+    const currency = sanitizeString(thread.currency || 'USD');
+    const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
+    const category = sanitizeString(thread.category || '');
+    return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+  }).join(', ');
+
+  await executeSql(apiUrl, jwt, biscuit,
+    `INSERT INTO ${schema}.DEALS
+      (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT)
+    VALUES ${dealValues}
+    ON CONFLICT (THREAD_ID) DO UPDATE SET
+      EMAIL_THREAD_EVALUATION_ID = EXCLUDED.EMAIL_THREAD_EVALUATION_ID,
+      DEAL_NAME = EXCLUDED.DEAL_NAME,
+      DEAL_TYPE = EXCLUDED.DEAL_TYPE,
+      CATEGORY = EXCLUDED.CATEGORY,
+      VALUE = EXCLUDED.VALUE,
+      CURRENCY = EXCLUDED.CURRENCY,
+      BRAND = EXCLUDED.BRAND,
+      UPDATED_AT = CURRENT_TIMESTAMP`);
+
+  // Batch deal contacts: delete all existing contacts for these threads, then insert new ones
+  const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id));
+  const quotedDealThreadIds = dealThreadIds.map((id) => `'${id}'`).join(',');
+
+  await executeSql(apiUrl, jwt, biscuit,
+    `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedDealThreadIds}))`);
+
+  const contactValues = [];
+  for (const thread of dealThreads) {
+    const contactEmail = thread.main_contact ? sanitizeString(thread.main_contact.email || '') : '';
+    if (!contactEmail) continue
+    const threadId = sanitizeId(thread.thread_id);
+    contactValues.push(
+      `('${crypto.randomUUID()}', (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}'), '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    );
+  }
+
+  if (contactValues.length > 0) {
+    await executeSql(apiUrl, jwt, biscuit,
+      `INSERT INTO ${schema}.DEAL_CONTACTS
+        (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, CREATED_AT, UPDATED_AT)
+      VALUES ${contactValues.join(', ')}`);
+  }
+
+  console.log(`[save-deals] ${dealThreads.length} deals upserted, ${contactValues.length} contacts saved (3 queries)`);
+  return { deals_created: dealThreads.length }
 }
 
 /**
  * Step 2: Read audit by batch_id → upsert thread evaluations.
- * Idempotent: ON CONFLICT (THREAD_ID) DO UPDATE.
+ * Batched: single multi-row INSERT ... ON CONFLICT for all threads.
  */
 async function runSaveEvals() {
   const authUrl = coreExports.getInput('auth-url');
@@ -35383,33 +35408,39 @@ async function runSaveEvals() {
   const aiOutput = JSON.parse(audits[0].AI_EVALUATION);
   const threads = aiOutput.threads || [];
 
-  let upserted = 0;
-  let failed = 0;
-  for (const thread of threads) {
-    try {
-      const threadId = sanitizeId(thread.thread_id);
-      const evalId = crypto.randomUUID();
-      const category = sanitizeString(thread.category || '');
-      const aiSummary = sanitizeString(thread.ai_summary || '');
-      const isDeal = thread.is_deal ? 'true' : 'false';
-      const isLikelyScam = (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false';
-      const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0;
-
-      await executeSql(apiUrl, jwt, biscuit,
-        saveResults.upsertThreadEvaluation(schema, {
-          id: evalId, threadId, auditId: '', category, summary: aiSummary,
-          isDeal, likelyScam: isLikelyScam, score: aiScore,
-        }));
-      upserted++;
-    } catch (err) {
-      failed++;
-      coreExports.error(`Failed eval for thread ${thread.thread_id}: ${err.message}`);
-    }
+  if (threads.length === 0) {
+    console.log('[save-evals] no threads in audit');
+    return { upserted: 0 }
   }
 
-  console.log(`[save-evals] upserted ${upserted}/${threads.length}, failed ${failed}`);
-  if (failed > 0) throw new Error(`${failed}/${threads.length} thread eval(s) failed`)
-  return { upserted, total: threads.length }
+  // Build batched VALUES for all threads
+  const values = threads.map((thread) => {
+    const threadId = sanitizeId(thread.thread_id);
+    const evalId = crypto.randomUUID();
+    const category = sanitizeString(thread.category || '');
+    const aiSummary = sanitizeString(thread.ai_summary || '');
+    const isDeal = thread.is_deal ? 'true' : 'false';
+    const isLikelyScam = (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false';
+    const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0;
+    return `('${evalId}', '${threadId}', '', '${category}', '${aiSummary}', ${isDeal}, ${isLikelyScam}, ${aiScore}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+  }).join(', ');
+
+  const sql = `INSERT INTO ${schema}.EMAIL_THREAD_EVALUATIONS
+    (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT)
+  VALUES ${values}
+  ON CONFLICT (THREAD_ID) DO UPDATE SET
+    AI_EVALUATION_AUDIT_ID = EXCLUDED.AI_EVALUATION_AUDIT_ID,
+    AI_INSIGHT = EXCLUDED.AI_INSIGHT,
+    AI_SUMMARY = EXCLUDED.AI_SUMMARY,
+    IS_DEAL = EXCLUDED.IS_DEAL,
+    LIKELY_SCAM = EXCLUDED.LIKELY_SCAM,
+    AI_SCORE = EXCLUDED.AI_SCORE,
+    UPDATED_AT = CURRENT_TIMESTAMP`;
+
+  await executeSql(apiUrl, jwt, biscuit, sql);
+
+  console.log(`[save-evals] upserted ${threads.length} thread evaluations (1 query)`);
+  return { upserted: threads.length, total: threads.length }
 }
 
 /**
@@ -35436,7 +35467,7 @@ async function runSxtQuery() {
 
 /**
  * Step 4: Read audit by batch_id → update deal_states to terminal status.
- * Idempotent: UPDATE with WHERE clause only affects rows still at 'classifying'.
+ * Batched: collects all deal/not_deal email IDs, then issues exactly 2 UPDATEs.
  */
 async function runUpdateDealStates() {
   const authUrl = coreExports.getInput('auth-url');
@@ -35470,35 +35501,34 @@ async function runUpdateDealStates() {
     metadataByThread[row.THREAD_ID].push(row);
   }
 
-  let dealCount = 0;
-  let notDealCount = 0;
-  let failed = 0;
+  // Collect all deal and not_deal email IDs
+  const dealEmailIds = [];
+  const notDealEmailIds = [];
 
   for (const thread of threads) {
-    try {
-      const threadId = sanitizeId(thread.thread_id);
-      const threadEmails = metadataByThread[threadId] || [];
-      if (threadEmails.length === 0) continue
+    const threadId = sanitizeId(thread.thread_id);
+    const threadEmails = metadataByThread[threadId] || [];
+    if (threadEmails.length === 0) continue
 
-      const emailIds = threadEmails.map((e) => e.EMAIL_METADATA_ID);
-      const sqlQuotedIds = toSqlIdList(emailIds);
-
-      if (thread.is_deal) {
-        await executeSql(apiUrl, jwt, biscuit, detection.updateDeals(schema, sqlQuotedIds));
-        dealCount += emailIds.length;
-      } else {
-        await executeSql(apiUrl, jwt, biscuit, detection.updateNotDeal(schema, sqlQuotedIds));
-        notDealCount += emailIds.length;
-      }
-    } catch (err) {
-      failed++;
-      coreExports.error(`Failed to update states for thread ${thread.thread_id}: ${err.message}`);
+    const emailIds = threadEmails.map((e) => e.EMAIL_METADATA_ID);
+    if (thread.is_deal) {
+      dealEmailIds.push(...emailIds);
+    } else {
+      notDealEmailIds.push(...emailIds);
     }
   }
 
-  console.log(`[update-states] ${dealCount} → deal, ${notDealCount} → not_deal, ${failed} failed`);
-  if (failed > 0) throw new Error(`${failed} state update(s) failed`)
-  return { deal: dealCount, not_deal: notDealCount }
+  // Issue exactly 2 UPDATEs (one for deals, one for not_deals)
+  if (dealEmailIds.length > 0) {
+    await executeSql(apiUrl, jwt, biscuit, detection.updateDeals(schema, toSqlIdList(dealEmailIds)));
+  }
+  if (notDealEmailIds.length > 0) {
+    await executeSql(apiUrl, jwt, biscuit, detection.updateNotDeal(schema, toSqlIdList(notDealEmailIds)));
+  }
+
+  const queries = (dealEmailIds.length > 0 ? 1 : 0) + (notDealEmailIds.length > 0 ? 1 : 0);
+  console.log(`[update-states] ${dealEmailIds.length} → deal, ${notDealEmailIds.length} → not_deal (${queries} queries)`);
+  return { deal: dealEmailIds.length, not_deal: notDealEmailIds.length }
 }
 
 /**

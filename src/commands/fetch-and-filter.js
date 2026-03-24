@@ -133,6 +133,7 @@ export async function runFetchAndFilter() {
 
   const MAX_PER_CHUNK = 10
   const allEmails = []
+  const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]))
 
   for (let i = 0; i < messageIds.length; i += MAX_PER_CHUNK) {
     const chunk = messageIds.slice(i, i + MAX_PER_CHUNK)
@@ -150,7 +151,7 @@ export async function runFetchAndFilter() {
       const emails = result.data || result
 
       for (const email of emails) {
-        const meta = metadataRows.find((r) => r.MESSAGE_ID === email.messageId)
+        const meta = metaByMessageId.get(email.messageId)
         if (meta) {
           email.id = meta.EMAIL_METADATA_ID
           // Only keep header fields

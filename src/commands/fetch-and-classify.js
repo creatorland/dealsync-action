@@ -75,6 +75,7 @@ export async function runFetchAndClassify() {
   const MAX_PER_CHUNK = 10
   const CONTENT_FETCH_MAX_RETRIES = 3
   const allEmails = []
+  const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]))
   for (let i = 0; i < messageIds.length; i += MAX_PER_CHUNK) {
     const chunk = messageIds.slice(i, i + MAX_PER_CHUNK)
     let fetched = false
@@ -99,7 +100,7 @@ export async function runFetchAndClassify() {
         const result = await resp.json()
         const emails = result.data || result
         for (const email of emails) {
-          const meta = metadataRows.find((r) => r.MESSAGE_ID === email.messageId)
+          const meta = metaByMessageId.get(email.messageId)
           if (meta) {
             email.id = meta.EMAIL_METADATA_ID
             email.threadId = meta.THREAD_ID

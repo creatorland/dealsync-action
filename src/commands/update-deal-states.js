@@ -11,7 +11,7 @@ import { authenticate, executeSql } from '../lib/sxt-client.js'
 
 /**
  * Step 4: Read audit by batch_id → update deal_states to terminal status.
- * Idempotent: UPDATE with WHERE clause only affects rows still at 'classifying'.
+ * Batched: collects all deal/not_deal email IDs, then issues exactly 2 UPDATEs.
  */
 export async function runUpdateDealStates() {
   const authUrl = core.getInput('auth-url')
@@ -45,33 +45,32 @@ export async function runUpdateDealStates() {
     metadataByThread[row.THREAD_ID].push(row)
   }
 
-  let dealCount = 0
-  let notDealCount = 0
-  let failed = 0
+  // Collect all deal and not_deal email IDs
+  const dealEmailIds = []
+  const notDealEmailIds = []
 
   for (const thread of threads) {
-    try {
-      const threadId = sanitizeId(thread.thread_id)
-      const threadEmails = metadataByThread[threadId] || []
-      if (threadEmails.length === 0) continue
+    const threadId = sanitizeId(thread.thread_id)
+    const threadEmails = metadataByThread[threadId] || []
+    if (threadEmails.length === 0) continue
 
-      const emailIds = threadEmails.map((e) => e.EMAIL_METADATA_ID)
-      const sqlQuotedIds = toSqlIdList(emailIds)
-
-      if (thread.is_deal) {
-        await executeSql(apiUrl, jwt, biscuit, detection.updateDeals(schema, sqlQuotedIds))
-        dealCount += emailIds.length
-      } else {
-        await executeSql(apiUrl, jwt, biscuit, detection.updateNotDeal(schema, sqlQuotedIds))
-        notDealCount += emailIds.length
-      }
-    } catch (err) {
-      failed++
-      core.error(`Failed to update states for thread ${thread.thread_id}: ${err.message}`)
+    const emailIds = threadEmails.map((e) => e.EMAIL_METADATA_ID)
+    if (thread.is_deal) {
+      dealEmailIds.push(...emailIds)
+    } else {
+      notDealEmailIds.push(...emailIds)
     }
   }
 
-  console.log(`[update-states] ${dealCount} → deal, ${notDealCount} → not_deal, ${failed} failed`)
-  if (failed > 0) throw new Error(`${failed} state update(s) failed`)
-  return { deal: dealCount, not_deal: notDealCount }
+  // Issue exactly 2 UPDATEs (one for deals, one for not_deals)
+  if (dealEmailIds.length > 0) {
+    await executeSql(apiUrl, jwt, biscuit, detection.updateDeals(schema, toSqlIdList(dealEmailIds)))
+  }
+  if (notDealEmailIds.length > 0) {
+    await executeSql(apiUrl, jwt, biscuit, detection.updateNotDeal(schema, toSqlIdList(notDealEmailIds)))
+  }
+
+  const queries = (dealEmailIds.length > 0 ? 1 : 0) + (notDealEmailIds.length > 0 ? 1 : 0)
+  console.log(`[update-states] ${dealEmailIds.length} → deal, ${notDealEmailIds.length} → not_deal (${queries} queries)`)
+  return { deal: dealEmailIds.length, not_deal: notDealEmailIds.length }
 }

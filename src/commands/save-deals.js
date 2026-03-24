@@ -1,17 +1,17 @@
 import * as crypto from 'crypto'
 import * as core from '@actions/core'
 import {
-  saveResults,
   sanitizeId,
   sanitizeString,
   sanitizeSchema,
+  saveResults,
+  toSqlIdList,
 } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
 
 /**
  * Step 3: Read audit by batch_id → upsert deals + deal_contacts.
- * Idempotent: deals use ON CONFLICT (THREAD_ID) DO UPDATE.
- * deal_contacts use DELETE+INSERT (multiple contacts per deal).
+ * Batched: single multi-row INSERT for deals, single DELETE + INSERT for contacts.
  */
 export async function runSaveDeals() {
   const authUrl = core.getInput('auth-url')
@@ -43,48 +43,83 @@ export async function runSaveDeals() {
     userByThread[row.THREAD_ID] = row.USER_ID
   }
 
-  let dealsCreated = 0
-  let failed = 0
+  // Separate deal vs non-deal threads
+  const dealThreads = []
+  const notDealThreadIds = []
+
   for (const thread of threads) {
-    try {
-      const threadId = sanitizeId(thread.thread_id)
-      const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
-
-      if (thread.is_deal) {
-        const dealId = crypto.randomUUID()
-        const evalId = '' // will be linked via thread_id
-        const dealName = sanitizeString(thread.deal_name || '')
-        const dealType = sanitizeString(thread.deal_type || '')
-        const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0
-        const currency = sanitizeString(thread.currency || 'USD')
-        const contactEmail = thread.main_contact ? sanitizeString(thread.main_contact.email || '') : ''
-        const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : ''
-        const category = sanitizeString(thread.category || '')
-
-        await executeSql(apiUrl, jwt, biscuit,
-          saveResults.upsertDeal(schema, {
-            id: dealId, userId, threadId, evalId, dealName, dealType,
-            category, value: dealValue, currency, brand,
-          }))
-
-        if (contactEmail) {
-          await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDealContactByThread(schema, threadId))
-          await executeSql(apiUrl, jwt, biscuit,
-            saveResults.insertDealContact(schema, { id: crypto.randomUUID(), dealId, contactEmail }))
-        }
-
-        dealsCreated++
-      } else {
-        // Not a deal — remove any existing deal for this thread
-        await executeSql(apiUrl, jwt, biscuit, saveResults.deleteDeal(schema, threadId))
-      }
-    } catch (err) {
-      failed++
-      core.error(`Failed deal for thread ${thread.thread_id}: ${err.message}`)
+    if (thread.is_deal) {
+      dealThreads.push(thread)
+    } else {
+      notDealThreadIds.push(sanitizeId(thread.thread_id))
     }
   }
 
-  console.log(`[save-deals] ${dealsCreated} created, ${failed} failed`)
-  if (failed > 0) throw new Error(`${failed} deal(s) failed to save`)
-  return { deals_created: dealsCreated }
+  // Batch DELETE non-deal threads (single query)
+  if (notDealThreadIds.length > 0) {
+    const quotedIds = notDealThreadIds.map((id) => `'${id}'`).join(',')
+    await executeSql(apiUrl, jwt, biscuit,
+      `DELETE FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`)
+    console.log(`[save-deals] deleted ${notDealThreadIds.length} non-deal threads (1 query)`)
+  }
+
+  if (dealThreads.length === 0) {
+    console.log('[save-deals] no deal threads to save')
+    return { deals_created: 0 }
+  }
+
+  // Batch upsert deals (single multi-row INSERT)
+  const dealValues = dealThreads.map((thread) => {
+    const threadId = sanitizeId(thread.thread_id)
+    const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
+    const dealId = crypto.randomUUID()
+    const dealName = sanitizeString(thread.deal_name || '')
+    const dealType = sanitizeString(thread.deal_type || '')
+    const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0
+    const currency = sanitizeString(thread.currency || 'USD')
+    const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : ''
+    const category = sanitizeString(thread.category || '')
+    return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+  }).join(', ')
+
+  await executeSql(apiUrl, jwt, biscuit,
+    `INSERT INTO ${schema}.DEALS
+      (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT)
+    VALUES ${dealValues}
+    ON CONFLICT (THREAD_ID) DO UPDATE SET
+      EMAIL_THREAD_EVALUATION_ID = EXCLUDED.EMAIL_THREAD_EVALUATION_ID,
+      DEAL_NAME = EXCLUDED.DEAL_NAME,
+      DEAL_TYPE = EXCLUDED.DEAL_TYPE,
+      CATEGORY = EXCLUDED.CATEGORY,
+      VALUE = EXCLUDED.VALUE,
+      CURRENCY = EXCLUDED.CURRENCY,
+      BRAND = EXCLUDED.BRAND,
+      UPDATED_AT = CURRENT_TIMESTAMP`)
+
+  // Batch deal contacts: delete all existing contacts for these threads, then insert new ones
+  const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id))
+  const quotedDealThreadIds = dealThreadIds.map((id) => `'${id}'`).join(',')
+
+  await executeSql(apiUrl, jwt, biscuit,
+    `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedDealThreadIds}))`)
+
+  const contactValues = []
+  for (const thread of dealThreads) {
+    const contactEmail = thread.main_contact ? sanitizeString(thread.main_contact.email || '') : ''
+    if (!contactEmail) continue
+    const threadId = sanitizeId(thread.thread_id)
+    contactValues.push(
+      `('${crypto.randomUUID()}', (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}'), '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    )
+  }
+
+  if (contactValues.length > 0) {
+    await executeSql(apiUrl, jwt, biscuit,
+      `INSERT INTO ${schema}.DEAL_CONTACTS
+        (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, CREATED_AT, UPDATED_AT)
+      VALUES ${contactValues.join(', ')}`)
+  }
+
+  console.log(`[save-deals] ${dealThreads.length} deals upserted, ${contactValues.length} contacts saved (3 queries)`)
+  return { deals_created: dealThreads.length }
 }

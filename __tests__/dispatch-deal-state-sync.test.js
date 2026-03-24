@@ -107,7 +107,7 @@ describe('dispatch-deal-state-sync command', () => {
     const countSql = getSqlText(sqlCalls[0])
     expect(countSql).toContain('EMAIL_CORE_STAGING.EMAIL_METADATA')
     expect(countSql).toContain('DEAL_STATES')
-    expect(countSql).toContain('NOT IN (SELECT EMAIL_METADATA_ID FROM')
+    expect(countSql).toContain('NOT EXISTS')
 
     // Verify 3 W3 RPC calls with correct offsets
     const rpcCalls = getTriggerCalls(fetchSpy)

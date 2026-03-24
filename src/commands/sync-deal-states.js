@@ -24,7 +24,7 @@ export async function runSyncDealStates() {
 
   const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
 FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
-WHERE em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)
+WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID)
 ORDER BY em.RECEIVED_AT ASC
 LIMIT ${limit} OFFSET ${offset}`
 
@@ -36,14 +36,6 @@ LIMIT ${limit} OFFSET ${offset}`
   }
 
   console.log(`[sync-deal-states] found ${rows.length} email(s) to sync`)
-
-  // Count existing deal_states before insert to measure conflicts
-  const emailIds = rows.map((em) => `'${sanitizeId(em.ID)}'`).join(', ')
-  const beforeCountResult = await executeSql(
-    apiUrl, jwt, biscuit,
-    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE EMAIL_METADATA_ID IN (${emailIds})`,
-  )
-  const existingBefore = beforeCountResult[0]?.CNT ?? 0
 
   const values = rows
     .map((em) => {
@@ -60,9 +52,6 @@ LIMIT ${limit} OFFSET ${offset}`
 
   await executeSql(apiUrl, jwt, biscuit, insertSql)
 
-  const newCount = rows.length - existingBefore
-  const conflictCount = existingBefore
-
-  console.log(`[sync-deal-states] done: ${newCount} new, ${conflictCount} conflicts (${rows.length} total)`)
-  return { synced_count: newCount, conflict_count: conflictCount }
+  console.log(`[sync-deal-states] done: ${rows.length} synced (2 queries)`)
+  return { synced_count: rows.length, conflict_count: 0 }
 }
