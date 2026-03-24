@@ -18,14 +18,14 @@ function parseNonNegativeInt(value, name) {
  * Counts emails in EMAIL_METADATA that have no corresponding DEAL_STATES row,
  * calculates how many worker batches are needed, and triggers each via W3 JSON-RPC.
  */
-export async function runDispatchDealStates() {
+export async function runDispatchDealStateSync() {
   const authUrl = core.getInput('auth-url')
   const authSecret = core.getInput('auth-secret')
   const apiUrl = core.getInput('api-url')
   const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
   const w3RpcUrl = core.getInput('w3-rpc-url')
-  const creatorName = core.getInput('creator-name')
+  const syncWorkflowName = core.getInput('sync-workflow-name')
   const batchSize = parseNonNegativeInt(
     core.getInput('deal-state-batch-size') || '500',
     'deal-state-batch-size',
@@ -35,7 +35,7 @@ export async function runDispatchDealStates() {
     'deal-state-max-emails',
   )
 
-  console.log('[dispatch-deal-states] Authenticating...')
+  console.log('[dispatch-deal-state-sync] Authenticating...')
   const jwt = await authenticate(authUrl, authSecret)
 
   // Count emails without deal_states
@@ -43,10 +43,10 @@ export async function runDispatchDealStates() {
   const rows = await executeSql(apiUrl, jwt, biscuit, countSql)
   const diffCount = rows[0]?.CNT ?? 0
 
-  console.log(`[dispatch-deal-states] ${diffCount} emails without deal_states`)
+  console.log(`[dispatch-deal-state-sync] ${diffCount} emails without deal_states`)
 
   if (diffCount === 0) {
-    console.log('[dispatch-deal-states] Nothing to dispatch')
+    console.log('[dispatch-deal-state-sync] Nothing to dispatch')
     return { workers_triggered: 0, total_emails: 0 }
   }
 
@@ -54,7 +54,7 @@ export async function runDispatchDealStates() {
   const numWorkers = Math.ceil(emailsToProcess / batchSize)
 
   console.log(
-    `[dispatch-deal-states] Dispatching ${numWorkers} worker(s) for ${emailsToProcess} emails (batch=${batchSize})`,
+    `[dispatch-deal-state-sync] Dispatching ${numWorkers} worker(s) for ${emailsToProcess} emails (batch=${batchSize})`,
   )
 
   let workersTriggered = 0
@@ -63,7 +63,7 @@ export async function runDispatchDealStates() {
     const limit = batchSize
 
     const inputs = { offset: String(offset), limit: String(limit) }
-    const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(creatorName)}/trigger`
+    const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(syncWorkflowName)}/trigger`
     const MAX_TRIGGER_RETRIES = 3
 
     let triggered = false
@@ -79,7 +79,7 @@ export async function runDispatchDealStates() {
           if (attempt < MAX_TRIGGER_RETRIES) {
             const delay = Math.min(1000 * Math.pow(2, attempt), 30000)
             console.warn(
-              `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} HTTP ${resp.status} (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}), retrying in ${delay}ms`,
+              `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers} HTTP ${resp.status} (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}), retrying in ${delay}ms`,
             )
             await sleep(delay)
             continue
@@ -92,19 +92,19 @@ export async function runDispatchDealStates() {
         workersTriggered++
         triggered = true
         console.log(
-          `[dispatch-deal-states] Worker ${i + 1}/${numWorkers}: offset=${offset} limit=${limit} trigger=${triggerHash.substring(0, 16)}`,
+          `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers}: offset=${offset} limit=${limit} trigger=${triggerHash.substring(0, 16)}`,
         )
         break
       } catch (err) {
         if (attempt < MAX_TRIGGER_RETRIES) {
           const delay = Math.min(1000 * Math.pow(2, attempt), 30000)
           console.warn(
-            `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} error (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}): ${err.message}, retrying in ${delay}ms`,
+            `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers} error (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}): ${err.message}, retrying in ${delay}ms`,
           )
           await sleep(delay)
         } else {
           console.warn(
-            `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} failed after ${MAX_TRIGGER_RETRIES + 1} attempts: ${err.message}`,
+            `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers} failed after ${MAX_TRIGGER_RETRIES + 1} attempts: ${err.message}`,
           )
         }
       }
@@ -116,7 +116,7 @@ export async function runDispatchDealStates() {
   }
 
   console.log(
-    `[dispatch-deal-states] Done: ${workersTriggered}/${numWorkers} workers triggered for ${emailsToProcess} emails`,
+    `[dispatch-deal-state-sync] Done: ${workersTriggered}/${numWorkers} workers triggered for ${emailsToProcess} emails`,
   )
   return { workers_triggered: workersTriggered, total_emails: emailsToProcess }
 }

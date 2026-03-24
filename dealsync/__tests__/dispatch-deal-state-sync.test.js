@@ -12,7 +12,7 @@ jest.unstable_mockModule('@actions/core', () => ({
 }))
 
 const core = await import('@actions/core')
-const { runDispatchDealStates } = await import('../src/dispatch-deal-states.js')
+const { runDispatchDealStateSync } = await import('../src/dispatch-deal-state-sync.js')
 
 function mockInputs(overrides = {}) {
   const defaults = {
@@ -22,7 +22,7 @@ function mockInputs(overrides = {}) {
     biscuit: 'test-biscuit',
     schema: 'dealsync_stg_v1',
     'w3-rpc-url': 'https://w3.example.com/rpc',
-    'creator-name': 'DealStateWorker',
+    'sync-workflow-name': 'DealStateSyncWorker',
     'deal-state-batch-size': '500',
     'deal-state-max-emails': '5000',
     ...overrides,
@@ -73,7 +73,7 @@ function getTriggerPayload(call) {
   return JSON.parse(call[1].body)
 }
 
-describe('dispatch-deal-states command', () => {
+describe('dispatch-deal-state-sync command', () => {
   let fetchSpy
 
   beforeEach(() => {
@@ -96,7 +96,7 @@ describe('dispatch-deal-states command', () => {
       .mockResolvedValueOnce(triggerSuccess('hash-1')) // worker 1
       .mockResolvedValueOnce(triggerSuccess('hash-2')) // worker 2
 
-    const result = await runDispatchDealStates()
+    const result = await runDispatchDealStateSync()
 
     expect(result.workers_triggered).toBe(3)
     expect(result.total_emails).toBe(1200)
@@ -139,7 +139,7 @@ describe('dispatch-deal-states command', () => {
       .mockResolvedValueOnce(triggerSuccess('hash-0')) // worker 0
       .mockResolvedValueOnce(triggerSuccess('hash-1')) // worker 1
 
-    const result = await runDispatchDealStates()
+    const result = await runDispatchDealStateSync()
 
     expect(result.workers_triggered).toBe(2)
     expect(result.total_emails).toBe(1000)
@@ -161,7 +161,7 @@ describe('dispatch-deal-states command', () => {
       .mockResolvedValueOnce(authResponse()) // auth
       .mockResolvedValueOnce(sxtResponse([{ CNT: 0 }])) // count diff = 0
 
-    const result = await runDispatchDealStates()
+    const result = await runDispatchDealStateSync()
 
     expect(result.workers_triggered).toBe(0)
     expect(result.total_emails).toBe(0)
@@ -178,13 +178,13 @@ describe('dispatch-deal-states command', () => {
       .mockResolvedValueOnce(sxtResponse([{ CNT: 100 }]))
       .mockResolvedValueOnce(triggerSuccess('hash-single'))
 
-    await runDispatchDealStates()
+    await runDispatchDealStateSync()
 
     const rpcCalls = getTriggerCalls(fetchSpy)
     expect(rpcCalls).toHaveLength(1)
 
     const call = rpcCalls[0]
-    expect(call[0]).toBe('https://w3.example.com/rpc/workflow/DealStateWorker/trigger')
+    expect(call[0]).toBe('https://w3.example.com/rpc/workflow/DealStateSyncWorker/trigger')
     expect(call[1].method).toBe('POST')
     expect(call[1].headers['Content-Type']).toBe('application/json')
 
@@ -210,7 +210,7 @@ describe('dispatch-deal-states command', () => {
       // worker 2: succeeds
       .mockResolvedValueOnce(triggerSuccess('hash-2'))
 
-    const result = await runDispatchDealStates()
+    const result = await runDispatchDealStateSync()
 
     // 2 succeeded, 1 failed after retries
     expect(result.workers_triggered).toBe(2)
@@ -224,7 +224,7 @@ describe('dispatch-deal-states command', () => {
       .mockResolvedValueOnce(authResponse())
       .mockResolvedValueOnce(sxtResponse([{ CNT: 0 }]))
 
-    await runDispatchDealStates()
+    await runDispatchDealStateSync()
 
     const authCall = fetchSpy.mock.calls[0]
     expect(authCall[0]).toBe('https://auth.example.com/token')
@@ -234,7 +234,7 @@ describe('dispatch-deal-states command', () => {
 
   it('rejects invalid schema', async () => {
     mockInputs({ schema: 'schema; DROP TABLE' })
-    await expect(runDispatchDealStates()).rejects.toThrow('Invalid schema')
+    await expect(runDispatchDealStateSync()).rejects.toThrow('Invalid schema')
   })
 
   it('uses default batch-size and max-emails when not provided', async () => {
@@ -250,7 +250,7 @@ describe('dispatch-deal-states command', () => {
       .mockResolvedValueOnce(triggerSuccess('hash-1'))
       .mockResolvedValueOnce(triggerSuccess('hash-2'))
 
-    const result = await runDispatchDealStates()
+    const result = await runDispatchDealStateSync()
 
     // Default batch=500, max=5000 → 1200 emails, 3 workers
     expect(result.workers_triggered).toBe(3)

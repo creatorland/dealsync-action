@@ -1,7 +1,7 @@
 import * as core from '@actions/core'
-import { runCreateDealStates } from './create-deal-states.js'
 import { runDispatch } from './dispatch.js'
-import { runDispatchDealStates } from './dispatch-deal-states.js'
+import { runDispatchDealStateSync } from './dispatch-deal-state-sync.js'
+import { runSyncDealStates } from './sync-deal-states.js'
 import { runFetchAndClassify } from './fetch-and-classify.js'
 import { runFetchAndFilter } from './fetch-and-filter.js'
 import { runRetriggerStuck } from './retrigger-stuck.js'
@@ -19,8 +19,8 @@ const COMMANDS = {
   'save-evals': runSaveEvals,
   'save-deals': runSaveDeals,
   'update-deal-states': runUpdateDealStates,
-  'create-deal-states': runCreateDealStates,
-  'dispatch-deal-states': runDispatchDealStates,
+  'sync-deal-states': runSyncDealStates,
+  'dispatch-deal-state-sync': runDispatchDealStateSync,
 }
 
 export async function run() {

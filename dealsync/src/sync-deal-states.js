@@ -4,11 +4,11 @@ import { sanitizeSchema } from '../../shared/queries.js'
 import { authenticate, executeSql } from './sxt-client.js'
 
 /**
- * Query the diff between email_metadata and deal_states,
- * then insert missing deal_states rows with status='pending'.
- * Inserts all rows in a single INSERT statement (batch size controlled by orchestrator).
+ * Sync email_metadata into deal_states — insert missing rows with status='pending'.
+ * Uses ON CONFLICT DO UPDATE SET UPDATED_AT to handle duplicates (SxT doesn't support DO NOTHING).
+ * Counts existing rows before and after to determine how many were actually new vs conflicts.
  */
-export async function runCreateDealStates() {
+export async function runSyncDealStates() {
   const authUrl = core.getInput('auth-url')
   const authSecret = core.getInput('auth-secret')
   const apiUrl = core.getInput('api-url')
@@ -19,7 +19,7 @@ export async function runCreateDealStates() {
   const offset = parseInt(rawOffset || '0', 10)
   const limit = parseInt(rawLimit || '500', 10)
 
-  console.log(`[create-deal-states] inputs: offset="${rawOffset}" limit="${rawLimit}" → parsed: offset=${offset} limit=${limit}`)
+  console.log(`[sync-deal-states] inputs: offset="${rawOffset}" limit="${rawLimit}" → parsed: offset=${offset} limit=${limit}`)
   const jwt = await authenticate(authUrl, authSecret)
 
   const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
@@ -31,11 +31,19 @@ LIMIT ${limit} OFFSET ${offset}`
   const rows = await executeSql(apiUrl, jwt, biscuit, diffSql)
 
   if (!rows || rows.length === 0) {
-    console.log('[create-deal-states] no new emails to process')
-    return { created_count: 0, skipped_count: 0 }
+    console.log('[sync-deal-states] no new emails to sync')
+    return { synced_count: 0, conflict_count: 0 }
   }
 
-  console.log(`[create-deal-states] found ${rows.length} new email(s) to insert`)
+  console.log(`[sync-deal-states] found ${rows.length} email(s) to sync`)
+
+  // Count existing deal_states before insert to measure conflicts
+  const emailIds = rows.map((em) => `'${em.ID}'`).join(', ')
+  const beforeCountResult = await executeSql(
+    apiUrl, jwt, biscuit,
+    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE EMAIL_METADATA_ID IN (${emailIds})`,
+  )
+  const existingBefore = beforeCountResult[0]?.CNT ?? 0
 
   const values = rows
     .map((em) => {
@@ -50,6 +58,9 @@ LIMIT ${limit} OFFSET ${offset}`
 
   await executeSql(apiUrl, jwt, biscuit, insertSql)
 
-  console.log(`[create-deal-states] done: inserted ${rows.length} rows`)
-  return { created_count: rows.length, skipped_count: 0 }
+  const newCount = rows.length - existingBefore
+  const conflictCount = existingBefore
+
+  console.log(`[sync-deal-states] done: ${newCount} new, ${conflictCount} conflicts (${rows.length} total)`)
+  return { synced_count: newCount, conflict_count: conflictCount }
 }

@@ -12,7 +12,7 @@ jest.unstable_mockModule('@actions/core', () => ({
 }))
 
 const core = await import('@actions/core')
-const { runCreateDealStates } = await import('../src/create-deal-states.js')
+const { runSyncDealStates } = await import('../src/sync-deal-states.js')
 
 function mockInputs(overrides = {}) {
   const defaults = {
@@ -50,7 +50,7 @@ function getSqlText(call) {
   return JSON.parse(call[1].body).sqlText
 }
 
-describe('create-deal-states command', () => {
+describe('sync-deal-states command', () => {
   let fetchSpy
 
   beforeEach(() => {
@@ -63,7 +63,7 @@ describe('create-deal-states command', () => {
     fetchSpy.mockRestore()
   })
 
-  it('queries diff, inserts 2 rows, returns created_count=2', async () => {
+  it('queries diff, inserts 2 rows, returns synced_count=2', async () => {
     mockInputs({ limit: '500', offset: '10' })
 
     const diffRows = [
@@ -74,14 +74,15 @@ describe('create-deal-states command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // auth
       .mockResolvedValueOnce(sxtResponse(diffRows)) // diff query
+      .mockResolvedValueOnce(sxtResponse([{ CNT: 0 }])) // count existing (0 conflicts)
       .mockResolvedValueOnce(sxtResponse()) // insert
 
-    const result = await runCreateDealStates()
+    const result = await runSyncDealStates()
 
-    expect(result).toEqual({ created_count: 2, skipped_count: 0 })
+    expect(result).toEqual({ synced_count: 2, conflict_count: 0 })
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    expect(sqlCalls).toHaveLength(2) // diff + insert
+    expect(sqlCalls).toHaveLength(3) // diff + count + insert
 
     // Verify diff query
     const diffSql = getSqlText(sqlCalls[0])
@@ -92,7 +93,7 @@ describe('create-deal-states command', () => {
     expect(diffSql).toContain('NOT IN (SELECT EMAIL_METADATA_ID FROM')
 
     // Verify insert query
-    const insertSql = getSqlText(sqlCalls[1])
+    const insertSql = getSqlText(sqlCalls[2])
     expect(insertSql).toContain('INSERT INTO dealsync_stg_v1.DEAL_STATES')
     expect(insertSql).toContain('ON CONFLICT (EMAIL_METADATA_ID) DO UPDATE SET UPDATED_AT')
     expect(insertSql).toContain("'em-1'")
@@ -101,16 +102,16 @@ describe('create-deal-states command', () => {
     expect(insertSql).toContain('CURRENT_TIMESTAMP')
   })
 
-  it('returns created_count=0 when no diff rows found', async () => {
+  it('returns synced_count=0 when no diff rows found', async () => {
     mockInputs()
 
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // auth
       .mockResolvedValueOnce(sxtResponse([])) // diff query returns empty
 
-    const result = await runCreateDealStates()
+    const result = await runSyncDealStates()
 
-    expect(result).toEqual({ created_count: 0, skipped_count: 0 })
+    expect(result).toEqual({ synced_count: 0, conflict_count: 0 })
 
     // Should only have the diff query, no insert
     const sqlCalls = getSqlCalls(fetchSpy)
@@ -130,24 +131,25 @@ describe('create-deal-states command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // auth
       .mockResolvedValueOnce(sxtResponse(diffRows)) // diff query
+      .mockResolvedValueOnce(sxtResponse([{ CNT: 0 }])) // count existing
       .mockResolvedValueOnce(sxtResponse()) // single insert
 
-    const result = await runCreateDealStates()
+    const result = await runSyncDealStates()
 
-    expect(result).toEqual({ created_count: 60, skipped_count: 0 })
+    expect(result).toEqual({ synced_count: 60, conflict_count: 0 })
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    expect(sqlCalls).toHaveLength(2) // diff + 1 insert
+    expect(sqlCalls).toHaveLength(3) // diff + count + 1 insert
 
     // Verify single insert contains all rows
-    const insertSql = getSqlText(sqlCalls[1])
+    const insertSql = getSqlText(sqlCalls[2])
     expect(insertSql).toContain("'em-0'")
     expect(insertSql).toContain("'em-59'")
   })
 
   it('rejects invalid schema', async () => {
     mockInputs({ schema: 'schema; DROP TABLE' })
-    await expect(runCreateDealStates()).rejects.toThrow('Invalid schema')
+    await expect(runSyncDealStates()).rejects.toThrow('Invalid schema')
   })
 
   it('authenticates via proxy with x-shared-secret', async () => {
@@ -157,7 +159,7 @@ describe('create-deal-states command', () => {
       .mockResolvedValueOnce(authResponse())
       .mockResolvedValueOnce(sxtResponse([]))
 
-    await runCreateDealStates()
+    await runSyncDealStates()
 
     const authCall = fetchSpy.mock.calls[0]
     expect(authCall[0]).toBe('https://auth.example.com/token')
@@ -175,9 +177,10 @@ describe('create-deal-states command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse())
       .mockResolvedValueOnce(sxtResponse(diffRows))
+      .mockResolvedValueOnce(sxtResponse([{ CNT: 0 }])) // count existing
       .mockResolvedValueOnce(sxtResponse())
 
-    await runCreateDealStates()
+    await runSyncDealStates()
 
     const sqlCalls = getSqlCalls(fetchSpy)
 
@@ -188,8 +191,8 @@ describe('create-deal-states command', () => {
     expect(diffSql).toContain('em.THREAD_ID')
     expect(diffSql).toContain('em.MESSAGE_ID')
 
-    // Insert uses correct column order
-    const insertSql = getSqlText(sqlCalls[1])
+    // Insert uses correct column order (index 2: after diff + count)
+    const insertSql = getSqlText(sqlCalls[2])
     expect(insertSql).toContain(
       'ID, EMAIL_METADATA_ID, USER_ID, THREAD_ID, MESSAGE_ID, STATUS, CREATED_AT, UPDATED_AT',
     )

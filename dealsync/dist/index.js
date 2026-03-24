@@ -27542,57 +27542,6 @@ async function executeSql(apiUrl, jwt, biscuit, sql) {
   }
 }
 
-/**
- * Query the diff between email_metadata and deal_states,
- * then insert missing deal_states rows with status='pending'.
- * Inserts all rows in a single INSERT statement (batch size controlled by orchestrator).
- */
-async function runCreateDealStates() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const rawOffset = coreExports.getInput('offset');
-  const rawLimit = coreExports.getInput('limit');
-  const offset = parseInt(rawOffset || '0', 10);
-  const limit = parseInt(rawLimit || '500', 10);
-
-  console.log(`[create-deal-states] inputs: offset="${rawOffset}" limit="${rawLimit}" → parsed: offset=${offset} limit=${limit}`);
-  const jwt = await authenticate(authUrl, authSecret);
-
-  const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
-FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
-WHERE em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)
-ORDER BY em.RECEIVED_AT ASC
-LIMIT ${limit} OFFSET ${offset}`;
-
-  const rows = await executeSql(apiUrl, jwt, biscuit, diffSql);
-
-  if (!rows || rows.length === 0) {
-    console.log('[create-deal-states] no new emails to process');
-    return { created_count: 0, skipped_count: 0 }
-  }
-
-  console.log(`[create-deal-states] found ${rows.length} new email(s) to insert`);
-
-  const values = rows
-    .map((em) => {
-      const id = crypto.randomUUID();
-      const threadId = em.THREAD_ID || '';
-      const messageId = em.MESSAGE_ID || '';
-      return `('${id}', '${em.ID}', '${em.USER_ID}', '${threadId}', '${messageId}', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-    })
-    .join(', ');
-
-  const insertSql = `INSERT INTO ${schema}.DEAL_STATES (ID, EMAIL_METADATA_ID, USER_ID, THREAD_ID, MESSAGE_ID, STATUS, CREATED_AT, UPDATED_AT) VALUES ${values} ON CONFLICT (EMAIL_METADATA_ID) DO UPDATE SET UPDATED_AT = CURRENT_TIMESTAMP`;
-
-  await executeSql(apiUrl, jwt, biscuit, insertSql);
-
-  console.log(`[create-deal-states] done: inserted ${rows.length} rows`);
-  return { created_count: rows.length, skipped_count: 0 }
-}
-
 function sleep$1(ms) {
   return new Promise((r) => setTimeout(r, ms))
 }
@@ -27754,14 +27703,14 @@ function parseNonNegativeInt(value, name) {
  * Counts emails in EMAIL_METADATA that have no corresponding DEAL_STATES row,
  * calculates how many worker batches are needed, and triggers each via W3 JSON-RPC.
  */
-async function runDispatchDealStates() {
+async function runDispatchDealStateSync() {
   const authUrl = coreExports.getInput('auth-url');
   const authSecret = coreExports.getInput('auth-secret');
   const apiUrl = coreExports.getInput('api-url');
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
   const w3RpcUrl = coreExports.getInput('w3-rpc-url');
-  const creatorName = coreExports.getInput('creator-name');
+  const syncWorkflowName = coreExports.getInput('sync-workflow-name');
   const batchSize = parseNonNegativeInt(
     coreExports.getInput('deal-state-batch-size') || '500',
     'deal-state-batch-size',
@@ -27771,7 +27720,7 @@ async function runDispatchDealStates() {
     'deal-state-max-emails',
   );
 
-  console.log('[dispatch-deal-states] Authenticating...');
+  console.log('[dispatch-deal-state-sync] Authenticating...');
   const jwt = await authenticate(authUrl, authSecret);
 
   // Count emails without deal_states
@@ -27779,10 +27728,10 @@ async function runDispatchDealStates() {
   const rows = await executeSql(apiUrl, jwt, biscuit, countSql);
   const diffCount = rows[0]?.CNT ?? 0;
 
-  console.log(`[dispatch-deal-states] ${diffCount} emails without deal_states`);
+  console.log(`[dispatch-deal-state-sync] ${diffCount} emails without deal_states`);
 
   if (diffCount === 0) {
-    console.log('[dispatch-deal-states] Nothing to dispatch');
+    console.log('[dispatch-deal-state-sync] Nothing to dispatch');
     return { workers_triggered: 0, total_emails: 0 }
   }
 
@@ -27790,7 +27739,7 @@ async function runDispatchDealStates() {
   const numWorkers = Math.ceil(emailsToProcess / batchSize);
 
   console.log(
-    `[dispatch-deal-states] Dispatching ${numWorkers} worker(s) for ${emailsToProcess} emails (batch=${batchSize})`,
+    `[dispatch-deal-state-sync] Dispatching ${numWorkers} worker(s) for ${emailsToProcess} emails (batch=${batchSize})`,
   );
 
   let workersTriggered = 0;
@@ -27799,7 +27748,7 @@ async function runDispatchDealStates() {
     const limit = batchSize;
 
     const inputs = { offset: String(offset), limit: String(limit) };
-    const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(creatorName)}/trigger`;
+    const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(syncWorkflowName)}/trigger`;
     const MAX_TRIGGER_RETRIES = 3;
 
     let triggered = false;
@@ -27815,7 +27764,7 @@ async function runDispatchDealStates() {
           if (attempt < MAX_TRIGGER_RETRIES) {
             const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
             console.warn(
-              `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} HTTP ${resp.status} (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}), retrying in ${delay}ms`,
+              `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers} HTTP ${resp.status} (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}), retrying in ${delay}ms`,
             );
             await sleep(delay);
             continue
@@ -27828,19 +27777,19 @@ async function runDispatchDealStates() {
         workersTriggered++;
         triggered = true;
         console.log(
-          `[dispatch-deal-states] Worker ${i + 1}/${numWorkers}: offset=${offset} limit=${limit} trigger=${triggerHash.substring(0, 16)}`,
+          `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers}: offset=${offset} limit=${limit} trigger=${triggerHash.substring(0, 16)}`,
         );
         break
       } catch (err) {
         if (attempt < MAX_TRIGGER_RETRIES) {
           const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
           console.warn(
-            `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} error (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}): ${err.message}, retrying in ${delay}ms`,
+            `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers} error (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}): ${err.message}, retrying in ${delay}ms`,
           );
           await sleep(delay);
         } else {
           console.warn(
-            `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} failed after ${MAX_TRIGGER_RETRIES + 1} attempts: ${err.message}`,
+            `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers} failed after ${MAX_TRIGGER_RETRIES + 1} attempts: ${err.message}`,
           );
         }
       }
@@ -27852,9 +27801,71 @@ async function runDispatchDealStates() {
   }
 
   console.log(
-    `[dispatch-deal-states] Done: ${workersTriggered}/${numWorkers} workers triggered for ${emailsToProcess} emails`,
+    `[dispatch-deal-state-sync] Done: ${workersTriggered}/${numWorkers} workers triggered for ${emailsToProcess} emails`,
   );
   return { workers_triggered: workersTriggered, total_emails: emailsToProcess }
+}
+
+/**
+ * Sync email_metadata into deal_states — insert missing rows with status='pending'.
+ * Uses ON CONFLICT DO UPDATE SET UPDATED_AT to handle duplicates (SxT doesn't support DO NOTHING).
+ * Counts existing rows before and after to determine how many were actually new vs conflicts.
+ */
+async function runSyncDealStates() {
+  const authUrl = coreExports.getInput('auth-url');
+  const authSecret = coreExports.getInput('auth-secret');
+  const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
+  const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const rawOffset = coreExports.getInput('offset');
+  const rawLimit = coreExports.getInput('limit');
+  const offset = parseInt(rawOffset || '0', 10);
+  const limit = parseInt(rawLimit || '500', 10);
+
+  console.log(`[sync-deal-states] inputs: offset="${rawOffset}" limit="${rawLimit}" → parsed: offset=${offset} limit=${limit}`);
+  const jwt = await authenticate(authUrl, authSecret);
+
+  const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
+FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
+WHERE em.ID NOT IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES)
+ORDER BY em.RECEIVED_AT ASC
+LIMIT ${limit} OFFSET ${offset}`;
+
+  const rows = await executeSql(apiUrl, jwt, biscuit, diffSql);
+
+  if (!rows || rows.length === 0) {
+    console.log('[sync-deal-states] no new emails to sync');
+    return { synced_count: 0, conflict_count: 0 }
+  }
+
+  console.log(`[sync-deal-states] found ${rows.length} email(s) to sync`);
+
+  // Count existing deal_states before insert to measure conflicts
+  const emailIds = rows.map((em) => `'${em.ID}'`).join(', ');
+  const beforeCountResult = await executeSql(
+    apiUrl, jwt, biscuit,
+    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE EMAIL_METADATA_ID IN (${emailIds})`,
+  );
+  const existingBefore = beforeCountResult[0]?.CNT ?? 0;
+
+  const values = rows
+    .map((em) => {
+      const id = crypto.randomUUID();
+      const threadId = em.THREAD_ID || '';
+      const messageId = em.MESSAGE_ID || '';
+      return `('${id}', '${em.ID}', '${em.USER_ID}', '${threadId}', '${messageId}', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    })
+    .join(', ');
+
+  const insertSql = `INSERT INTO ${schema}.DEAL_STATES (ID, EMAIL_METADATA_ID, USER_ID, THREAD_ID, MESSAGE_ID, STATUS, CREATED_AT, UPDATED_AT) VALUES ${values} ON CONFLICT (EMAIL_METADATA_ID) DO UPDATE SET UPDATED_AT = CURRENT_TIMESTAMP`;
+
+  await executeSql(apiUrl, jwt, biscuit, insertSql);
+
+  const newCount = rows.length - existingBefore;
+  const conflictCount = existingBefore;
+
+  console.log(`[sync-deal-states] done: ${newCount} new, ${conflictCount} conflicts (${rows.length} total)`);
+  return { synced_count: newCount, conflict_count: conflictCount }
 }
 
 var classificationInstructions = "# Classification Instructions\n\n## What is a Deal?\n\nA deal is any business opportunity, partnership, sponsorship, collaboration,\nor commercial arrangement discussed in the email thread. Look for:\n\n- Explicit mentions of payment, compensation, rates, or fees\n- Brand partnership or sponsorship proposals\n- Product collaboration or gifting arrangements\n- Event appearance or speaking engagement offers\n- Licensing or content creation agreements\n\n## What is NOT a Deal?\n\n- Newsletters, automated notifications, marketing blasts\n- Social media notifications or follower alerts\n- Shipping/tracking/order confirmations\n- Support tickets or customer service threads\n- Personal conversations unrelated to business\n\n## Scoring Guide (ai_score 1-10)\n\n- 1-3: Unlikely deal, vague or tangential business mention\n- 4-6: Possible deal, some indicators but not confirmed\n- 7-9: Likely deal, clear business intent with specifics\n- 10: Confirmed deal, explicit terms or signed agreement\n\n## Category Definitions\n\n- new: First contact, deal not yet discussed in depth\n- in_progress: Active negotiation, terms being discussed\n- completed: Deal closed, agreement reached or signed\n- likely_scam: Suspicious patterns, too-good-to-be-true offers\n- low_confidence: Ambiguous, cannot determine with confidence\n\n## Language Detection\n\nIf the primary language of the email thread is not English,\nset language to the ISO 639-1 code and is_deal to false\nunless the deal context is clearly understandable.\n";
@@ -28695,8 +28706,8 @@ const COMMANDS = {
   'save-evals': runSaveEvals,
   'save-deals': runSaveDeals,
   'update-deal-states': runUpdateDealStates,
-  'create-deal-states': runCreateDealStates,
-  'dispatch-deal-states': runDispatchDealStates,
+  'sync-deal-states': runSyncDealStates,
+  'dispatch-deal-state-sync': runDispatchDealStateSync,
 };
 
 async function run() {

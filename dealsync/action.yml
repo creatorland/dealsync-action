@@ -69,13 +69,13 @@ inputs:
   ai-api-url:
     description: 'AI API URL (fetch-and-classify)'
     default: 'https://api.hyperbolic.xyz/v1/chat/completions'
-  creator-name:
-    description: 'Deal state creator workflow name to trigger (dispatch-deal-states)'
+  sync-workflow-name:
+    description: 'Deal state sync workflow name to trigger (dispatch-deal-state-sync)'
   deal-state-batch-size:
-    description: 'Emails per deal state creation batch (dispatch-deal-states)'
+    description: 'Emails per deal state creation batch (dispatch-deal-state-sync)'
     default: '500'
   deal-state-max-emails:
-    description: 'Max emails to process per cycle (dispatch-deal-states)'
+    description: 'Max emails to process per cycle (dispatch-deal-state-sync)'
     default: '5000'
   offset:
     description: 'Offset for paginated queries (create-deal-states)'
