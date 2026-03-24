@@ -1,0 +1,105 @@
+# A/B Eval Workflow — compare two prompt/model variants against ground truth
+#
+# Available models (Hyperbolic API):
+#   Qwen/Qwen3-235B-A22B-Instruct-2507  262K ctx  $0.25/M
+#   moonshotai/Kimi-K2-Instruct          131K ctx  $2.00/M
+#   deepseek-ai/DeepSeek-V3-0324         131K ctx  $1.25/M
+#   deepseek-ai/DeepSeek-V3              131K ctx  $0.25/M
+#   deepseek-ai/DeepSeek-R1-0528         164K ctx  $3.00/M
+#   openai/gpt-oss-120b                  131K ctx  $0.30/M
+#   openai/gpt-oss-20b                   131K ctx  $0.10/M
+#   meta-llama/Llama-3.3-70B-Instruct    131K ctx  $0.40/M
+#   Qwen/Qwen3-Coder-480B-A35B-Instruct 262K ctx  $0.40/M
+#
+# Prompt hashes:
+#   4274af0  Rust baseline prompt (production v1)
+#   57e99ad  v2 prompt with prefix caching + examples
+
+name: A/B Eval
+on:
+  workflow_dispatch:
+    inputs:
+      hash_a:
+        type: string
+        description: Prompt commit hash for variant A (baseline)
+        default: '4274af00b52049c49e7a7b1b577b71ea95a375d3'
+      hash_b:
+        type: string
+        description: Prompt commit hash for variant B (candidate)
+        default: '57e99add6f2e4c1983607aa37d2c5e7319023792'
+      model_a:
+        type: string
+        description: Model for variant A
+        default: 'Qwen/Qwen3-235B-A22B-Instruct-2507'
+      model_b:
+        type: string
+        description: Model for variant B
+        default: 'Qwen/Qwen3-235B-A22B-Instruct-2507'
+      runs:
+        type: string
+        description: Number of eval runs per variant
+        default: '1'
+      temperature:
+        type: string
+        description: AI temperature
+        default: '0'
+      batch_size:
+        type: string
+        description: Threads per AI call
+        default: '1'
+
+jobs:
+  eval-a:
+    name: Evaluate variant A
+    runs-on: ubuntu-latest
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
+    outputs:
+      result: ${{ steps.run-eval.outputs.result }}
+      success: ${{ steps.run-eval.outputs.success }}
+    steps:
+      - id: run-eval
+        name: Run eval A
+        uses: creatorland/dealsync-action@c71e4565912825cc170ccf7d59916431a5c12d28
+        with:
+          command: eval
+          hyperbolic-key: ${{ secrets.HYPERBOLIC_KEY }}
+          primary-model: ${{ inputs.model_a }}
+          prompt-hash: ${{ inputs.hash_a }}
+          runs: ${{ inputs.runs }}
+          temperature: ${{ inputs.temperature }}
+          batch-size: ${{ inputs.batch_size }}
+
+  eval-b:
+    name: Evaluate variant B
+    runs-on: ubuntu-latest
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
+    outputs:
+      result: ${{ steps.run-eval.outputs.result }}
+      success: ${{ steps.run-eval.outputs.success }}
+    steps:
+      - id: run-eval
+        name: Run eval B
+        uses: creatorland/dealsync-action@c71e4565912825cc170ccf7d59916431a5c12d28
+        with:
+          command: eval
+          hyperbolic-key: ${{ secrets.HYPERBOLIC_KEY }}
+          primary-model: ${{ inputs.model_b }}
+          prompt-hash: ${{ inputs.hash_b }}
+          runs: ${{ inputs.runs }}
+          temperature: ${{ inputs.temperature }}
+          batch-size: ${{ inputs.batch_size }}
+
+  compare:
+    name: Compare A vs B
+    needs: [eval-a, eval-b]
+    if: always() && needs.eval-a.result == 'success' && needs.eval-b.result == 'success'
+    runs-on: ubuntu-latest
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
+    steps:
+      - id: compare
+        name: Compare results
+        uses: creatorland/dealsync-action@c71e4565912825cc170ccf7d59916431a5c12d28
+        with:
+          command: eval-compare
+          result-a: ${{ needs.eval-a.outputs.result }}
+          result-b: ${{ needs.eval-b.outputs.result }}

@@ -1,0 +1,54 @@
+name: Dealsync Orchestrator
+on: workflow_dispatch
+
+jobs:
+  orchestrate:
+    runs-on: ubuntu-latest
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
+    steps:
+      - id: retrigger-stuck
+        name: Retrigger stuck batches
+        uses: creatorland/dealsync-action@8776bb64aa49f3f7c22197cc2eb0bcd0dd4214c5
+        with:
+          command: retrigger-stuck
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+          w3-rpc-url: ${{ secrets.W3_RPC_URL }}
+          processor-name: dealsync-processor-8776bb6
+
+      - id: dispatch-deal-state-sync
+        name: Create missing deal states
+        uses: creatorland/dealsync-action@8776bb64aa49f3f7c22197cc2eb0bcd0dd4214c5
+        with:
+          command: dispatch-deal-state-sync
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+          w3-rpc-url: ${{ secrets.W3_RPC_URL }}
+          sync-workflow-name: dealsync-deal-state-sync-8776bb6
+          deal-state-batch-size: ${{ secrets.DEAL_STATE_BATCH_SIZE }}
+          deal-state-max-emails: ${{ secrets.DEAL_STATE_MAX_EMAILS }}
+
+      - id: dispatch
+        name: Dispatch new batches
+        uses: creatorland/dealsync-action@8776bb64aa49f3f7c22197cc2eb0bcd0dd4214c5
+        with:
+          command: dispatch
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+          w3-rpc-url: ${{ secrets.W3_RPC_URL }}
+          processor-name: dealsync-processor-8776bb6
