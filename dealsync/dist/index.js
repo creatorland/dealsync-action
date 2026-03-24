@@ -27817,15 +27817,18 @@ async function runDispatchDealStates() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ inputs }),
         });
-        if (resp.status === 429) {
-          const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
-          console.warn(
-            `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} hit 429 (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}), retrying in ${delay}ms`,
-          );
-          await sleep(delay);
-          continue
+        if (!resp.ok) {
+          const body = await resp.text();
+          if (attempt < MAX_TRIGGER_RETRIES) {
+            const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
+            console.warn(
+              `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} HTTP ${resp.status} (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}), retrying in ${delay}ms`,
+            );
+            await sleep(delay);
+            continue
+          }
+          throw new Error(`HTTP ${resp.status}: ${body}`)
         }
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
         const result = await resp.json();
         const triggerHash = result.triggerHash || '';
 
@@ -27836,11 +27839,17 @@ async function runDispatchDealStates() {
         );
         break
       } catch (err) {
-        // Only retry on network errors, not HTTP errors (those are already handled above)
-        console.warn(
-          `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} trigger failed: ${err.message}`,
-        );
-        break
+        if (attempt < MAX_TRIGGER_RETRIES) {
+          const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
+          console.warn(
+            `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} error (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}): ${err.message}, retrying in ${delay}ms`,
+          );
+          await sleep(delay);
+        } else {
+          console.warn(
+            `[dispatch-deal-states] Worker ${i + 1}/${numWorkers} failed after ${MAX_TRIGGER_RETRIES + 1} attempts: ${err.message}`,
+          );
+        }
       }
     }
 
