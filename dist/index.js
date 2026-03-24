@@ -37993,6 +37993,7 @@ async function runEval() {
   const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
   const numRuns = parseInt(coreExports.getInput('runs') || '10', 10);
   const temperature = parseFloat(coreExports.getInput('temperature') || '0');
+  const batchSize = parseInt(coreExports.getInput('batch-size') || '0', 10); // 0 = all at once
 
   if (!hyperbolicKey) throw new Error('hyperbolic-key is required for eval')
 
@@ -38000,7 +38001,7 @@ async function runEval() {
   const usableEntries = groundTruth.filter((gt) =>
     gt.emails.some((e) => e.body && e.body.trim() !== ''),
   );
-  console.log(`[eval] model=${model} runs=${numRuns} threads=${usableEntries.length} (${groundTruth.length - usableEntries.length} skipped: empty body)`);
+  console.log(`[eval] model=${model} runs=${numRuns} threads=${usableEntries.length} batch_size=${batchSize || 'all'} (${groundTruth.length - usableEntries.length} skipped: empty body)`);
 
   const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey };
   const allRuns = [];
@@ -38011,71 +38012,95 @@ async function runEval() {
   for (let run = 1; run <= numRuns; run++) {
     console.log(`[eval] --- run ${run}/${numRuns} ---`);
 
-    // Build prompt from ground truth emails (same path as production)
-    const allEmails = usableEntries.flatMap((gt) => gt.emails);
-    const { systemPrompt, userPrompt } = buildPrompt(allEmails);
-
-    const messages = [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ];
-
-    const health = { clean: false, repaired: false, corrective_retry: false, failed: false };
-    let threads = null;
-
-    // Layer 0: Primary model call
-    let rawContent = null;
-    let usage = {};
-    try {
-      const result = await callModel(model, messages, { temperature, ...aiOpts });
-      rawContent = result.content;
-      usage = result.usage || {};
-    } catch (apiErr) {
-      console.log(`[eval] run ${run} API failed: ${apiErr.message}`);
-    }
-
-    if (rawContent) {
-      // Layer 1: Local JSON repair
-      try {
-        threads = parseAndValidate(rawContent);
-        health.clean = true;
-        console.log(`[eval] run ${run}: clean parse, ${threads.length} threads`);
-      } catch (parseErr) {
-        console.log(`[eval] run ${run}: parse failed (${parseErr.message}), attempting repair`);
-        health.repaired = true;
-
-        // Layer 2: Corrective retry
-        try {
-          const correctiveMessages = [
-            ...messages,
-            { role: 'assistant', content: rawContent },
-            {
-              role: 'user',
-              content: `Your previous response could not be parsed as valid JSON.\n\nParse error:\n${parseErr.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting. Return ONLY the JSON array.`,
-            },
-          ];
-          const corrected = await callModel(model, correctiveMessages, { temperature: 0, ...aiOpts });
-          threads = parseAndValidate(corrected.content);
-          health.corrective_retry = true;
-          health.repaired = false;
-          console.log(`[eval] run ${run}: corrective retry succeeded`);
-        } catch (correctiveErr) {
-          console.log(`[eval] run ${run}: corrective retry failed: ${correctiveErr.message}`);
-          health.failed = true;
-          health.repaired = false;
-        }
+    // Split ground truth into batches (0 = all at once)
+    const batches = [];
+    if (batchSize > 0) {
+      for (let i = 0; i < usableEntries.length; i += batchSize) {
+        batches.push(usableEntries.slice(i, i + batchSize));
       }
     } else {
-      health.failed = true;
+      batches.push(usableEntries);
     }
 
-    totalInputTokens += usage.prompt_tokens || 0;
-    totalOutputTokens += usage.completion_tokens || 0;
+    const runThreads = [];
+    const runHealth = { clean: 0, repaired: 0, corrective_retry: 0, failed: 0, total_batches: batches.length };
 
-    if (threads) {
-      allRuns.push(threads);
+    for (let b = 0; b < batches.length; b++) {
+      const batch = batches[b];
+      const allEmails = batch.flatMap((gt) => gt.emails);
+      const { systemPrompt, userPrompt } = buildPrompt(allEmails);
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ];
+
+      if (batches.length > 1) {
+        console.log(`[eval] run ${run} batch ${b + 1}/${batches.length} (${batch.length} threads)`);
+      }
+
+      // Layer 0: Primary model call
+      let rawContent = null;
+      let usage = {};
+      try {
+        const result = await callModel(model, messages, { temperature, ...aiOpts });
+        rawContent = result.content;
+        usage = result.usage || {};
+      } catch (apiErr) {
+        console.log(`[eval] run ${run} batch ${b + 1} API failed: ${apiErr.message}`);
+      }
+
+      if (rawContent) {
+        // Layer 1: Local JSON repair
+        try {
+          const parsed = parseAndValidate(rawContent);
+          runThreads.push(...parsed);
+          runHealth.clean++;
+        } catch (parseErr) {
+          console.log(`[eval] run ${run} batch ${b + 1}: parse failed (${parseErr.message}), attempting repair`);
+
+          // Layer 2: Corrective retry
+          try {
+            const correctiveMessages = [
+              ...messages,
+              { role: 'assistant', content: rawContent },
+              {
+                role: 'user',
+                content: `Your previous response could not be parsed as valid JSON.\n\nParse error:\n${parseErr.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting. Return ONLY the JSON array.`,
+              },
+            ];
+            const corrected = await callModel(model, correctiveMessages, { temperature: 0, ...aiOpts });
+            const parsed = parseAndValidate(corrected.content);
+            runThreads.push(...parsed);
+            runHealth.corrective_retry++;
+          } catch (correctiveErr) {
+            console.log(`[eval] run ${run} batch ${b + 1}: corrective retry failed: ${correctiveErr.message}`);
+            runHealth.failed++;
+          }
+        }
+      } else {
+        runHealth.failed++;
+      }
+
+      totalInputTokens += usage.prompt_tokens || 0;
+      totalOutputTokens += usage.completion_tokens || 0;
     }
-    jsonHealthPerRun.push(health);
+
+    console.log(`[eval] run ${run}: ${runThreads.length} threads (clean=${runHealth.clean} retry=${runHealth.corrective_retry} failed=${runHealth.failed})`);
+
+    if (runThreads.length > 0) {
+      allRuns.push(runThreads);
+    }
+    jsonHealthPerRun.push({
+      clean: runHealth.failed === 0 && runHealth.corrective_retry === 0,
+      repaired: false,
+      corrective_retry: runHealth.corrective_retry > 0,
+      failed: runHealth.failed > 0,
+      batch_count: runHealth.total_batches,
+      batch_clean: runHealth.clean,
+      batch_retry: runHealth.corrective_retry,
+      batch_failed: runHealth.failed,
+    });
   }
 
   if (allRuns.length === 0) {
@@ -38093,6 +38118,7 @@ async function runEval() {
   const result = {
     model,
     temperature,
+    batch_size: batchSize || usableEntries.length,
     runs: numRuns,
     successful_runs: allRuns.length,
     ground_truth_count: usableEntries.length,

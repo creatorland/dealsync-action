@@ -73,6 +73,9 @@ inputs:
   runs:
     description: 'Number of evaluation runs (eval)'
     default: '10'
+  batch-size:
+    description: 'Threads per AI call (eval). 0 = all at once, 5 = production batch size'
+    default: '0'
   temperature:
     description: 'AI temperature (eval)'
     default: '0'
