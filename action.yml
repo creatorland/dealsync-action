@@ -16,6 +16,10 @@ inputs:
     description: 'Pre-generated SxT biscuit'
   schema:
     description: 'SxT schema name'
+  rate-limiter-url:
+    description: 'SxT rate limiter service URL (optional, fail-open if not set)'
+  rate-limiter-api-key:
+    description: 'SxT API key for rate limiter token acquisition'
   w3-rpc-url:
     description: 'W3 node URL for triggering processors (dispatch, retrigger-stuck, dispatch-deal-state-sync)'
   processor-name:
