@@ -31,6 +31,22 @@ export async function runEvalCompare() {
     scam_detection: compareMetric(a.scam_detection.accuracy.mean, b.scam_detection.accuracy.mean),
   }
 
+  // Per-category comparison
+  const perCategoryComparison = {}
+  const allCategories = new Set([
+    ...Object.keys(a.categorization.per_category || {}),
+    ...Object.keys(b.categorization.per_category || {}),
+  ])
+  for (const cat of allCategories) {
+    const aCat = a.categorization.per_category?.[cat]
+    const bCat = b.categorization.per_category?.[cat]
+    perCategoryComparison[cat] = {
+      ...compareMetric(aCat?.mean ?? 0, bCat?.mean ?? 0),
+      a_count: aCat?.ground_truth_count ?? 0,
+      b_count: bCat?.ground_truth_count ?? 0,
+    }
+  }
+
   // JSON health comparison
   const jsonComparison = {
     clean_parse_rate: compareMetric(a.json_health.clean_parse_rate.mean, b.json_health.clean_parse_rate.mean),
@@ -83,6 +99,7 @@ export async function runEvalCompare() {
     variant_a: { model: a.model, runs: a.runs, successful_runs: a.successful_runs },
     variant_b: { model: b.model, runs: b.runs, successful_runs: b.successful_runs },
     comparison,
+    per_category: perCategoryComparison,
     json_health: jsonComparison,
     cost: costComparison,
     consistency: {
@@ -97,10 +114,21 @@ export async function runEvalCompare() {
     pass_fail: passFail,
   }
 
+  const fmt = (d) => `${d > 0 ? '+' : ''}${d}`
   console.log(`[eval-compare] verdict: ${passFail.verdict}`)
-  console.log(`[eval-compare] recall: ${comparison.recall.a} → ${comparison.recall.b} (${comparison.recall.delta > 0 ? '+' : ''}${comparison.recall.delta})`)
-  console.log(`[eval-compare] precision: ${comparison.precision.a} → ${comparison.precision.b} (${comparison.precision.delta > 0 ? '+' : ''}${comparison.precision.delta})`)
-  console.log(`[eval-compare] f2: ${comparison.f2.a} → ${comparison.f2.b} (${comparison.f2.delta > 0 ? '+' : ''}${comparison.f2.delta})`)
+  console.log(`[eval-compare] --- Detection ---`)
+  console.log(`[eval-compare] recall:    ${comparison.recall.a} → ${comparison.recall.b} (${fmt(comparison.recall.delta)})`)
+  console.log(`[eval-compare] precision: ${comparison.precision.a} → ${comparison.precision.b} (${fmt(comparison.precision.delta)})`)
+  console.log(`[eval-compare] f2:        ${comparison.f2.a} → ${comparison.f2.b} (${fmt(comparison.f2.delta)})`)
+  console.log(`[eval-compare] --- Sub-metrics ---`)
+  console.log(`[eval-compare] category:  ${comparison.category_accuracy.a} → ${comparison.category_accuracy.b} (${fmt(comparison.category_accuracy.delta)})`)
+  console.log(`[eval-compare] urgency:   ${comparison.score_in_range.a} → ${comparison.score_in_range.b} (${fmt(comparison.score_in_range.delta)})`)
+  console.log(`[eval-compare] scam:      ${comparison.scam_detection.a} → ${comparison.scam_detection.b} (${fmt(comparison.scam_detection.delta)})`)
+  console.log(`[eval-compare] cost:      $${costComparison.a} → $${costComparison.b} (${fmt(costComparison.delta)})`)
+  console.log(`[eval-compare] --- Per Category ---`)
+  for (const [cat, data] of Object.entries(perCategoryComparison)) {
+    console.log(`[eval-compare] ${cat}: ${data.a} → ${data.b} (${fmt(data.delta)}) [${data.a_count} threads]`)
+  }
   if (newMissedDeals.length > 0) console.log(`[eval-compare] NEW MISSED DEALS: ${newMissedDeals.join(', ')}`)
 
   return result

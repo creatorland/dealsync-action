@@ -55,27 +55,62 @@ export function computeDetectionMetrics(allRuns, groundTruth) {
 
 /**
  * For deal threads correctly detected, was category correct?
+ * Returns overall accuracy + per-category breakdown.
  */
 export function computeCategoryAccuracy(allRuns, groundTruth) {
   const accuracyPerRun = []
   const dealThreads = groundTruth.filter((gt) => gt.expected.is_deal && gt.expected.category)
 
+  // Collect per-category stats across all runs
+  const categories = [...new Set(dealThreads.map((gt) => gt.expected.category))]
+  const perCategoryCorrect = {}
+  const perCategoryTotal = {}
+  for (const cat of categories) {
+    perCategoryCorrect[cat] = []
+    perCategoryTotal[cat] = 0
+  }
+
   for (const run of allRuns) {
     const resultMap = new Map(run.map((r) => [r.thread_id, r]))
     let correct = 0
     let total = 0
+    const runCategoryCorrect = {}
+    for (const cat of categories) runCategoryCorrect[cat] = 0
 
     for (const gt of dealThreads) {
       const result = resultMap.get(gt.id)
       if (!result || !result.is_deal) continue
       total++
-      if (result.category === gt.expected.category) correct++
+      const expectedCat = gt.expected.category
+      if (result.category === expectedCat) {
+        correct++
+        runCategoryCorrect[expectedCat]++
+      }
     }
 
     accuracyPerRun.push(total > 0 ? correct / total : 1)
+
+    // Per-category accuracy for this run
+    for (const cat of categories) {
+      const catThreads = dealThreads.filter((gt) => gt.expected.category === cat)
+      const catDetected = catThreads.filter((gt) => {
+        const r = resultMap.get(gt.id)
+        return r && r.is_deal
+      }).length
+      perCategoryCorrect[cat].push(catDetected > 0 ? runCategoryCorrect[cat] / catDetected : 1)
+      perCategoryTotal[cat] = catThreads.length
+    }
   }
 
-  return { accuracy: aggregateStats(accuracyPerRun) }
+  const perCategory = {}
+  for (const cat of categories) {
+    perCategory[cat] = {
+      ...aggregateStats(perCategoryCorrect[cat]),
+      ground_truth_count: perCategoryTotal[cat],
+    }
+  }
+
+  return { accuracy: aggregateStats(accuracyPerRun), per_category: perCategory }
 }
 
 /**
