@@ -61,7 +61,3 @@ This is the ONLY context available when new emails arrive later — make it coun
 ## Previous AI Summary
 
 When a "Previous AI Summary" is provided for a thread, it means this thread was evaluated before and new emails have arrived. The summary is prior context — but new emails may change the classification. Re-evaluate the thread fully considering the new information.
-
-## Language Detection
-
-If the primary language of the email thread is not English, set language to the ISO 639-1 code. Non-English threads can still be deals if the context is clearly understandable.
