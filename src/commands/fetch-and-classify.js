@@ -1,6 +1,7 @@
 import * as crypto from 'crypto'
 import * as core from '@actions/core'
 import { buildPrompt } from '../lib/build-prompt.js'
+import { callModel, parseAndValidate, VALID_CATEGORIES, VALID_DEAL_TYPES } from '../lib/ai-client.js'
 import {
   saveResults,
   sanitizeString,
@@ -8,22 +9,6 @@ import {
   sanitizeId,
 } from '../lib/queries.js'
 import { authenticate, executeSql, withTimeout } from '../lib/sxt-client.js'
-
-// --- Constants ---
-const AI_REQUEST_TIMEOUT_MS = 120000
-const AI_RETRY_DELAY_MS = 1000
-const AI_BACKOFF_MULTIPLIER = 2
-const MAX_HTTP_RETRIES = 2
-const MAX_TOKENS = 20480
-
-// --- Valid categories and deal types for validation ---
-const VALID_CATEGORIES = new Set([
-  'new', 'in_progress', 'completed', 'not_interested', 'likely_scam', 'low_confidence',
-])
-const VALID_DEAL_TYPES = new Set([
-  'brand_collaboration', 'sponsorship', 'affiliate', 'product_seeding',
-  'ambassador', 'content_partnership', 'paid_placement', 'other_business',
-])
 
 /**
  * Step 1: Fetch content + call AI + save audit checkpoint.
@@ -135,135 +120,10 @@ export async function runFetchAndClassify() {
   const { systemPrompt, userPrompt } = buildPrompt(allEmails)
 
   // =========================================================================
-  //  AI RESILIENCE PIPELINE
+  //  AI RESILIENCE PIPELINE (callModel + parseAndValidate from ai-client.js)
   // =========================================================================
 
-  /**
-   * Call a model with HTTP retries + exponential backoff.
-   * Returns raw content string or throws on total failure.
-   */
-  async function callModel(model, messages, { temperature = 0 } = {}) {
-    let lastError
-    for (let attempt = 1; attempt <= MAX_HTTP_RETRIES; attempt++) {
-      try {
-        console.log(`[classify] AI: ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES})`)
-        const resp = await fetch(aiApiUrl, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${hyperbolicKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model,
-            messages,
-            temperature,
-            max_tokens: MAX_TOKENS,
-            response_format: { type: 'json_object' },
-          }),
-          signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
-        })
-
-        if (!resp.ok) {
-          const errBody = await resp.text().catch(() => '')
-          lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 200)}`)
-          console.log(`[classify] AI ${model} HTTP ${resp.status}: ${errBody.substring(0, 200)}`)
-          if (attempt < MAX_HTTP_RETRIES) {
-            const delay = AI_RETRY_DELAY_MS * Math.pow(AI_BACKOFF_MULTIPLIER, attempt - 1)
-            await new Promise((r) => setTimeout(r, delay))
-            continue
-          }
-          throw lastError
-        }
-
-        const result = await resp.json()
-        const content = result.choices?.[0]?.message?.content
-        if (!content) throw new Error('Empty response from model')
-        return content
-      } catch (err) {
-        lastError = err
-        if (attempt < MAX_HTTP_RETRIES) {
-          const delay = AI_RETRY_DELAY_MS * Math.pow(AI_BACKOFF_MULTIPLIER, attempt - 1)
-          console.log(`[classify] AI ${model} attempt ${attempt} failed: ${err.message}, retrying in ${delay}ms`)
-          await new Promise((r) => setTimeout(r, delay))
-        }
-      }
-    }
-    throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES} attempts`)
-  }
-
-  /**
-   * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
-   * Returns validated array or throws with parse error details.
-   */
-  function parseAndValidate(raw) {
-    let content = raw.trim()
-
-    // Strip markdown fences
-    content = content.replace(/^```(?:json)?\s*\n?/gi, '').replace(/\n?```\s*$/gi, '').trim()
-
-    // Try to find JSON array in mixed output
-    if (!content.startsWith('[')) {
-      const arrayStart = content.indexOf('[')
-      const arrayEnd = content.lastIndexOf(']')
-      if (arrayStart !== -1 && arrayEnd > arrayStart) {
-        content = content.slice(arrayStart, arrayEnd + 1)
-      }
-    }
-
-    // Parse
-    let parsed
-    try {
-      parsed = JSON.parse(content)
-    } catch {
-      // Try to extract from wrapper object like {"results": [...]}
-      const objStart = content.indexOf('{')
-      const objEnd = content.lastIndexOf('}')
-      if (objStart !== -1 && objEnd > objStart) {
-        const obj = JSON.parse(content.slice(objStart, objEnd + 1))
-        const arrays = Object.values(obj).filter(Array.isArray)
-        if (arrays.length === 1) {
-          parsed = arrays[0]
-        } else {
-          throw new Error('Cannot extract JSON array from response')
-        }
-      } else {
-        throw new Error('No valid JSON found in response')
-      }
-    }
-
-    // Unwrap if object with single array property
-    if (!Array.isArray(parsed)) {
-      const arrays = Object.values(parsed).filter(Array.isArray)
-      if (arrays.length === 1) {
-        parsed = arrays[0]
-      } else {
-        throw new Error('Response is not a JSON array')
-      }
-    }
-
-    // Schema validation and coercion
-    return parsed.map((r) => ({
-      thread_id: String(r.thread_id || ''),
-      is_deal: Boolean(r.is_deal),
-      is_english: r.is_english !== false,
-      language: r.language || null,
-      ai_score: Math.min(10, Math.max(1, Math.round(Number(r.ai_score) || 5))),
-      category: r.is_deal
-        ? (VALID_CATEGORIES.has(r.category) ? r.category : 'low_confidence')
-        : null,
-      likely_scam: Boolean(r.likely_scam) || r.category === 'likely_scam',
-      ai_insight: String(r.ai_insight || ''),
-      ai_summary: String(r.ai_summary || '').slice(0, 1000),
-      main_contact: r.is_deal ? (r.main_contact || null) : null,
-      deal_brand: r.is_deal ? (r.deal_brand || null) : null,
-      deal_type: r.is_deal
-        ? (VALID_DEAL_TYPES.has(r.deal_type) ? r.deal_type : 'other_business')
-        : null,
-      deal_name: r.is_deal ? (r.deal_name || null) : null,
-      deal_value: r.deal_value != null ? Number(r.deal_value) : null,
-      deal_currency: r.deal_currency || null,
-    }))
-  }
+  const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey }
 
   const classifyMessages = [
     { role: 'system', content: systemPrompt },
@@ -276,7 +136,8 @@ export async function runFetchAndClassify() {
   // --- Layer 0: Primary model call ---
   let primaryRaw
   try {
-    primaryRaw = await callModel(primaryModel, classifyMessages, { temperature: 0 })
+    const result = await callModel(primaryModel, classifyMessages, { temperature: 0, ...aiOpts })
+    primaryRaw = result.content
   } catch (primaryApiError) {
     console.log(`[classify] Primary model API failed: ${primaryApiError.message}`)
     primaryRaw = null
@@ -301,7 +162,8 @@ export async function runFetchAndClassify() {
             content: `Your previous classification response could not be parsed as valid JSON.\n\nParse error:\n${parseError.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting issue. Do not change any classification decisions. Return ONLY the JSON array with no other text.`,
           },
         ]
-        const correctedRaw = await callModel(primaryModel, correctiveMessages, { temperature: 0 })
+        const corrected = await callModel(primaryModel, correctiveMessages, { temperature: 0, ...aiOpts })
+        const correctedRaw = corrected.content
         threads = parseAndValidate(correctedRaw)
         modelUsed = `${primaryModel}(corrective-retry)`
         console.log(`[classify] Corrective retry succeeded: ${threads.length} threads`)
@@ -316,7 +178,8 @@ export async function runFetchAndClassify() {
     console.log(`[classify] Falling back to ${fallbackModel}`)
     modelUsed = fallbackModel
     try {
-      const fallbackRaw = await callModel(fallbackModel, classifyMessages, { temperature: 0.6 })
+      const fallbackResult = await callModel(fallbackModel, classifyMessages, { temperature: 0.6, ...aiOpts })
+      const fallbackRaw = fallbackResult.content
       threads = parseAndValidate(fallbackRaw)
       console.log(`[classify] Fallback model succeeded: ${threads.length} threads`)
     } catch (fallbackError) {
