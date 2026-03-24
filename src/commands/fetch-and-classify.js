@@ -101,54 +101,132 @@ export async function runFetchAndClassify() {
   // Build prompt + call AI
   const { systemPrompt, userPrompt } = buildPrompt(allEmails)
 
-  let aiResponseRaw = null
-  for (const model of [primaryModel, fallbackModel]) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
+  const AI_REQUEST_TIMEOUT_MS = 90000
+  const AI_RETRY_DELAY_MS = 3000
+  const MAX_HTTP_RETRIES = 2
+
+  /**
+   * Call an AI model. Returns raw response string or null on HTTP failure.
+   * Retries on HTTP errors (same model). Throws on abort/network errors after retries.
+   */
+  async function callModel(model, messages) {
+    for (let attempt = 1; attempt <= MAX_HTTP_RETRIES; attempt++) {
       try {
-        console.log(`[classify] AI: ${model} (attempt ${attempt}/2)`)
+        console.log(`[classify] AI: ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES})`)
         const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 90000)
+        const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS)
         const resp = await fetch(aiApiUrl, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${hyperbolicKey}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userPrompt },
-            ],
-            response_format: { type: 'json_object' },
-          }),
+          body: JSON.stringify({ model, messages, response_format: { type: 'json_object' } }),
           signal: controller.signal,
         })
         clearTimeout(timeout)
 
         if (!resp.ok) {
           const errBody = await resp.text().catch(() => '')
-          console.log(`[classify] AI ${model} attempt ${attempt}: HTTP ${resp.status} ${errBody.substring(0, 200)}`)
-          if (attempt < 2) await new Promise((r) => setTimeout(r, 3000))
-          continue
+          console.log(`[classify] AI ${model} HTTP ${resp.status}: ${errBody.substring(0, 200)}`)
+          if (attempt < MAX_HTTP_RETRIES) {
+            await new Promise((r) => setTimeout(r, AI_RETRY_DELAY_MS))
+            continue
+          }
+          return null // HTTP failure after all retries
         }
 
         const result = await resp.json()
-        aiResponseRaw = result.choices?.[0]?.message?.content
-        if (aiResponseRaw) break
+        return result.choices?.[0]?.message?.content || null
       } catch (err) {
         console.log(`[classify] AI ${model} attempt ${attempt}: ${err.message}`)
-        if (attempt < 2) await new Promise((r) => setTimeout(r, 3000))
+        if (attempt < MAX_HTTP_RETRIES) {
+          await new Promise((r) => setTimeout(r, AI_RETRY_DELAY_MS))
+          continue
+        }
+        return null
       }
     }
-    if (aiResponseRaw) break
+    return null
   }
 
-  if (!aiResponseRaw) throw new Error('All AI models failed')
+  /** Strip markdown fences and parse JSON. Returns parsed object or null. */
+  function tryParseJson(raw) {
+    try {
+      const cleaned = raw.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim()
+      return JSON.parse(cleaned)
+    } catch {
+      return null
+    }
+  }
 
-  // Strip markdown code fences if present (LLMs sometimes wrap JSON in ```json ... ```)
-  aiResponseRaw = aiResponseRaw.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim()
-  const aiOutput = JSON.parse(aiResponseRaw)
+  /** Ask a model to fix broken JSON. Returns parsed object or null. */
+  async function repairJson(fixerModel, brokenJson) {
+    console.log(`[classify] JSON repair: asking ${fixerModel} to fix malformed response`)
+    const repairMessages = [
+      {
+        role: 'system',
+        content: 'You are a JSON repair tool. Fix the malformed JSON below so it is valid. Return ONLY the corrected JSON array. No markdown, no explanation.',
+      },
+      { role: 'user', content: brokenJson },
+    ]
+    const fixed = await callModel(fixerModel, repairMessages)
+    if (!fixed) return null
+    return tryParseJson(fixed)
+  }
+
+  // --- AI Classification Pipeline ---
+  const classifyMessages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt },
+  ]
+
+  let aiOutput = null
+  let modelUsed = primaryModel
+
+  // Step 1: Try primary model
+  const primaryRaw = await callModel(primaryModel, classifyMessages)
+
+  if (primaryRaw) {
+    aiOutput = tryParseJson(primaryRaw)
+    if (!aiOutput) {
+      // Primary succeeded but returned invalid JSON → ask fallback to fix it
+      console.log(`[classify] Primary model returned invalid JSON, attempting cross-model repair`)
+      aiOutput = await repairJson(fallbackModel, primaryRaw)
+      if (aiOutput) {
+        console.log(`[classify] JSON repaired by ${fallbackModel}`)
+        modelUsed = `${primaryModel}+${fallbackModel}(repair)`
+      }
+    }
+  }
+
+  // Step 2: If primary failed entirely or repair failed → try fallback model
+  if (!aiOutput) {
+    console.log(`[classify] Primary model failed, trying fallback: ${fallbackModel}`)
+    modelUsed = fallbackModel
+    const fallbackRaw = await callModel(fallbackModel, classifyMessages)
+
+    if (fallbackRaw) {
+      aiOutput = tryParseJson(fallbackRaw)
+      if (!aiOutput) {
+        // Fallback succeeded but returned invalid JSON → ask primary to fix it
+        console.log(`[classify] Fallback model returned invalid JSON, attempting cross-model repair`)
+        aiOutput = await repairJson(primaryModel, fallbackRaw)
+        if (aiOutput) {
+          console.log(`[classify] JSON repaired by ${primaryModel}`)
+          modelUsed = `${fallbackModel}+${primaryModel}(repair)`
+        }
+      }
+    }
+  }
+
+  // Step 3: If everything failed
+  if (!aiOutput) throw new Error('All AI models failed — both primary and fallback returned no valid JSON')
+
+  // Normalize: prompt returns array, downstream expects { threads: [...] }
+  if (Array.isArray(aiOutput)) {
+    aiOutput = { threads: aiOutput }
+  }
 
   const auditId = crypto.randomUUID()
   const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400))
@@ -157,7 +235,7 @@ export async function runFetchAndClassify() {
       saveResults.insertAudit(schema, {
         id: auditId, batchId, threadCount: (aiOutput.threads || []).length,
         emailCount: metadataRows.length, cost: 0, inputTokens: 0,
-        outputTokens: 0, model: primaryModel, evaluation,
+        outputTokens: 0, model: modelUsed, evaluation,
       }))
     console.log(`[classify] audit saved: ${auditId}`)
   } catch (err) {
