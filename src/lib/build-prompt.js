@@ -14,35 +14,47 @@ function groupByThread(emails) {
 
 function buildThreadData(emails) {
   const threads = groupByThread(emails)
-  let threadData = ''
+  const parts = []
+  let threadIndex = 0
 
   for (const [threadId, threadEmails] of Object.entries(threads)) {
-    threadData += `--- Thread: ${threadId} ---\n`
+    threadIndex++
+    let section = `--- THREAD ${threadIndex} ---\n`
+    section += `Thread ID: ${threadId}\n`
+    section += `Message Count: ${threadEmails.length}\n`
+
     const previousSummary = threadEmails[0].previousAiSummary
-    if (previousSummary != null && previousSummary !== '') {
-      threadData += `Previous AI Summary: ${previousSummary}\n\n`
-    }
+    section += `Previous AI Summary: ${previousSummary || 'None'}\n\n`
 
     threadEmails.forEach((email, i) => {
       const from = getHeader(email, 'from')
-      const subject = getHeader(email, 'subject')
       const date = getHeader(email, 'date')
-      threadData += `Email ${i + 1}: From: ${from} | Subject: ${subject} | Date: ${date}\n`
+      const subject = getHeader(email, 'subject')
+      section += `[Message ${i + 1}]\n`
+      section += `From: ${from}\n`
+      section += `Date: ${date}\n`
+      section += `Subject: ${subject}\n\n`
       const body = email.body || email.replyBody || '[no body]'
-      threadData += `Body: ${body}\n\n`
+      section += `${body}\n\n`
     })
+
+    parts.push(section)
   }
 
-  return threadData.trim()
+  return parts.join('')
 }
 
 export function buildPrompt(emails) {
   const threadData = buildThreadData(emails)
 
-  const systemPrompt = systemTemplate
-    .replace('{{CLASSIFICATION_INSTRUCTIONS}}', classificationInstructions)
-    .replace('{{THREAD_DATA}}', '')
+  // System prompt is the short persona
+  const systemPrompt = systemTemplate.trim()
+
+  // User prompt is the full classifier instructions with thread data injected
+  const userPrompt = classificationInstructions
+    .replace('{{CLASSIFICATION_INSTRUCTIONS}}', '')
+    .replace('{{THREAD_DATA}}', threadData)
     .trim()
 
-  return { systemPrompt, userPrompt: threadData }
+  return { systemPrompt, userPrompt }
 }

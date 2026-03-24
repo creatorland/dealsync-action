@@ -9,13 +9,30 @@ import {
 } from '../lib/queries.js'
 import { authenticate, executeSql, withTimeout } from '../lib/sxt-client.js'
 
+// --- Constants ---
+const AI_REQUEST_TIMEOUT_MS = 120000
+const AI_RETRY_DELAY_MS = 1000
+const AI_BACKOFF_MULTIPLIER = 2
+const MAX_HTTP_RETRIES = 2
+const MAX_TOKENS = 20480
+
+// --- Valid categories and deal types for validation ---
+const VALID_CATEGORIES = new Set([
+  'new', 'in_progress', 'completed', 'not_interested', 'likely_scam', 'low_confidence',
+])
+const VALID_DEAL_TYPES = new Set([
+  'brand_collaboration', 'sponsorship', 'affiliate', 'product_seeding',
+  'ambassador', 'content_partnership', 'paid_placement', 'other_business',
+])
+
 /**
  * Step 1: Fetch content + call AI + save audit checkpoint.
  *
- * If audit already exists for batch_id → skip AI, return immediately.
- * Otherwise: fetch content → build prompt → call AI → parse JSON → save audit.
- *
- * Output: { skipped: boolean, thread_count: number }
+ * Resilience pipeline:
+ *   Layer 0: Primary model call (with HTTP retries + exponential backoff)
+ *   Layer 1: Local JSON repair (strip fences, extract array, coerce schema)
+ *   Layer 2: Corrective retry (send broken output back to same model with error)
+ *   Layer 3: Fallback model (same prompt, different model)
  */
 export async function runFetchAndClassify() {
   const authUrl = core.getInput('auth-url')
@@ -26,8 +43,8 @@ export async function runFetchAndClassify() {
   const batchId = sanitizeId(core.getInput('batch-id'))
   const contentFetcherUrl = core.getInput('content-fetcher-url')
   const hyperbolicKey = core.getInput('hyperbolic-key')
-  const primaryModel = core.getInput('primary-model') || 'deepseek-ai/DeepSeek-V3-0324'
-  const fallbackModel = core.getInput('fallback-model') || 'Qwen/Qwen2.5-72B-Instruct'
+  const primaryModel = core.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507'
+  const fallbackModel = core.getInput('fallback-model') || 'moonshotai/Kimi-K2-Instruct'
   const aiApiUrl = core.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions'
 
   if (!batchId) throw new Error('batch-id is required')
@@ -37,9 +54,11 @@ export async function runFetchAndClassify() {
   const jwt = await authenticate(authUrl, authSecret)
 
   // Check metadata exists
-  const metadataRows = await executeSql(apiUrl, jwt, biscuit,
+  const metadataRows = await executeSql(
+    apiUrl, jwt, biscuit,
     `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, SYNC_STATE_ID, THREAD_ID
-    FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`)
+    FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+  )
 
   if (!metadataRows || metadataRows.length === 0) {
     console.log('[classify] no rows for batch (already completed?)')
@@ -49,13 +68,15 @@ export async function runFetchAndClassify() {
   console.log(`[classify] ${metadataRows.length} deal_states`)
 
   // Check for existing audit (checkpoint)
-  const existingAudit = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId))
+  const existingAudit = await executeSql(
+    apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId),
+  )
 
   if (existingAudit.length > 0 && existingAudit[0].AI_EVALUATION) {
     console.log('[classify] audit exists — skipping AI call')
     try {
       const parsed = JSON.parse(existingAudit[0].AI_EVALUATION)
-      return { skipped: true, thread_count: (parsed.threads || []).length }
+      return { skipped: true, thread_count: (parsed.threads || parsed || []).length }
     } catch {
       console.log('[classify] existing audit has invalid JSON, re-running AI')
     }
@@ -98,148 +119,219 @@ export async function runFetchAndClassify() {
 
   if (allEmails.length === 0) throw new Error('No email content fetched')
 
-  // Build prompt + call AI
+  // Build prompt
   const { systemPrompt, userPrompt } = buildPrompt(allEmails)
 
-  const AI_REQUEST_TIMEOUT_MS = 90000
-  const AI_RETRY_DELAY_MS = 3000
-  const MAX_HTTP_RETRIES = 2
+  // =========================================================================
+  //  AI RESILIENCE PIPELINE
+  // =========================================================================
 
   /**
-   * Call an AI model. Returns raw response string or null on HTTP failure.
-   * Retries on HTTP errors (same model). Throws on abort/network errors after retries.
+   * Call a model with HTTP retries + exponential backoff.
+   * Returns raw content string or throws on total failure.
    */
-  async function callModel(model, messages) {
+  async function callModel(model, messages, { temperature = 0 } = {}) {
+    let lastError
     for (let attempt = 1; attempt <= MAX_HTTP_RETRIES; attempt++) {
       try {
         console.log(`[classify] AI: ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES})`)
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS)
         const resp = await fetch(aiApiUrl, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${hyperbolicKey}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ model, messages, response_format: { type: 'json_object' } }),
-          signal: controller.signal,
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature,
+            max_tokens: MAX_TOKENS,
+            response_format: { type: 'json_object' },
+          }),
+          signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
         })
-        clearTimeout(timeout)
 
         if (!resp.ok) {
           const errBody = await resp.text().catch(() => '')
+          lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 200)}`)
           console.log(`[classify] AI ${model} HTTP ${resp.status}: ${errBody.substring(0, 200)}`)
           if (attempt < MAX_HTTP_RETRIES) {
-            await new Promise((r) => setTimeout(r, AI_RETRY_DELAY_MS))
+            const delay = AI_RETRY_DELAY_MS * Math.pow(AI_BACKOFF_MULTIPLIER, attempt - 1)
+            await new Promise((r) => setTimeout(r, delay))
             continue
           }
-          return null // HTTP failure after all retries
+          throw lastError
         }
 
         const result = await resp.json()
-        return result.choices?.[0]?.message?.content || null
+        const content = result.choices?.[0]?.message?.content
+        if (!content) throw new Error('Empty response from model')
+        return content
       } catch (err) {
-        console.log(`[classify] AI ${model} attempt ${attempt}: ${err.message}`)
+        lastError = err
         if (attempt < MAX_HTTP_RETRIES) {
-          await new Promise((r) => setTimeout(r, AI_RETRY_DELAY_MS))
-          continue
+          const delay = AI_RETRY_DELAY_MS * Math.pow(AI_BACKOFF_MULTIPLIER, attempt - 1)
+          console.log(`[classify] AI ${model} attempt ${attempt} failed: ${err.message}, retrying in ${delay}ms`)
+          await new Promise((r) => setTimeout(r, delay))
         }
-        return null
       }
     }
-    return null
+    throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES} attempts`)
   }
 
-  /** Strip markdown fences and parse JSON. Returns parsed object or null. */
-  function tryParseJson(raw) {
-    try {
-      const cleaned = raw.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim()
-      return JSON.parse(cleaned)
-    } catch {
-      return null
+  /**
+   * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
+   * Returns validated array or throws with parse error details.
+   */
+  function parseAndValidate(raw) {
+    let content = raw.trim()
+
+    // Strip markdown fences
+    content = content.replace(/^```(?:json)?\s*\n?/gi, '').replace(/\n?```\s*$/gi, '').trim()
+
+    // Try to find JSON array in mixed output
+    if (!content.startsWith('[')) {
+      const arrayStart = content.indexOf('[')
+      const arrayEnd = content.lastIndexOf(']')
+      if (arrayStart !== -1 && arrayEnd > arrayStart) {
+        content = content.slice(arrayStart, arrayEnd + 1)
+      }
     }
+
+    // Parse
+    let parsed
+    try {
+      parsed = JSON.parse(content)
+    } catch {
+      // Try to extract from wrapper object like {"results": [...]}
+      const objStart = content.indexOf('{')
+      const objEnd = content.lastIndexOf('}')
+      if (objStart !== -1 && objEnd > objStart) {
+        const obj = JSON.parse(content.slice(objStart, objEnd + 1))
+        const arrays = Object.values(obj).filter(Array.isArray)
+        if (arrays.length === 1) {
+          parsed = arrays[0]
+        } else {
+          throw new Error('Cannot extract JSON array from response')
+        }
+      } else {
+        throw new Error('No valid JSON found in response')
+      }
+    }
+
+    // Unwrap if object with single array property
+    if (!Array.isArray(parsed)) {
+      const arrays = Object.values(parsed).filter(Array.isArray)
+      if (arrays.length === 1) {
+        parsed = arrays[0]
+      } else {
+        throw new Error('Response is not a JSON array')
+      }
+    }
+
+    // Schema validation and coercion
+    return parsed.map((r) => ({
+      thread_id: String(r.thread_id || ''),
+      is_deal: Boolean(r.is_deal),
+      is_english: r.is_english !== false,
+      language: r.language || null,
+      ai_score: Math.min(10, Math.max(1, Math.round(Number(r.ai_score) || 5))),
+      category: r.is_deal
+        ? (VALID_CATEGORIES.has(r.category) ? r.category : 'low_confidence')
+        : null,
+      likely_scam: Boolean(r.likely_scam) || r.category === 'likely_scam',
+      ai_insight: String(r.ai_insight || ''),
+      ai_summary: String(r.ai_summary || '').slice(0, 1000),
+      main_contact: r.is_deal ? (r.main_contact || null) : null,
+      deal_brand: r.is_deal ? (r.deal_brand || null) : null,
+      deal_type: r.is_deal
+        ? (VALID_DEAL_TYPES.has(r.deal_type) ? r.deal_type : 'other_business')
+        : null,
+      deal_name: r.is_deal ? (r.deal_name || null) : null,
+      deal_value: r.deal_value != null ? Number(r.deal_value) : null,
+      deal_currency: r.deal_currency || null,
+    }))
   }
 
-  /** Ask a model to fix broken JSON. Returns parsed object or null. */
-  async function repairJson(fixerModel, brokenJson) {
-    console.log(`[classify] JSON repair: asking ${fixerModel} to fix malformed response`)
-    const repairMessages = [
-      {
-        role: 'system',
-        content: 'You are a JSON repair tool. Fix the malformed JSON below so it is valid. Return ONLY the corrected JSON array. No markdown, no explanation.',
-      },
-      { role: 'user', content: brokenJson },
-    ]
-    const fixed = await callModel(fixerModel, repairMessages)
-    if (!fixed) return null
-    return tryParseJson(fixed)
-  }
-
-  // --- AI Classification Pipeline ---
   const classifyMessages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userPrompt },
   ]
 
-  let aiOutput = null
+  let threads = null
   let modelUsed = primaryModel
 
-  // Step 1: Try primary model
-  const primaryRaw = await callModel(primaryModel, classifyMessages)
+  // --- Layer 0: Primary model call ---
+  let primaryRaw
+  try {
+    primaryRaw = await callModel(primaryModel, classifyMessages, { temperature: 0 })
+  } catch (primaryApiError) {
+    console.log(`[classify] Primary model API failed: ${primaryApiError.message}`)
+    primaryRaw = null
+  }
 
   if (primaryRaw) {
-    aiOutput = tryParseJson(primaryRaw)
-    if (!aiOutput) {
-      // Primary succeeded but returned invalid JSON → ask fallback to fix it
-      console.log(`[classify] Primary model returned invalid JSON, attempting cross-model repair`)
-      aiOutput = await repairJson(fallbackModel, primaryRaw)
-      if (aiOutput) {
-        console.log(`[classify] JSON repaired by ${fallbackModel}`)
-        modelUsed = `${primaryModel}+${fallbackModel}(repair)`
+    // --- Layer 1: Local JSON repair ---
+    try {
+      threads = parseAndValidate(primaryRaw)
+      console.log(`[classify] Primary model succeeded: ${threads.length} threads`)
+    } catch (parseError) {
+      console.log(`[classify] Primary JSON parse failed: ${parseError.message}`)
+
+      // --- Layer 2: Corrective retry (same model, send broken output back) ---
+      try {
+        console.log(`[classify] Attempting corrective retry with ${primaryModel}`)
+        const correctiveMessages = [
+          ...classifyMessages,
+          { role: 'assistant', content: primaryRaw },
+          {
+            role: 'user',
+            content: `Your previous classification response could not be parsed as valid JSON.\n\nParse error:\n${parseError.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting issue. Do not change any classification decisions. Return ONLY the JSON array with no other text.`,
+          },
+        ]
+        const correctedRaw = await callModel(primaryModel, correctiveMessages, { temperature: 0 })
+        threads = parseAndValidate(correctedRaw)
+        modelUsed = `${primaryModel}(corrective-retry)`
+        console.log(`[classify] Corrective retry succeeded: ${threads.length} threads`)
+      } catch (correctiveError) {
+        console.log(`[classify] Corrective retry failed: ${correctiveError.message}`)
       }
     }
   }
 
-  // Step 2: If primary failed entirely or repair failed → try fallback model
-  if (!aiOutput) {
-    console.log(`[classify] Primary model failed, trying fallback: ${fallbackModel}`)
+  // --- Layer 3: Fallback model ---
+  if (!threads) {
+    console.log(`[classify] Falling back to ${fallbackModel}`)
     modelUsed = fallbackModel
-    const fallbackRaw = await callModel(fallbackModel, classifyMessages)
-
-    if (fallbackRaw) {
-      aiOutput = tryParseJson(fallbackRaw)
-      if (!aiOutput) {
-        // Fallback succeeded but returned invalid JSON → ask primary to fix it
-        console.log(`[classify] Fallback model returned invalid JSON, attempting cross-model repair`)
-        aiOutput = await repairJson(primaryModel, fallbackRaw)
-        if (aiOutput) {
-          console.log(`[classify] JSON repaired by ${primaryModel}`)
-          modelUsed = `${fallbackModel}+${primaryModel}(repair)`
-        }
-      }
+    try {
+      const fallbackRaw = await callModel(fallbackModel, classifyMessages, { temperature: 0.6 })
+      threads = parseAndValidate(fallbackRaw)
+      console.log(`[classify] Fallback model succeeded: ${threads.length} threads`)
+    } catch (fallbackError) {
+      console.error(`[classify] All layers exhausted. Primary and fallback both failed.`)
+      throw new Error(
+        `Classification failed: primary and fallback models both returned no valid JSON. Last error: ${fallbackError.message}`,
+      )
     }
   }
 
-  // Step 3: If everything failed
-  if (!aiOutput) throw new Error('All AI models failed — both primary and fallback returned no valid JSON')
+  // Wrap in { threads: [...] } for downstream compatibility
+  const aiOutput = { threads }
 
-  // Normalize: prompt returns array, downstream expects { threads: [...] }
-  if (Array.isArray(aiOutput)) {
-    aiOutput = { threads: aiOutput }
-  }
-
+  // Save audit checkpoint
   const auditId = crypto.randomUUID()
   const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400))
   try {
-    await executeSql(apiUrl, jwt, biscuit,
+    await executeSql(
+      apiUrl, jwt, biscuit,
       saveResults.insertAudit(schema, {
-        id: auditId, batchId, threadCount: (aiOutput.threads || []).length,
+        id: auditId, batchId, threadCount: threads.length,
         emailCount: metadataRows.length, cost: 0, inputTokens: 0,
         outputTokens: 0, model: modelUsed, evaluation,
-      }))
-    console.log(`[classify] audit saved: ${auditId}`)
+      }),
+    )
+    console.log(`[classify] audit saved: ${auditId} (model: ${modelUsed})`)
   } catch (err) {
-    // Unique constraint on batch_id — another run already saved the audit
     if (err.message.includes('integrity constraint') || err.message.includes('unique') || err.message.includes('duplicate')) {
       console.log(`[classify] audit already exists for batch (concurrent run), continuing`)
     } else {
@@ -247,6 +339,6 @@ export async function runFetchAndClassify() {
     }
   }
 
-  console.log(`[classify] ${(aiOutput.threads || []).length} threads ready for processing`)
-  return { skipped: false, thread_count: (aiOutput.threads || []).length }
+  console.log(`[classify] ${threads.length} threads ready for processing`)
+  return { skipped: false, thread_count: threads.length }
 }

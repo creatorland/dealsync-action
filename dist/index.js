@@ -27857,9 +27857,9 @@ function getHeader(email, name) {
   return header?.value || ''
 }
 
-var systemTemplate = "You are a brand deal classifier for influencer and creator email inboxes. You evaluate email threads and return structured JSON classifications.\n\nYour primary objective is maximum recall on real deals. A missed deal costs the creator real revenue. A false positive costs them 2 seconds to dismiss. When uncertain, always err toward classifying as a deal.\n\nYou respond with a JSON array only. No markdown, no explanation, no code fences.\n\n{{CLASSIFICATION_INSTRUCTIONS}}\n\n<threads_to_classify>\n{{THREAD_DATA}}\n</threads_to_classify>\n";
+var systemTemplate = "You are an email classifier for influencer and content creator inboxes. Your job is to identify brand deals and business opportunities.\n\nYour output must be valid JSON only. Return a JSON array with one object per thread. No markdown, no explanation, no code fences, no text outside the JSON array.\n\nYour classification priority is recall: never miss a real deal. A false positive (flagging a non-deal as a deal) costs the creator 2 seconds to dismiss. A false negative (missing a real deal) can cost thousands of dollars in lost revenue. When uncertain, classify as a deal.\n";
 
-var classificationInstructions = "<classification_instructions>\n\nClassify each email thread for an influencer/creator inbox. Return one JSON object per thread.\n\n<recall_priority>\nYour #1 goal is to NEVER miss a real deal. Apply this decision rule:\n- If there is a 20% or greater chance this is a brand deal, classify as is_deal: true.\n- If uncertain, classify as a deal with category \"low_confidence\". The creator can dismiss false positives instantly. They cannot recover deals they never saw.\n</recall_priority>\n\n<deal_definition>\nA deal is when a brand, company, agency, platform, or fellow creator wants to work with this creator for their audience, content, reach, or influence. This includes but is not limited to:\n- Sponsorships and paid brand collaborations\n- Paid campaigns and content partnerships\n- Product seeding, gifting, or PR packages with an implicit or explicit ask\n- Affiliate offers and ambassador programs\n- Event appearance, speaking, or hosting offers\n- Paid placements, licensing, and usage rights agreements\n- Creator-to-creator collaboration proposals\n- Talent agency or management outreach\n\nClassify as a deal regardless of status: new, active, declined, completed, or suspicious.\n</deal_definition>\n\n<deal_signals>\nBefore classifying each thread, evaluate these signals internally. Do NOT include your reasoning in the output.\n\nStrong deal signals (any ONE = likely deal):\n- Sender is from a brand, agency, PR firm, talent platform, or marketing company\n- Email mentions: sponsorship, collaboration, partnership, campaign, ambassador, gifting, seeding\n- Email references compensation: $, USD, payment, fee, budget, rate, gifting, complimentary, free product\n- Email proposes a timeline, deadline, or deliverables for content\n- Email references the creator's audience, followers, reach, engagement, or content\n- Sender introduces themselves with a company title (e.g., \"Partnerships Manager at...\")\n- Email contains a rate card request, media kit request, or asks about pricing\n- Email mentions exclusivity, usage rights, or licensing terms\n- Email comes from a platform that connects brands with creators (e.g., AspireIQ, Grin, CreatorIQ, etc.)\n\nWeak signals (alone = low_confidence, combined = stronger):\n- Generic \"opportunity\" or \"proposal\" language without specifics\n- PR agency sending product news without an explicit ask\n- Invitations to events without mention of compensation or content expectations\n- Emails from unknown senders at corporate domains with vague subject lines\n</deal_signals>\n\n<not_a_deal>\nThese are NOT deals even if they come from companies:\n- Investor, fundraising, or equity-related conversations\n- Legal, accounting, or tax services\n- Internal team discussions between the creator and their own staff\n- Automated platform notifications (YouTube, Instagram, TikTok alerts, GMass, Mailchimp)\n- User surveys, feedback requests, or NPS scores\n- SaaS vendor pitches selling a tool TO the creator (unless they propose sponsoring the creator)\n- Personal correspondence with friends or family\n- Calendar-only threads with no business context\n- Shipping, tracking, or order confirmations for personal purchases\n- Social media follower/engagement notifications\n- Password resets, security alerts, or account verification emails\n- Subscription receipts or billing statements\n</not_a_deal>\n\n<scoring_guide>\nai_score (1-10) reflects urgency and value for the creator's attention:\n- 9-10: Time-sensitive, high-value. Response needed today. Named brand, explicit budget, deadline approaching.\n- 7-8: High-value, action needed within days. Active negotiation or strong offer from a recognized brand.\n- 5-6: Active but no deadline. Ongoing conversation, no urgent action required.\n- 3-4: Low priority. Early-stage inquiry, vague details, or low-value opportunity.\n- 1-2: No action needed. Informational, completed, or declined.\n</scoring_guide>\n\n<categories>\n- new: First contact or initial outreach, deal not yet discussed in depth\n- in_progress: Active negotiation, terms being discussed, contracts in review\n- completed: Deal closed, agreement signed, or deliverables fulfilled\n- not_interested: Creator declined or explicitly not pursuing\n- likely_scam: Suspicious patterns: no company website, too-good-to-be-true offers, requests for personal info, payment-before-work schemes\n- low_confidence: Cannot determine with confidence whether this is a real deal\n</categories>\n\n<deal_types>\nWhen is_deal is true, assign one of:\n- brand_collaboration: General brand partnership or sponsored content\n- sponsorship: Explicit paid sponsorship of content or channel\n- affiliate: Commission-based or referral link arrangement\n- product_seeding: Product gifting or PR package (with or without obligation)\n- ambassador: Ongoing brand ambassador or rep program\n- content_partnership: Creator-to-creator or media company content collaboration\n- paid_placement: Paid product placement, licensing, or usage rights\n- other_business: Business opportunity that doesn't fit the above\n</deal_types>\n\n<ai_summary_instructions>\nThe ai_summary field (max 1000 chars) is a context memo for the NEXT AI evaluation of this thread. It is the ONLY context available when new emails arrive later. Write it as a factual briefing:\n- Who: Names, emails, roles/titles, company names of all participants\n- What: Exact proposal or ask (be specific about deliverables and format)\n- Status: Current state of negotiation or conversation\n- Terms: Any compensation, rates, or budget mentioned (exact figures)\n- Dates: Deadlines, campaign dates, or response-by dates\n- Red flags: Anything suspicious or noteworthy for future evaluation\n</ai_summary_instructions>\n\n<previous_summary_handling>\nWhen a thread includes a \"Previous AI Summary\", that summary reflects a prior evaluation. New emails in the thread may change the classification. Re-evaluate the entire thread from scratch, using the prior summary as background context only. The new emails take priority over the prior summary if they conflict.\n</previous_summary_handling>\n\n<language_detection>\nIf the primary language of the thread is not English, set is_english to false and language to the ISO 639-1 code. Non-English threads can absolutely be deals. Classify them using the same rules.\n</language_detection>\n\n</classification_instructions>\n\n<examples>\n\n<example index=\"1\" scenario=\"Clear brand sponsorship offer\">\n<thread_summary>\nFrom: sarah@beautybrandx.com (Sarah Kim, Partnerships Manager)\nSubject: \"Sponsored YouTube Video Opportunity - Beauty Brand X\"\nBody: Introduces herself, says they love the creator's skincare content, proposes a dedicated YouTube video reviewing their new serum line. Mentions $2,500 budget, 60-day exclusivity, and asks for the creator's rate card.\n</thread_summary>\n<correct_output>\n{\"thread_id\": \"example_1\", \"is_deal\": true, \"is_english\": true, \"ai_score\": 8, \"category\": \"new\", \"likely_scam\": false, \"ai_insight\": \"Beauty Brand X offers $2.5K for sponsored YouTube review\", \"ai_summary\": \"Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes a sponsored dedicated YouTube video reviewing their new serum line. Budget: $2,500. Terms: 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.\", \"main_contact\": {\"name\": \"Sarah Kim\", \"email\": \"sarah@beautybrandx.com\", \"company_name\": \"Beauty Brand X\", \"title\": \"Partnerships Manager\", \"phone_number\": null}, \"deal_brand\": \"Beauty Brand X\", \"deal_type\": \"sponsorship\", \"deal_name\": \"Beauty Brand X YouTube Review\", \"deal_value\": 2500, \"deal_currency\": \"USD\"}\n</correct_output>\n</example>\n\n<example index=\"2\" scenario=\"Automated notification, not a deal\">\n<thread_summary>\nFrom: noreply@youtube.com\nSubject: \"Your channel just hit 100K subscribers!\"\nBody: Congratulates the creator on reaching 100K subscribers. Contains a link to order a Silver Play Button. No brand outreach, no business proposal.\n</thread_summary>\n<correct_output>\n{\"thread_id\": \"example_2\", \"is_deal\": false, \"is_english\": true, \"ai_score\": 1, \"category\": null, \"likely_scam\": false, \"ai_insight\": \"YouTube milestone notification, not a business opportunity\", \"ai_summary\": \"Automated YouTube notification congratulating creator on 100K subscribers. No deal content.\", \"main_contact\": null, \"deal_brand\": null, \"deal_type\": null, \"deal_name\": null, \"deal_value\": null, \"deal_currency\": null}\n</correct_output>\n</example>\n\n<example index=\"3\" scenario=\"Ambiguous SaaS pitch with sponsorship angle\">\n<thread_summary>\nFrom: mike@editortoolpro.com (Mike Chen, Head of Growth)\nSubject: \"Collab opportunity? Love your editing tutorials\"\nBody: Mike says he's a fan of the creator's video editing tutorials. He runs EditorToolPro, a video editing SaaS. He says \"We'd love to explore a partnership - whether that's a sponsored tutorial, an affiliate deal, or just getting your honest feedback on our tool. Happy to discuss rates.\" Also mentions they have a free Pro license for the creator.\n</thread_summary>\n<correct_output>\n{\"thread_id\": \"example_3\", \"is_deal\": true, \"is_english\": true, \"ai_score\": 6, \"category\": \"new\", \"likely_scam\": false, \"ai_insight\": \"EditorToolPro proposes sponsorship or affiliate deal for editing tutorials\", \"ai_summary\": \"Mike Chen (mike@editortoolpro.com, Head of Growth, EditorToolPro) proposes partnership: sponsored tutorial, affiliate deal, or product review. Offers free Pro license. Open to discussing rates. Status: initial outreach, no specific budget mentioned yet.\", \"main_contact\": {\"name\": \"Mike Chen\", \"email\": \"mike@editortoolpro.com\", \"company_name\": \"EditorToolPro\", \"title\": \"Head of Growth\", \"phone_number\": null}, \"deal_brand\": \"EditorToolPro\", \"deal_type\": \"brand_collaboration\", \"deal_name\": \"EditorToolPro Partnership\", \"deal_value\": null, \"deal_currency\": null}\n</correct_output>\n</example>\n\n<example index=\"4\" scenario=\"Product gifting with no explicit ask\">\n<thread_summary>\nFrom: pr@luxfashionhouse.com (Ava Reyes, PR Coordinator)\nSubject: \"A gift from Lux Fashion House\"\nBody: Says they're sending the creator their new handbag from the spring collection, no strings attached. Provides a tracking number. Mentions \"We'd love to see it on your feed but totally no pressure.\" No rate discussion, no contract.\n</thread_summary>\n<correct_output>\n{\"thread_id\": \"example_4\", \"is_deal\": true, \"is_english\": true, \"ai_score\": 4, \"category\": \"new\", \"likely_scam\": false, \"ai_insight\": \"Lux Fashion House sending gifted handbag, implicit content expectation\", \"ai_summary\": \"Ava Reyes (pr@luxfashionhouse.com, PR Coordinator, Lux Fashion House) sending gifted handbag from spring collection. No formal ask or contract, but mentions 'love to see it on your feed.' Tracking number provided. Status: product sent, no formal terms.\", \"main_contact\": {\"name\": \"Ava Reyes\", \"email\": \"pr@luxfashionhouse.com\", \"company_name\": \"Lux Fashion House\", \"title\": \"PR Coordinator\", \"phone_number\": null}, \"deal_brand\": \"Lux Fashion House\", \"deal_type\": \"product_seeding\", \"deal_name\": \"Lux Fashion House Gifted Handbag\", \"deal_value\": null, \"deal_currency\": null}\n</correct_output>\n</example>\n\n<example index=\"5\" scenario=\"Likely scam email\">\n<thread_summary>\nFrom: partnership@brand-deals-agency.xyz\nSubject: \"URGENT: $10,000 Brand Deal - Response Needed Today\"\nBody: Claims to represent \"multiple Fortune 500 brands\" but doesn't name any. Offers $10,000 for a single Instagram story. Asks the creator to click a link and \"verify your PayPal\" to receive payment. No company website, no LinkedIn, sender domain registered 2 weeks ago.\n</thread_summary>\n<correct_output>\n{\"thread_id\": \"example_5\", \"is_deal\": true, \"is_english\": true, \"ai_score\": 2, \"category\": \"likely_scam\", \"likely_scam\": true, \"ai_insight\": \"Suspicious: unnamed brands, unrealistic payout, asks for PayPal verification\", \"ai_summary\": \"Unknown sender (partnership@brand-deals-agency.xyz) claims to rep Fortune 500 brands without naming them. Offers $10K for single IG story. Asks creator to verify PayPal via link. Red flags: no specific brand named, recently registered domain (.xyz), unrealistic compensation, urgency pressure, payment verification request.\", \"main_contact\": {\"name\": null, \"email\": \"partnership@brand-deals-agency.xyz\", \"company_name\": null, \"title\": null, \"phone_number\": null}, \"deal_brand\": null, \"deal_type\": \"sponsorship\", \"deal_name\": \"Unknown - Likely Scam\", \"deal_value\": 10000, \"deal_currency\": \"USD\"}\n</correct_output>\n</example>\n\n</examples>\n\n<output_schema>\nReturn a JSON array with exactly one object per thread in the input.\n\nFields:\n- thread_id (string, required): The thread_id from the input\n- is_deal (boolean, required): true if this is or could be a brand deal\n- is_english (boolean, required): true if the primary language is English\n- language (string, optional): ISO 639-1 code if is_english is false\n- ai_score (integer 1-10, required): Priority score for creator attention\n- category (string, required if is_deal is true, null if false): new | in_progress | completed | not_interested | likely_scam | low_confidence\n- likely_scam (boolean, required): true if suspicious patterns detected\n- ai_insight (string, required): One-line summary. If deal: what the deal is. If not: why it's not.\n- ai_summary (string, required, max 1000 chars): Context memo for next AI evaluation. Include participants, proposal, status, terms, dates.\n- main_contact (object or null): Primary external person. Fields: name, email, company_name, title, phone_number. Null if none identified or if is_deal is false.\n- deal_brand (string or null): Brand or company name. Null if is_deal is false.\n- deal_type (string or null): One of the deal types listed above. Null if is_deal is false.\n- deal_name (string or null): Short descriptive name for this deal. Null if is_deal is false.\n- deal_value (number or null): Monetary value if mentioned. Null otherwise.\n- deal_currency (string or null): ISO 4217 currency code if deal_value is present. Null otherwise.\n</output_schema>\n\n<rules>\n- Respond ONLY with the JSON array. No markdown, no explanation, no code fences.\n- One entry per thread_id in the input.\n- If is_deal is false: set category, deal_brand, deal_type, deal_name, deal_value, deal_currency, and main_contact to null.\n- If is_deal is true: deal_brand, deal_type, and deal_name are required. deal_value and deal_currency only if mentioned.\n- ai_summary is ALWAYS required regardless of is_deal.\n- When in doubt about is_deal, default to true with category \"low_confidence\".\n</rules>\n";
+var classificationInstructions = "Classify each email thread below for an influencer/creator inbox. Return one JSON object per thread in a JSON array.\n\n# Priority: Maximum Recall\n\nApply this decision rule: if there is a 20% or greater chance something is a brand deal, classify as is_deal: true. When genuinely uncertain, classify as a deal with category \"low_confidence\". The creator can dismiss false positives instantly. They cannot recover deals they never saw.\n\n# What Is a Deal\n\nA deal is when a brand, company, agency, platform, or fellow creator wants to work with this creator for their audience, content, reach, or influence.\n\nThis includes:\n- Sponsorships, paid brand collaborations, paid campaigns\n- Product seeding, gifting, or PR packages (even with \"no strings attached\" language)\n- Affiliate offers, referral link arrangements, commission-based deals\n- Ambassador programs, ongoing brand rep agreements\n- Creator-to-creator collaboration proposals (collabs, features, guest appearances)\n- Event appearances, speaking engagements, hosting offers\n- Paid placements, content licensing, usage rights agreements\n- Talent agency or management outreach seeking to represent the creator\n\nClassify as a deal regardless of current status: new, active, declined, completed, or suspicious.\n\n# Deal Signal Checklist\n\nEvaluate these signals internally before classifying. Do NOT include reasoning in your output.\n\nSTRONG signals (any single one means is_deal: true):\n- Sender is from a brand, agency, PR firm, talent platform, or marketing company\n- Email explicitly mentions: sponsorship, collaboration, partnership, campaign, ambassador, gifting, seeding, or content deal\n- Email references compensation: dollar amounts, payment, fee, budget, rate, gifting, complimentary product, free product\n- Email proposes specific deliverables, content requirements, or a campaign timeline\n- Email references the creator's audience, followers, reach, engagement, views, or content performance\n- Sender identifies themselves with a company title like \"Partnerships Manager\", \"PR Coordinator\", \"Brand Manager\", \"Influencer Marketing\", etc.\n- Email requests a rate card, media kit, or asks about the creator's pricing\n- Email mentions exclusivity, usage rights, content licensing, or whitelisting terms\n- Email originates from a creator/influencer marketing platform (examples: AspireIQ, Grin, CreatorIQ, Captiv8, Klear, IZEA, Mavrck, impact.com, Partnerize)\n\nWEAK signals (alone = classify as deal with category \"low_confidence\", combined with another weak signal = stronger):\n- Generic \"opportunity\" or \"proposal\" language without specifics\n- PR agency sending product news or press releases without an explicit ask\n- Invitations to events without mentioning compensation, content expectations, or deliverables\n- Emails from unknown senders at corporate domains with vague subject lines mentioning \"collab\" or \"opportunity\"\n- Follow-up emails referencing a previous conversation you cannot see\n\n# What Is NOT a Deal\n\nDo NOT classify these as deals, even if they come from companies:\n- Investor, fundraising, or equity-related conversations\n- Legal, accounting, or tax service offers\n- Internal team discussions between the creator and their own staff or team members\n- Automated platform notifications (YouTube, Instagram, TikTok, Twitter/X alerts, Substack, Mailchimp, GMass, ConvertKit)\n- User surveys, feedback requests, NPS scores, or product research invitations\n- SaaS vendor pitches selling a software tool TO the creator (unless the email explicitly proposes sponsoring the creator's content)\n- Personal messages from friends or family with no business context\n- Calendar-only threads with no business proposal or discussion\n- Shipping, tracking, or order confirmations for personal purchases (not gifted products from brands)\n- Password resets, security alerts, two-factor authentication codes, or account verification emails\n- Subscription receipts, billing statements, or payment processor notifications\n- Social media follower/engagement/milestone notifications\n- Job applications or recruitment emails for traditional employment (not creator deals)\n- Charity or donation requests (unless proposing paid partnership for awareness campaigns)\n\n# Scoring Guide\n\nai_score (1-10) reflects how urgently the creator should pay attention:\n\n- 9-10: Time-sensitive, high-value opportunity. Named brand, explicit budget mentioned, deadline within days. Response needed today.\n- 7-8: High-value, action needed soon. Active negotiation, strong offer from recognized brand, or contract review pending.\n- 5-6: Active opportunity but no immediate deadline. Ongoing conversation, details still being discussed.\n- 3-4: Low priority. Early-stage or vague inquiry, low-value opportunity, or cold outreach with minimal detail.\n- 1-2: No action needed. Informational only, already completed, or declined.\n\n# Categories (when is_deal is true)\n\n- \"new\": First contact or initial outreach. Deal not yet discussed in depth.\n- \"in_progress\": Active negotiation underway. Terms, deliverables, or compensation being discussed.\n- \"completed\": Deal closed, agreement signed, or deliverables fulfilled.\n- \"not_interested\": Creator has declined or explicitly indicated they are not pursuing this.\n- \"likely_scam\": Suspicious patterns detected. Examples: no verifiable company, too-good-to-be-true compensation, requests for personal/financial info upfront, pressure to act immediately, recently registered sender domain.\n- \"low_confidence\": Cannot determine with confidence whether this is a real deal. Better to surface it than miss it.\n\n# Deal Types (when is_deal is true)\n\nUse one of these values for deal_type:\n- \"brand_collaboration\": General brand partnership or sponsored content deal\n- \"sponsorship\": Explicit paid sponsorship of a video, post, channel, or event\n- \"affiliate\": Commission-based or referral link arrangement\n- \"product_seeding\": Product gifting, PR package, or sampling program (with or without content obligation)\n- \"ambassador\": Ongoing brand ambassador, rep, or loyalty program\n- \"content_partnership\": Creator-to-creator or media company content collaboration\n- \"paid_placement\": Paid product placement, content licensing, or usage rights deal\n- \"other_business\": Business opportunity that does not fit the categories above\n\n# Classification Examples\n\n## Example 1: Clear brand sponsorship (is_deal: true)\n\nThread summary: Sarah Kim (sarah@beautybrandx.com, Partnerships Manager at Beauty Brand X) emails proposing a $2,500 sponsored YouTube video reviewing their new serum line. Mentions 60-day exclusivity clause and asks for the creator's rate card.\n\nCorrect classification:\n{\"thread_id\": \"ex1\", \"is_deal\": true, \"is_english\": true, \"ai_score\": 8, \"category\": \"new\", \"likely_scam\": false, \"ai_insight\": \"Beauty Brand X offers $2.5K for sponsored YouTube review\", \"ai_summary\": \"Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.\", \"main_contact\": {\"name\": \"Sarah Kim\", \"email\": \"sarah@beautybrandx.com\", \"company\": \"Beauty Brand X\", \"title\": \"Partnerships Manager\", \"phone_number\": null}, \"deal_brand\": \"Beauty Brand X\", \"deal_type\": \"sponsorship\", \"deal_name\": \"Beauty Brand X YouTube Review\", \"deal_value\": 2500, \"deal_currency\": \"USD\"}\n\n## Example 2: Automated notification (is_deal: false)\n\nThread summary: noreply@youtube.com sends a congratulatory email about hitting 100K subscribers with a link to order the Silver Play Button.\n\nCorrect classification:\n{\"thread_id\": \"ex2\", \"is_deal\": false, \"is_english\": true, \"ai_score\": 1, \"category\": null, \"likely_scam\": false, \"ai_insight\": \"YouTube milestone notification, not a business opportunity\", \"ai_summary\": \"Automated YouTube notification about 100K subscriber milestone. No deal content.\", \"main_contact\": null, \"deal_brand\": null, \"deal_type\": null, \"deal_name\": null, \"deal_value\": null, \"deal_currency\": null}\n\n## Example 3: Ambiguous SaaS pitch with sponsorship angle (is_deal: true)\n\nThread summary: Mike Chen (mike@editortoolpro.com, Head of Growth at EditorToolPro) says he loves the creator's editing tutorials. Proposes \"exploring a partnership, whether that's a sponsored tutorial, an affiliate deal, or just getting your honest feedback on our tool.\" Offers a free Pro license and says \"happy to discuss rates.\"\n\nCorrect classification:\n{\"thread_id\": \"ex3\", \"is_deal\": true, \"is_english\": true, \"ai_score\": 6, \"category\": \"new\", \"likely_scam\": false, \"ai_insight\": \"EditorToolPro proposes sponsorship or affiliate deal for editing tutorials\", \"ai_summary\": \"Mike Chen (mike@editortoolpro.com, Head of Growth, EditorToolPro) proposes partnership options: sponsored tutorial, affiliate deal, or product review. Offers free Pro license. Open to discussing rates. No specific budget mentioned. Status: initial outreach.\", \"main_contact\": {\"name\": \"Mike Chen\", \"email\": \"mike@editortoolpro.com\", \"company\": \"EditorToolPro\", \"title\": \"Head of Growth\", \"phone_number\": null}, \"deal_brand\": \"EditorToolPro\", \"deal_type\": \"brand_collaboration\", \"deal_name\": \"EditorToolPro Partnership\", \"deal_value\": null, \"deal_currency\": null}\n\n## Example 4: Product gifting with implicit content expectation (is_deal: true)\n\nThread summary: Ava Reyes (pr@luxfashionhouse.com, PR Coordinator at Lux Fashion House) says they are sending the creator a handbag from their spring collection. States \"no strings attached\" but adds \"we'd love to see it on your feed.\" Includes a tracking number.\n\nCorrect classification:\n{\"thread_id\": \"ex4\", \"is_deal\": true, \"is_english\": true, \"ai_score\": 4, \"category\": \"new\", \"likely_scam\": false, \"ai_insight\": \"Lux Fashion House sending gifted handbag with implicit content expectation\", \"ai_summary\": \"Ava Reyes (pr@luxfashionhouse.com, PR Coordinator, Lux Fashion House) sending gifted handbag from spring collection. States no strings attached but mentions wanting it on creator's feed. Tracking number provided. Status: product shipped, no formal terms discussed.\", \"main_contact\": {\"name\": \"Ava Reyes\", \"email\": \"pr@luxfashionhouse.com\", \"company\": \"Lux Fashion House\", \"title\": \"PR Coordinator\", \"phone_number\": null}, \"deal_brand\": \"Lux Fashion House\", \"deal_type\": \"product_seeding\", \"deal_name\": \"Lux Fashion House Gifted Handbag\", \"deal_value\": null, \"deal_currency\": null}\n\n## Example 5: Likely scam (is_deal: true, category: likely_scam)\n\nThread summary: partnership@brand-deals-agency.xyz claims to represent \"multiple Fortune 500 brands\" without naming any. Offers $10,000 for a single Instagram story. Asks the creator to click a link to \"verify your PayPal\" to receive payment. No company website or LinkedIn presence.\n\nCorrect classification:\n{\"thread_id\": \"ex5\", \"is_deal\": true, \"is_english\": true, \"ai_score\": 2, \"category\": \"likely_scam\", \"likely_scam\": true, \"ai_insight\": \"Suspicious: unnamed brands, unrealistic payout, PayPal verification request\", \"ai_summary\": \"Unknown sender (partnership@brand-deals-agency.xyz) claims to represent unnamed Fortune 500 brands. Offers $10K for single IG story. Requests PayPal verification via link. Red flags: no specific brand named, .xyz domain, unrealistic compensation for single story, urgency pressure, payment verification request before any agreement.\", \"main_contact\": {\"name\": null, \"email\": \"partnership@brand-deals-agency.xyz\", \"company\": null, \"title\": null, \"phone_number\": null}, \"deal_brand\": null, \"deal_type\": \"sponsorship\", \"deal_name\": \"Unknown Brand Deal - Likely Scam\", \"deal_value\": 10000, \"deal_currency\": \"USD\"}\n\n# AI Summary Guidelines\n\nThe ai_summary field (max 1000 characters) serves as a context memo for the NEXT AI evaluation when new emails arrive in this thread. It is the ONLY context the next classifier will have. Write it as a factual briefing covering:\n\n- Who: Full names, email addresses, job titles, company names of all relevant participants\n- What: The specific proposal, ask, or offer (be precise about deliverables and content format)\n- Status: Current state of the conversation or negotiation\n- Terms: Any compensation, rates, budget, or value mentioned (include exact figures and currency)\n- Dates: Deadlines, campaign dates, response-by dates, or event dates\n- Red flags: Anything suspicious, unusual, or noteworthy for future evaluation\n\n# Previous AI Summary Handling\n\nWhen a thread includes a \"Previous AI Summary\", it reflects a prior evaluation from when fewer emails existed in the thread. New emails may change the classification entirely. Re-evaluate the full thread from scratch. Use the prior summary as background context only. If new emails contradict the prior summary, the new emails take priority.\n\n# Language Handling\n\nIf the primary language of the email thread is not English, set is_english to false and set language to the ISO 639-1 code (e.g., \"es\", \"fr\", \"pt\", \"ja\", \"ko\", \"zh\"). Non-English threads can absolutely be deals. Apply the same classification rules regardless of language.\n\n# Output Schema\n\nReturn a JSON array. Each element must contain exactly these fields:\n\n- thread_id (string, required): The thread_id from the input data\n- is_deal (boolean, required): true if this is or might be a brand deal or business opportunity\n- is_english (boolean, required): true if the primary language is English\n- language (string or null): ISO 639-1 code only when is_english is false, otherwise null\n- ai_score (integer 1-10, required): Priority score for the creator's attention\n- category (string or null): Required when is_deal is true. One of: \"new\", \"in_progress\", \"completed\", \"not_interested\", \"likely_scam\", \"low_confidence\". Null when is_deal is false.\n- likely_scam (boolean, required): true if suspicious patterns are detected\n- ai_insight (string, required): One-line summary. If deal: describe the opportunity. If not a deal: explain why.\n- ai_summary (string, required, max 1000 chars): Context memo for the next AI evaluation. Always required regardless of is_deal value.\n- main_contact (object or null): Primary external person relevant to the deal. Fields: name (string or null), email (string or null), company (string or null), title (string or null), phone_number (string or null). Set to null when is_deal is false or when no contact can be identified.\n- deal_brand (string or null): Brand or company name. Null when is_deal is false.\n- deal_type (string or null): One of the deal types listed above. Null when is_deal is false.\n- deal_name (string or null): Short descriptive name for this deal. Null when is_deal is false.\n- deal_value (number or null): Monetary value only if explicitly mentioned in the thread. Null otherwise.\n- deal_currency (string or null): ISO 4217 currency code (e.g., \"USD\", \"EUR\", \"GBP\") only when deal_value is present. Null otherwise.\n\n# Final Rules\n\n1. Return ONLY a valid JSON array. No other text before or after it.\n2. Include exactly one object per thread_id from the input.\n3. When is_deal is false: set category, deal_brand, deal_type, deal_name, deal_value, deal_currency, and main_contact to null.\n4. When is_deal is true: deal_type and deal_name are required strings. deal_brand is required when the brand can be identified (may be null for likely_scam or low_confidence threads where no brand is verifiable). deal_value and deal_currency are only included if compensation was explicitly mentioned.\n5. ai_summary is always required for every thread, regardless of is_deal value.\n6. When uncertain about is_deal: default to true with category \"low_confidence\".\n\n{{CLASSIFICATION_INSTRUCTIONS}}\n";
 
 function groupByThread(emails) {
   const threads = {};
@@ -27873,46 +27873,75 @@ function groupByThread(emails) {
 
 function buildThreadData(emails) {
   const threads = groupByThread(emails);
-  let threadData = '';
+  const parts = [];
+  let threadIndex = 0;
 
   for (const [threadId, threadEmails] of Object.entries(threads)) {
-    threadData += `--- Thread: ${threadId} ---\n`;
+    threadIndex++;
+    let section = `--- THREAD ${threadIndex} ---\n`;
+    section += `Thread ID: ${threadId}\n`;
+    section += `Message Count: ${threadEmails.length}\n`;
+
     const previousSummary = threadEmails[0].previousAiSummary;
-    if (previousSummary != null && previousSummary !== '') {
-      threadData += `Previous AI Summary: ${previousSummary}\n\n`;
-    }
+    section += `Previous AI Summary: ${previousSummary || 'None'}\n\n`;
 
     threadEmails.forEach((email, i) => {
       const from = getHeader(email, 'from');
-      const subject = getHeader(email, 'subject');
       const date = getHeader(email, 'date');
-      threadData += `Email ${i + 1}: From: ${from} | Subject: ${subject} | Date: ${date}\n`;
+      const subject = getHeader(email, 'subject');
+      section += `[Message ${i + 1}]\n`;
+      section += `From: ${from}\n`;
+      section += `Date: ${date}\n`;
+      section += `Subject: ${subject}\n\n`;
       const body = email.body || email.replyBody || '[no body]';
-      threadData += `Body: ${body}\n\n`;
+      section += `${body}\n\n`;
     });
+
+    parts.push(section);
   }
 
-  return threadData.trim()
+  return parts.join('')
 }
 
 function buildPrompt(emails) {
   const threadData = buildThreadData(emails);
 
-  const systemPrompt = systemTemplate
-    .replace('{{CLASSIFICATION_INSTRUCTIONS}}', classificationInstructions)
-    .replace('{{THREAD_DATA}}', '')
+  // System prompt is the short persona
+  const systemPrompt = systemTemplate.trim();
+
+  // User prompt is the full classifier instructions with thread data injected
+  const userPrompt = classificationInstructions
+    .replace('{{CLASSIFICATION_INSTRUCTIONS}}', '')
+    .replace('{{THREAD_DATA}}', threadData)
     .trim();
 
-  return { systemPrompt, userPrompt: threadData }
+  return { systemPrompt, userPrompt }
 }
+
+// --- Constants ---
+const AI_REQUEST_TIMEOUT_MS = 120000;
+const AI_RETRY_DELAY_MS = 1000;
+const AI_BACKOFF_MULTIPLIER = 2;
+const MAX_HTTP_RETRIES = 2;
+const MAX_TOKENS = 20480;
+
+// --- Valid categories and deal types for validation ---
+const VALID_CATEGORIES = new Set([
+  'new', 'in_progress', 'completed', 'not_interested', 'likely_scam', 'low_confidence',
+]);
+const VALID_DEAL_TYPES = new Set([
+  'brand_collaboration', 'sponsorship', 'affiliate', 'product_seeding',
+  'ambassador', 'content_partnership', 'paid_placement', 'other_business',
+]);
 
 /**
  * Step 1: Fetch content + call AI + save audit checkpoint.
  *
- * If audit already exists for batch_id → skip AI, return immediately.
- * Otherwise: fetch content → build prompt → call AI → parse JSON → save audit.
- *
- * Output: { skipped: boolean, thread_count: number }
+ * Resilience pipeline:
+ *   Layer 0: Primary model call (with HTTP retries + exponential backoff)
+ *   Layer 1: Local JSON repair (strip fences, extract array, coerce schema)
+ *   Layer 2: Corrective retry (send broken output back to same model with error)
+ *   Layer 3: Fallback model (same prompt, different model)
  */
 async function runFetchAndClassify() {
   const authUrl = coreExports.getInput('auth-url');
@@ -27923,8 +27952,8 @@ async function runFetchAndClassify() {
   const batchId = sanitizeId(coreExports.getInput('batch-id'));
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
   const hyperbolicKey = coreExports.getInput('hyperbolic-key');
-  const primaryModel = coreExports.getInput('primary-model') || 'deepseek-ai/DeepSeek-V3-0324';
-  const fallbackModel = coreExports.getInput('fallback-model') || 'Qwen/Qwen2.5-72B-Instruct';
+  const primaryModel = coreExports.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
+  const fallbackModel = coreExports.getInput('fallback-model') || 'moonshotai/Kimi-K2-Instruct';
   const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
 
   if (!batchId) throw new Error('batch-id is required')
@@ -27934,9 +27963,11 @@ async function runFetchAndClassify() {
   const jwt = await authenticate(authUrl, authSecret);
 
   // Check metadata exists
-  const metadataRows = await executeSql(apiUrl, jwt, biscuit,
+  const metadataRows = await executeSql(
+    apiUrl, jwt, biscuit,
     `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, SYNC_STATE_ID, THREAD_ID
-    FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`);
+    FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+  );
 
   if (!metadataRows || metadataRows.length === 0) {
     console.log('[classify] no rows for batch (already completed?)');
@@ -27946,13 +27977,15 @@ async function runFetchAndClassify() {
   console.log(`[classify] ${metadataRows.length} deal_states`);
 
   // Check for existing audit (checkpoint)
-  const existingAudit = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId));
+  const existingAudit = await executeSql(
+    apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId),
+  );
 
   if (existingAudit.length > 0 && existingAudit[0].AI_EVALUATION) {
     console.log('[classify] audit exists — skipping AI call');
     try {
       const parsed = JSON.parse(existingAudit[0].AI_EVALUATION);
-      return { skipped: true, thread_count: (parsed.threads || []).length }
+      return { skipped: true, thread_count: (parsed.threads || parsed || []).length }
     } catch {
       console.log('[classify] existing audit has invalid JSON, re-running AI');
     }
@@ -27995,148 +28028,219 @@ async function runFetchAndClassify() {
 
   if (allEmails.length === 0) throw new Error('No email content fetched')
 
-  // Build prompt + call AI
+  // Build prompt
   const { systemPrompt, userPrompt } = buildPrompt(allEmails);
 
-  const AI_REQUEST_TIMEOUT_MS = 90000;
-  const AI_RETRY_DELAY_MS = 3000;
-  const MAX_HTTP_RETRIES = 2;
+  // =========================================================================
+  //  AI RESILIENCE PIPELINE
+  // =========================================================================
 
   /**
-   * Call an AI model. Returns raw response string or null on HTTP failure.
-   * Retries on HTTP errors (same model). Throws on abort/network errors after retries.
+   * Call a model with HTTP retries + exponential backoff.
+   * Returns raw content string or throws on total failure.
    */
-  async function callModel(model, messages) {
+  async function callModel(model, messages, { temperature = 0 } = {}) {
+    let lastError;
     for (let attempt = 1; attempt <= MAX_HTTP_RETRIES; attempt++) {
       try {
         console.log(`[classify] AI: ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES})`);
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), AI_REQUEST_TIMEOUT_MS);
         const resp = await fetch(aiApiUrl, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${hyperbolicKey}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ model, messages, response_format: { type: 'json_object' } }),
-          signal: controller.signal,
+          body: JSON.stringify({
+            model,
+            messages,
+            temperature,
+            max_tokens: MAX_TOKENS,
+            response_format: { type: 'json_object' },
+          }),
+          signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
         });
-        clearTimeout(timeout);
 
         if (!resp.ok) {
           const errBody = await resp.text().catch(() => '');
+          lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 200)}`);
           console.log(`[classify] AI ${model} HTTP ${resp.status}: ${errBody.substring(0, 200)}`);
           if (attempt < MAX_HTTP_RETRIES) {
-            await new Promise((r) => setTimeout(r, AI_RETRY_DELAY_MS));
+            const delay = AI_RETRY_DELAY_MS * Math.pow(AI_BACKOFF_MULTIPLIER, attempt - 1);
+            await new Promise((r) => setTimeout(r, delay));
             continue
           }
-          return null // HTTP failure after all retries
+          throw lastError
         }
 
         const result = await resp.json();
-        return result.choices?.[0]?.message?.content || null
+        const content = result.choices?.[0]?.message?.content;
+        if (!content) throw new Error('Empty response from model')
+        return content
       } catch (err) {
-        console.log(`[classify] AI ${model} attempt ${attempt}: ${err.message}`);
+        lastError = err;
         if (attempt < MAX_HTTP_RETRIES) {
-          await new Promise((r) => setTimeout(r, AI_RETRY_DELAY_MS));
-          continue
+          const delay = AI_RETRY_DELAY_MS * Math.pow(AI_BACKOFF_MULTIPLIER, attempt - 1);
+          console.log(`[classify] AI ${model} attempt ${attempt} failed: ${err.message}, retrying in ${delay}ms`);
+          await new Promise((r) => setTimeout(r, delay));
         }
-        return null
       }
     }
-    return null
+    throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES} attempts`)
   }
 
-  /** Strip markdown fences and parse JSON. Returns parsed object or null. */
-  function tryParseJson(raw) {
-    try {
-      const cleaned = raw.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
-      return JSON.parse(cleaned)
-    } catch {
-      return null
+  /**
+   * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
+   * Returns validated array or throws with parse error details.
+   */
+  function parseAndValidate(raw) {
+    let content = raw.trim();
+
+    // Strip markdown fences
+    content = content.replace(/^```(?:json)?\s*\n?/gi, '').replace(/\n?```\s*$/gi, '').trim();
+
+    // Try to find JSON array in mixed output
+    if (!content.startsWith('[')) {
+      const arrayStart = content.indexOf('[');
+      const arrayEnd = content.lastIndexOf(']');
+      if (arrayStart !== -1 && arrayEnd > arrayStart) {
+        content = content.slice(arrayStart, arrayEnd + 1);
+      }
     }
+
+    // Parse
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      // Try to extract from wrapper object like {"results": [...]}
+      const objStart = content.indexOf('{');
+      const objEnd = content.lastIndexOf('}');
+      if (objStart !== -1 && objEnd > objStart) {
+        const obj = JSON.parse(content.slice(objStart, objEnd + 1));
+        const arrays = Object.values(obj).filter(Array.isArray);
+        if (arrays.length === 1) {
+          parsed = arrays[0];
+        } else {
+          throw new Error('Cannot extract JSON array from response')
+        }
+      } else {
+        throw new Error('No valid JSON found in response')
+      }
+    }
+
+    // Unwrap if object with single array property
+    if (!Array.isArray(parsed)) {
+      const arrays = Object.values(parsed).filter(Array.isArray);
+      if (arrays.length === 1) {
+        parsed = arrays[0];
+      } else {
+        throw new Error('Response is not a JSON array')
+      }
+    }
+
+    // Schema validation and coercion
+    return parsed.map((r) => ({
+      thread_id: String(r.thread_id || ''),
+      is_deal: Boolean(r.is_deal),
+      is_english: r.is_english !== false,
+      language: r.language || null,
+      ai_score: Math.min(10, Math.max(1, Math.round(Number(r.ai_score) || 5))),
+      category: r.is_deal
+        ? (VALID_CATEGORIES.has(r.category) ? r.category : 'low_confidence')
+        : null,
+      likely_scam: Boolean(r.likely_scam) || r.category === 'likely_scam',
+      ai_insight: String(r.ai_insight || ''),
+      ai_summary: String(r.ai_summary || '').slice(0, 1000),
+      main_contact: r.is_deal ? (r.main_contact || null) : null,
+      deal_brand: r.is_deal ? (r.deal_brand || null) : null,
+      deal_type: r.is_deal
+        ? (VALID_DEAL_TYPES.has(r.deal_type) ? r.deal_type : 'other_business')
+        : null,
+      deal_name: r.is_deal ? (r.deal_name || null) : null,
+      deal_value: r.deal_value != null ? Number(r.deal_value) : null,
+      deal_currency: r.deal_currency || null,
+    }))
   }
 
-  /** Ask a model to fix broken JSON. Returns parsed object or null. */
-  async function repairJson(fixerModel, brokenJson) {
-    console.log(`[classify] JSON repair: asking ${fixerModel} to fix malformed response`);
-    const repairMessages = [
-      {
-        role: 'system',
-        content: 'You are a JSON repair tool. Fix the malformed JSON below so it is valid. Return ONLY the corrected JSON array. No markdown, no explanation.',
-      },
-      { role: 'user', content: brokenJson },
-    ];
-    const fixed = await callModel(fixerModel, repairMessages);
-    if (!fixed) return null
-    return tryParseJson(fixed)
-  }
-
-  // --- AI Classification Pipeline ---
   const classifyMessages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userPrompt },
   ];
 
-  let aiOutput = null;
+  let threads = null;
   let modelUsed = primaryModel;
 
-  // Step 1: Try primary model
-  const primaryRaw = await callModel(primaryModel, classifyMessages);
+  // --- Layer 0: Primary model call ---
+  let primaryRaw;
+  try {
+    primaryRaw = await callModel(primaryModel, classifyMessages, { temperature: 0 });
+  } catch (primaryApiError) {
+    console.log(`[classify] Primary model API failed: ${primaryApiError.message}`);
+    primaryRaw = null;
+  }
 
   if (primaryRaw) {
-    aiOutput = tryParseJson(primaryRaw);
-    if (!aiOutput) {
-      // Primary succeeded but returned invalid JSON → ask fallback to fix it
-      console.log(`[classify] Primary model returned invalid JSON, attempting cross-model repair`);
-      aiOutput = await repairJson(fallbackModel, primaryRaw);
-      if (aiOutput) {
-        console.log(`[classify] JSON repaired by ${fallbackModel}`);
-        modelUsed = `${primaryModel}+${fallbackModel}(repair)`;
+    // --- Layer 1: Local JSON repair ---
+    try {
+      threads = parseAndValidate(primaryRaw);
+      console.log(`[classify] Primary model succeeded: ${threads.length} threads`);
+    } catch (parseError) {
+      console.log(`[classify] Primary JSON parse failed: ${parseError.message}`);
+
+      // --- Layer 2: Corrective retry (same model, send broken output back) ---
+      try {
+        console.log(`[classify] Attempting corrective retry with ${primaryModel}`);
+        const correctiveMessages = [
+          ...classifyMessages,
+          { role: 'assistant', content: primaryRaw },
+          {
+            role: 'user',
+            content: `Your previous classification response could not be parsed as valid JSON.\n\nParse error:\n${parseError.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting issue. Do not change any classification decisions. Return ONLY the JSON array with no other text.`,
+          },
+        ];
+        const correctedRaw = await callModel(primaryModel, correctiveMessages, { temperature: 0 });
+        threads = parseAndValidate(correctedRaw);
+        modelUsed = `${primaryModel}(corrective-retry)`;
+        console.log(`[classify] Corrective retry succeeded: ${threads.length} threads`);
+      } catch (correctiveError) {
+        console.log(`[classify] Corrective retry failed: ${correctiveError.message}`);
       }
     }
   }
 
-  // Step 2: If primary failed entirely or repair failed → try fallback model
-  if (!aiOutput) {
-    console.log(`[classify] Primary model failed, trying fallback: ${fallbackModel}`);
+  // --- Layer 3: Fallback model ---
+  if (!threads) {
+    console.log(`[classify] Falling back to ${fallbackModel}`);
     modelUsed = fallbackModel;
-    const fallbackRaw = await callModel(fallbackModel, classifyMessages);
-
-    if (fallbackRaw) {
-      aiOutput = tryParseJson(fallbackRaw);
-      if (!aiOutput) {
-        // Fallback succeeded but returned invalid JSON → ask primary to fix it
-        console.log(`[classify] Fallback model returned invalid JSON, attempting cross-model repair`);
-        aiOutput = await repairJson(primaryModel, fallbackRaw);
-        if (aiOutput) {
-          console.log(`[classify] JSON repaired by ${primaryModel}`);
-          modelUsed = `${fallbackModel}+${primaryModel}(repair)`;
-        }
-      }
+    try {
+      const fallbackRaw = await callModel(fallbackModel, classifyMessages, { temperature: 0.6 });
+      threads = parseAndValidate(fallbackRaw);
+      console.log(`[classify] Fallback model succeeded: ${threads.length} threads`);
+    } catch (fallbackError) {
+      console.error(`[classify] All layers exhausted. Primary and fallback both failed.`);
+      throw new Error(
+        `Classification failed: primary and fallback models both returned no valid JSON. Last error: ${fallbackError.message}`,
+      )
     }
   }
 
-  // Step 3: If everything failed
-  if (!aiOutput) throw new Error('All AI models failed — both primary and fallback returned no valid JSON')
+  // Wrap in { threads: [...] } for downstream compatibility
+  const aiOutput = { threads };
 
-  // Normalize: prompt returns array, downstream expects { threads: [...] }
-  if (Array.isArray(aiOutput)) {
-    aiOutput = { threads: aiOutput };
-  }
-
+  // Save audit checkpoint
   const auditId = crypto.randomUUID();
   const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400));
   try {
-    await executeSql(apiUrl, jwt, biscuit,
+    await executeSql(
+      apiUrl, jwt, biscuit,
       saveResults.insertAudit(schema, {
-        id: auditId, batchId, threadCount: (aiOutput.threads || []).length,
+        id: auditId, batchId, threadCount: threads.length,
         emailCount: metadataRows.length, cost: 0, inputTokens: 0,
         outputTokens: 0, model: modelUsed, evaluation,
-      }));
-    console.log(`[classify] audit saved: ${auditId}`);
+      }),
+    );
+    console.log(`[classify] audit saved: ${auditId} (model: ${modelUsed})`);
   } catch (err) {
-    // Unique constraint on batch_id — another run already saved the audit
     if (err.message.includes('integrity constraint') || err.message.includes('unique') || err.message.includes('duplicate')) {
       console.log(`[classify] audit already exists for batch (concurrent run), continuing`);
     } else {
@@ -28144,8 +28248,8 @@ async function runFetchAndClassify() {
     }
   }
 
-  console.log(`[classify] ${(aiOutput.threads || []).length} threads ready for processing`);
-  return { skipped: false, thread_count: (aiOutput.threads || []).length }
+  console.log(`[classify] ${threads.length} threads ready for processing`);
+  return { skipped: false, thread_count: threads.length }
 }
 
 var blockedDomains = [
