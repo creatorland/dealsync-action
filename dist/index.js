@@ -27759,6 +27759,7 @@ async function runDispatchDealStateSync() {
   const apiUrl = coreExports.getInput('api-url');
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const emailCoreSchema = sanitizeSchema(coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING');
   const w3RpcUrl = coreExports.getInput('w3-rpc-url');
   const syncWorkflowName = coreExports.getInput('sync-workflow-name');
   const batchSize = parseNonNegativeInt(
@@ -27774,7 +27775,7 @@ async function runDispatchDealStateSync() {
   const jwt = await authenticate(authUrl, authSecret);
 
   // Count emails without deal_states
-  const countSql = `SELECT COUNT(*) AS CNT FROM EMAIL_CORE_STAGING.EMAIL_METADATA em WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID)`;
+  const countSql = `SELECT COUNT(*) AS CNT FROM ${emailCoreSchema}.EMAIL_METADATA em WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID)`;
   const rows = await executeSql(apiUrl, jwt, biscuit, countSql);
   const diffCount = rows[0]?.CNT ?? 0;
 
@@ -27867,6 +27868,7 @@ async function runSyncDealStates() {
   const apiUrl = coreExports.getInput('api-url');
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const emailCoreSchema = sanitizeSchema(coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING');
   const rawOffset = coreExports.getInput('offset');
   const rawLimit = coreExports.getInput('limit');
   const offset = parseInt(rawOffset || '0', 10);
@@ -27876,7 +27878,7 @@ async function runSyncDealStates() {
   const jwt = await authenticate(authUrl, authSecret);
 
   const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
-FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
+FROM ${emailCoreSchema}.EMAIL_METADATA em
 WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID)
 ORDER BY em.RECEIVED_AT ASC
 LIMIT ${limit} OFFSET ${offset}`;

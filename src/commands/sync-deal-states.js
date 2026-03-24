@@ -14,6 +14,7 @@ export async function runSyncDealStates() {
   const apiUrl = core.getInput('api-url')
   const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
+  const emailCoreSchema = sanitizeSchema(core.getInput('email-core-schema') || 'EMAIL_CORE_STAGING')
   const rawOffset = core.getInput('offset')
   const rawLimit = core.getInput('limit')
   const offset = parseInt(rawOffset || '0', 10)
@@ -23,7 +24,7 @@ export async function runSyncDealStates() {
   const jwt = await authenticate(authUrl, authSecret)
 
   const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
-FROM EMAIL_CORE_STAGING.EMAIL_METADATA em
+FROM ${emailCoreSchema}.EMAIL_METADATA em
 WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID)
 ORDER BY em.RECEIVED_AT ASC
 LIMIT ${limit} OFFSET ${offset}`

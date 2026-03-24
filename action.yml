@@ -15,7 +15,10 @@ inputs:
   biscuit:
     description: 'Pre-generated SxT biscuit'
   schema:
-    description: 'SxT schema name'
+    description: 'SxT schema name (dealsync)'
+  email-core-schema:
+    description: 'SxT schema name (email core)'
+    default: 'EMAIL_CORE_STAGING'
   rate-limiter-url:
     description: 'SxT rate limiter service URL (optional, fail-open if not set)'
   rate-limiter-api-key:

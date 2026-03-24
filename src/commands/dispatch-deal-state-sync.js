@@ -24,6 +24,7 @@ export async function runDispatchDealStateSync() {
   const apiUrl = core.getInput('api-url')
   const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
+  const emailCoreSchema = sanitizeSchema(core.getInput('email-core-schema') || 'EMAIL_CORE_STAGING')
   const w3RpcUrl = core.getInput('w3-rpc-url')
   const syncWorkflowName = core.getInput('sync-workflow-name')
   const batchSize = parseNonNegativeInt(
@@ -39,7 +40,7 @@ export async function runDispatchDealStateSync() {
   const jwt = await authenticate(authUrl, authSecret)
 
   // Count emails without deal_states
-  const countSql = `SELECT COUNT(*) AS CNT FROM EMAIL_CORE_STAGING.EMAIL_METADATA em WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID)`
+  const countSql = `SELECT COUNT(*) AS CNT FROM ${emailCoreSchema}.EMAIL_METADATA em WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID)`
   const rows = await executeSql(apiUrl, jwt, biscuit, countSql)
   const diffCount = rows[0]?.CNT ?? 0
 
