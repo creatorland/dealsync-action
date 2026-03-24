@@ -79,6 +79,9 @@ inputs:
   batch-size:
     description: 'Threads per AI call (eval). 1 = one at a time, 5 = production batch size'
     default: '1'
+  concurrency:
+    description: 'Max parallel AI calls per run (eval). Default 50'
+    default: '50'
   temperature:
     description: 'AI temperature (eval)'
     default: '0'

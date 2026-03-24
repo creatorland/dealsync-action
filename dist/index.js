@@ -38039,6 +38039,7 @@ async function runEval() {
   const numRuns = parseInt(coreExports.getInput('runs') || '10', 10);
   const temperature = parseFloat(coreExports.getInput('temperature') || '0');
   const batchSize = parseInt(coreExports.getInput('batch-size') || '1', 10);
+  const concurrency = parseInt(coreExports.getInput('concurrency') || '50', 10);
   const promptHash = coreExports.getInput('prompt-hash') || '';
 
   if (!hyperbolicKey) throw new Error('hyperbolic-key is required for eval')
@@ -38054,7 +38055,7 @@ async function runEval() {
   const usableEntries = groundTruth.filter((gt) =>
     gt.emails.some((e) => e.body && e.body.trim() !== ''),
   );
-  console.log(`[eval] model=${model} runs=${numRuns} threads=${usableEntries.length} batch_size=${batchSize} prompt=${promptHash || 'bundled'} (${groundTruth.length - usableEntries.length} skipped: empty body)`);
+  console.log(`[eval] model=${model} runs=${numRuns} threads=${usableEntries.length} batch_size=${batchSize} concurrency=${concurrency} prompt=${promptHash || 'bundled'} (${groundTruth.length - usableEntries.length} skipped: empty body)`);
 
   const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey };
   const allRuns = [];
@@ -38075,24 +38076,17 @@ async function runEval() {
       batches.push(usableEntries);
     }
 
-    const runThreads = [];
     const runHealth = { clean: 0, repaired: 0, corrective_retry: 0, failed: 0, total_batches: batches.length };
 
-    for (let b = 0; b < batches.length; b++) {
-      const batch = batches[b];
+    // Process batches with concurrency pool
+    async function processBatch(batch, batchIdx) {
       const allEmails = batch.flatMap((gt) => gt.emails);
       const { systemPrompt, userPrompt } = buildPrompt(allEmails, promptOverrides);
-
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ];
 
-      if (batches.length > 1) {
-        console.log(`[eval] run ${run} batch ${b + 1}/${batches.length} (${batch.length} threads)`);
-      }
-
-      // Layer 0: Primary model call
       let rawContent = null;
       let usage = {};
       try {
@@ -38100,44 +38094,64 @@ async function runEval() {
         rawContent = result.content;
         usage = result.usage || {};
       } catch (apiErr) {
-        console.log(`[eval] run ${run} batch ${b + 1} API failed: ${apiErr.message}`);
+        console.log(`[eval] run ${run} batch ${batchIdx + 1} API failed: ${apiErr.message}`);
+        return { threads: [], health: 'failed', usage }
       }
 
-      if (rawContent) {
-        // Layer 1: Local JSON repair
+      // Layer 1: Local JSON repair
+      try {
+        const parsed = parseAndValidate(rawContent);
+        return { threads: parsed, health: 'clean', usage }
+      } catch (parseErr) {
+        // Layer 2: Corrective retry
         try {
-          const parsed = parseAndValidate(rawContent);
-          runThreads.push(...parsed);
-          runHealth.clean++;
-        } catch (parseErr) {
-          console.log(`[eval] run ${run} batch ${b + 1}: parse failed (${parseErr.message}), attempting repair`);
-
-          // Layer 2: Corrective retry
-          try {
-            const correctiveMessages = [
-              ...messages,
-              { role: 'assistant', content: rawContent },
-              {
-                role: 'user',
-                content: `Your previous response could not be parsed as valid JSON.\n\nParse error:\n${parseErr.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting. Return ONLY the JSON array.`,
-              },
-            ];
-            const corrected = await callModel(model, correctiveMessages, { temperature: 0, ...aiOpts });
-            const parsed = parseAndValidate(corrected.content);
-            runThreads.push(...parsed);
-            runHealth.corrective_retry++;
-          } catch (correctiveErr) {
-            console.log(`[eval] run ${run} batch ${b + 1}: corrective retry failed: ${correctiveErr.message}`);
-            runHealth.failed++;
-          }
+          const correctiveMessages = [
+            ...messages,
+            { role: 'assistant', content: rawContent },
+            {
+              role: 'user',
+              content: `Your previous response could not be parsed as valid JSON.\n\nParse error:\n${parseErr.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting. Return ONLY the JSON array.`,
+            },
+          ];
+          const corrected = await callModel(model, correctiveMessages, { temperature: 0, ...aiOpts });
+          const parsed = parseAndValidate(corrected.content);
+          return { threads: parsed, health: 'corrective_retry', usage }
+        } catch (correctiveErr) {
+          console.log(`[eval] run ${run} batch ${batchIdx + 1}: corrective retry failed: ${correctiveErr.message}`);
+          return { threads: [], health: 'failed', usage }
         }
-      } else {
-        runHealth.failed++;
       }
-
-      totalInputTokens += usage.prompt_tokens || 0;
-      totalOutputTokens += usage.completion_tokens || 0;
     }
+
+    // Run batches in parallel with concurrency limit
+    const runThreads = [];
+    const pending = [];
+    let completed = 0;
+
+    for (let b = 0; b < batches.length; b++) {
+      const p = processBatch(batches[b], b).then((result) => {
+        completed++;
+        runThreads.push(...result.threads);
+        runHealth[result.health]++;
+        totalInputTokens += result.usage.prompt_tokens || 0;
+        totalOutputTokens += result.usage.completion_tokens || 0;
+        if (completed % 10 === 0 || completed === batches.length) {
+          console.log(`[eval] run ${run}: ${completed}/${batches.length} batches done`);
+        }
+      });
+      pending.push(p);
+
+      // Enforce concurrency limit
+      if (pending.length >= concurrency) {
+        await Promise.race(pending);
+        // Remove resolved promises
+        for (let i = pending.length - 1; i >= 0; i--) {
+          const settled = await Promise.race([pending[i].then(() => true), Promise.resolve(false)]);
+          if (settled) pending.splice(i, 1);
+        }
+      }
+    }
+    await Promise.all(pending);
 
     console.log(`[eval] run ${run}: ${runThreads.length} threads (clean=${runHealth.clean} retry=${runHealth.corrective_retry} failed=${runHealth.failed})`);
 
