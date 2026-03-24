@@ -27542,7 +27542,7 @@ async function executeSql(apiUrl, jwt, biscuit, sql) {
   }
 }
 
-const BATCH_SIZE = 100;
+const BATCH_SIZE = 25;
 
 /**
  * Query the diff between email_metadata and deal_states,
@@ -27554,10 +27554,12 @@ async function runCreateDealStates() {
   const apiUrl = coreExports.getInput('api-url');
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const offset = parseInt(coreExports.getInput('offset') || '0', 10);
-  const limit = parseInt(coreExports.getInput('limit') || '1000', 10);
+  const rawOffset = coreExports.getInput('offset');
+  const rawLimit = coreExports.getInput('limit');
+  const offset = parseInt(rawOffset || '0', 10);
+  const limit = parseInt(rawLimit || '500', 10);
 
-  console.log(`[create-deal-states] querying diff (limit=${limit}, offset=${offset})`);
+  console.log(`[create-deal-states] inputs: offset="${rawOffset}" limit="${rawLimit}" → parsed: offset=${offset} limit=${limit}`);
   const jwt = await authenticate(authUrl, authSecret);
 
   const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID

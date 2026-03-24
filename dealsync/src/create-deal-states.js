@@ -3,7 +3,7 @@ import * as core from '@actions/core'
 import { sanitizeSchema } from '../../shared/queries.js'
 import { authenticate, executeSql } from './sxt-client.js'
 
-const BATCH_SIZE = 100
+const BATCH_SIZE = 25
 
 /**
  * Query the diff between email_metadata and deal_states,
@@ -15,10 +15,12 @@ export async function runCreateDealStates() {
   const apiUrl = core.getInput('api-url')
   const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
-  const offset = parseInt(core.getInput('offset') || '0', 10)
-  const limit = parseInt(core.getInput('limit') || '1000', 10)
+  const rawOffset = core.getInput('offset')
+  const rawLimit = core.getInput('limit')
+  const offset = parseInt(rawOffset || '0', 10)
+  const limit = parseInt(rawLimit || '500', 10)
 
-  console.log(`[create-deal-states] querying diff (limit=${limit}, offset=${offset})`)
+  console.log(`[create-deal-states] inputs: offset="${rawOffset}" limit="${rawLimit}" → parsed: offset=${offset} limit=${limit}`)
   const jwt = await authenticate(authUrl, authSecret)
 
   const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID
