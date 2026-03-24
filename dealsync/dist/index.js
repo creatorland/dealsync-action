@@ -28059,8 +28059,8 @@ async function runFetchAndClassify() {
 
   if (!aiResponseRaw) throw new Error('All AI models failed')
 
-  // Parse + save audit checkpoint
-  aiResponseRaw = aiResponseRaw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+  // Strip markdown code fences if present (LLMs sometimes wrap JSON in ```json ... ```)
+  aiResponseRaw = aiResponseRaw.trim().replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
   const aiOutput = JSON.parse(aiResponseRaw);
 
   const auditId = crypto.randomUUID();
