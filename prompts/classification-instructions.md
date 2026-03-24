@@ -1,41 +1,78 @@
 # Classification Instructions
 
+Classify email threads for an influencer/creator. If a thread might be a brand deal but you're unsure, classify as a deal with category "low_confidence". Missing a real brand deal is worse than a false positive the user can dismiss.
+
 ## What is a Deal?
 
-A deal is any business opportunity, partnership, sponsorship, collaboration,
-or commercial arrangement discussed in the email thread. Look for:
+A deal is when a brand, company, or agency wants to work with the creator for their audience, content, or influence. This includes:
 
-- Explicit mentions of payment, compensation, rates, or fees
-- Brand partnership or sponsorship proposals
-- Product collaboration or gifting arrangements
+- Sponsorships and brand collaborations
+- Paid campaigns and content partnerships
+- Product seeding/gifting arrangements
+- Affiliate offers and ambassador programs
 - Event appearance or speaking engagement offers
-- Licensing or content creation agreements
+- Paid placements and licensing agreements
+
+Even if declined, completed, or suspicious — classify as a deal. Use category to capture status.
 
 ## What is NOT a Deal?
 
-- Newsletters, automated notifications, marketing blasts
-- Social media notifications or follower alerts
+- Investor/fundraising conversations
+- Legal or accounting services
+- Internal team discussions
+- Automated notifications (GMass, newsletters, platform alerts)
+- User surveys or feedback requests
+- SaaS vendor pitches (unless proposing a sponsorship)
+- Personal correspondence
+- Calendar-only threads with no business context
 - Shipping/tracking/order confirmations
-- Support tickets or customer service threads
-- Personal conversations unrelated to business
+- Social media notifications or follower alerts
 
 ## Scoring Guide (ai_score 1-10)
 
-- 1-3: Unlikely deal, vague or tangential business mention
-- 4-6: Possible deal, some indicators but not confirmed
-- 7-9: Likely deal, clear business intent with specifics
-- 10: Confirmed deal, explicit terms or signed agreement
+Priority for the creator's attention:
+- 9-10: Urgent response needed today
+- 7-8: High-value, action needed soon
+- 5-6: Active but no deadline
+- 3-4: Low priority
+- 1-2: No action needed
 
 ## Category Definitions
 
-- new: First contact, deal not yet discussed in depth
-- in_progress: Active negotiation, terms being discussed
-- completed: Deal closed, agreement reached or signed
-- likely_scam: Suspicious patterns, too-good-to-be-true offers
-- low_confidence: Ambiguous, cannot determine with confidence
+- **new**: First contact, deal not yet discussed in depth
+- **in_progress**: Active negotiation, terms being discussed
+- **completed**: Deal closed, agreement reached or signed
+- **not_interested**: Creator declined or not pursuing
+- **likely_scam**: Suspicious patterns, too-good-to-be-true offers
+- **low_confidence**: Ambiguous, cannot determine with confidence
+
+## Deal Type Values
+
+When `is_deal` is true, use one of:
+- `brand_collaboration`
+- `sponsorship`
+- `affiliate`
+- `product_seeding`
+- `ambassador`
+- `content_partnership`
+- `paid_placement`
+- `other_business`
+
+## AI Summary Guidelines
+
+The `ai_summary` field (max 1000 chars) is a context memo for the next AI evaluating this thread. Include:
+- Participants (names, emails, roles)
+- What was proposed
+- Current status
+- Any terms/compensation mentioned
+- Key dates or deadlines
+
+This is the ONLY context available when new emails arrive later — make it count.
+
+## Incremental Mode
+
+When `isIncremental: true`, you receive a previous AI summary plus only new emails since the last evaluation. The summary is prior context — but new emails may change the classification. Re-evaluate fully.
 
 ## Language Detection
 
-If the primary language of the email thread is not English,
-set language to the ISO 639-1 code and is_deal to false
-unless the deal context is clearly understandable.
+If the primary language of the email thread is not English, set language to the ISO 639-1 code. Non-English threads can still be deals if the context is clearly understandable.

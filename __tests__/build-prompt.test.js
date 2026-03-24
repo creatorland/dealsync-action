@@ -8,9 +8,13 @@ jest.unstable_mockModule('@actions/core', () => ({
   error: jest.fn(),
 }))
 
-jest.unstable_mockModule('../prompts/classification-instructions.md', () => ({
+jest.unstable_mockModule('../prompts/system-template.md', () => ({
   default:
-    '# Classification Instructions\n## What is a Deal?\nTest content.\n## What is NOT a Deal?\nNon-deals.\n## Scoring Guide (ai_score 1-10)\nScoring.\n## Category Definitions\nCategories.\n## Language Detection\nLanguage.',
+    'You are a brand deal email classifier. Return JSON only.\n\n{{CLASSIFICATION_INSTRUCTIONS}}\n\n{{THREAD_DATA}}',
+}))
+
+jest.unstable_mockModule('../prompts/classification-instructions.md', () => ({
+  default: '# Classification Instructions\nTest classification content.',
 }))
 
 const core = await import('@actions/core')
@@ -41,10 +45,10 @@ describe('buildPrompt', () => {
     const emails = [makeEmail()]
     const { systemPrompt, userPrompt } = buildPrompt(emails)
 
-    expect(systemPrompt).toContain('What is a Deal?')
-    expect(systemPrompt).toContain('deal classification engine')
-    expect(userPrompt).toContain('(isIncremental: false)')
-    expect(userPrompt).not.toContain('(isIncremental: true)')
+    expect(systemPrompt).toContain('Classification Instructions')
+    expect(systemPrompt).toContain('brand deal email classifier')
+    expect(userPrompt).toContain('(FULL_THREAD)')
+    expect(userPrompt).not.toContain('(INCREMENTAL)')
     expect(userPrompt).toContain('Email 1:')
     expect(userPrompt).toContain('From: alice@example.com')
     expect(userPrompt).toContain('Subject: Partnership Opportunity')
@@ -56,7 +60,7 @@ describe('buildPrompt', () => {
     const emails = [makeEmail({ previousAiSummary: 'Previous deal discussion about sponsorship.' })]
     const { userPrompt } = buildPrompt(emails)
 
-    expect(userPrompt).toContain('(isIncremental: true)')
+    expect(userPrompt).toContain('(INCREMENTAL)')
     expect(userPrompt).toContain('Previous AI Summary: Previous deal discussion about sponsorship.')
   })
 
@@ -72,8 +76,8 @@ describe('buildPrompt', () => {
     ]
     const { userPrompt } = buildPrompt(emails)
 
-    expect(userPrompt).toContain('--- Thread: thread-a (isIncremental: false)')
-    expect(userPrompt).toContain('--- Thread: thread-b (isIncremental: true)')
+    expect(userPrompt).toContain('--- Thread: thread-a (FULL_THREAD)')
+    expect(userPrompt).toContain('--- Thread: thread-b (INCREMENTAL)')
     expect(userPrompt).toContain('Previous AI Summary: Existing summary.')
   })
 
@@ -94,7 +98,7 @@ describe('buildPrompt', () => {
     const { systemPrompt } = buildPrompt(emails)
 
     expect(systemPrompt).toContain('# Classification Instructions')
-    expect(systemPrompt).toContain('## What is a Deal?')
+    expect(systemPrompt).toContain('Test classification content')
     expect(systemPrompt).not.toContain('{{CLASSIFICATION_INSTRUCTIONS}}')
   })
 

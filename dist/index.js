@@ -27857,35 +27857,9 @@ function getHeader(email, name) {
   return header?.value || ''
 }
 
-var classificationInstructions = "# Classification Instructions\n\n## What is a Deal?\n\nA deal is any business opportunity, partnership, sponsorship, collaboration,\nor commercial arrangement discussed in the email thread. Look for:\n\n- Explicit mentions of payment, compensation, rates, or fees\n- Brand partnership or sponsorship proposals\n- Product collaboration or gifting arrangements\n- Event appearance or speaking engagement offers\n- Licensing or content creation agreements\n\n## What is NOT a Deal?\n\n- Newsletters, automated notifications, marketing blasts\n- Social media notifications or follower alerts\n- Shipping/tracking/order confirmations\n- Support tickets or customer service threads\n- Personal conversations unrelated to business\n\n## Scoring Guide (ai_score 1-10)\n\n- 1-3: Unlikely deal, vague or tangential business mention\n- 4-6: Possible deal, some indicators but not confirmed\n- 7-9: Likely deal, clear business intent with specifics\n- 10: Confirmed deal, explicit terms or signed agreement\n\n## Category Definitions\n\n- new: First contact, deal not yet discussed in depth\n- in_progress: Active negotiation, terms being discussed\n- completed: Deal closed, agreement reached or signed\n- likely_scam: Suspicious patterns, too-good-to-be-true offers\n- low_confidence: Ambiguous, cannot determine with confidence\n\n## Language Detection\n\nIf the primary language of the email thread is not English,\nset language to the ISO 639-1 code and is_deal to false\nunless the deal context is clearly understandable.\n";
+var systemTemplate = "You are a brand deal email classifier for influencers and creators. Return JSON only.\n\n## Output format\n\nReturn a JSON array with exactly one object per thread:\n\n[{\n  \"thread_id\": \"<thread_id>\",\n  \"is_deal\": true,\n  \"is_english\": true,\n  \"ai_score\": 7,\n  \"category\": \"in_progress\",\n  \"likely_scam\": false,\n  \"ai_insight\": \"Brand X offers $2K for YouTube review\",\n  \"ai_summary\": \"Jane from Brand X (jane@brandx.com, Marketing Manager) proposed a $2,000 sponsored YouTube video review. Creator countered at $2,500. Awaiting brand response. Deliverable: 1 dedicated video, 60-day exclusivity mentioned.\",\n  \"main_contact\": {\"name\": \"Jane Smith\", \"email\": \"jane@brandx.com\", \"company_name\": \"Brand X\", \"title\": \"Marketing Manager\", \"phone_number\": null},\n  \"deal_brand\": \"Brand X\",\n  \"deal_type\": \"sponsorship\",\n  \"deal_name\": \"Brand X YouTube Review\",\n  \"deal_value\": 2000,\n  \"deal_currency\": \"USD\"\n}]\n\n## Rules\n\n- Respond ONLY with the JSON array. No markdown, no explanation, no code fences.\n- One entry per thread_id in the input.\n- If is_deal is false: set deal_brand, deal_type, deal_name, deal_value, deal_currency, main_contact to null.\n- If is_deal is true: deal_brand, deal_type, deal_name are required. deal_value/deal_currency only if mentioned.\n- main_contact: Primary external person (name, email, phone_number, title, company_name). Null if none identified.\n- ai_summary (REQUIRED, max 1000 chars): Context memo for the next AI. Include participants, proposal, status, terms, dates.\n- ai_insight: One-line summary of the deal or why it's not a deal.\n\n{{CLASSIFICATION_INSTRUCTIONS}}\n\n{{THREAD_DATA}}\n";
 
-const STRUCTURAL_TEMPLATE = `You are a deal classification engine. You MUST respond with valid JSON matching this exact schema:
-
-{
-  "threads": [
-    {
-      "thread_id": "<thread_id>",
-      "is_deal": boolean,
-      "ai_score": number (1-10),
-      "category": "new" | "in_progress" | "completed" | "likely_scam" | "low_confidence",
-      "deal_name": string | null,
-      "deal_type": string | null,
-      "deal_value": string | null,
-      "currency": string | null,
-      "main_contact": { "name": string, "email": string, "company": string | null, "title": string | null } | null,
-      "ai_summary": string,
-      "language": string (ISO 639-1)
-    }
-  ]
-}
-
-Rules:
-- Respond ONLY with the JSON object. No markdown, no explanation.
-- One entry per thread_id in the input.
-- If is_deal is false, set deal_name/deal_type/deal_value/main_contact to null.
-- ai_summary must be a concise summary of the thread's deal relevance (max 500 chars).
-
-{{CLASSIFICATION_INSTRUCTIONS}}`;
+var classificationInstructions = "# Classification Instructions\n\nClassify email threads for an influencer/creator. If a thread might be a brand deal but you're unsure, classify as a deal with category \"low_confidence\". Missing a real brand deal is worse than a false positive the user can dismiss.\n\n## What is a Deal?\n\nA deal is when a brand, company, or agency wants to work with the creator for their audience, content, or influence. This includes:\n\n- Sponsorships and brand collaborations\n- Paid campaigns and content partnerships\n- Product seeding/gifting arrangements\n- Affiliate offers and ambassador programs\n- Event appearance or speaking engagement offers\n- Paid placements and licensing agreements\n\nEven if declined, completed, or suspicious — classify as a deal. Use category to capture status.\n\n## What is NOT a Deal?\n\n- Investor/fundraising conversations\n- Legal or accounting services\n- Internal team discussions\n- Automated notifications (GMass, newsletters, platform alerts)\n- User surveys or feedback requests\n- SaaS vendor pitches (unless proposing a sponsorship)\n- Personal correspondence\n- Calendar-only threads with no business context\n- Shipping/tracking/order confirmations\n- Social media notifications or follower alerts\n\n## Scoring Guide (ai_score 1-10)\n\nPriority for the creator's attention:\n- 9-10: Urgent response needed today\n- 7-8: High-value, action needed soon\n- 5-6: Active but no deadline\n- 3-4: Low priority\n- 1-2: No action needed\n\n## Category Definitions\n\n- **new**: First contact, deal not yet discussed in depth\n- **in_progress**: Active negotiation, terms being discussed\n- **completed**: Deal closed, agreement reached or signed\n- **not_interested**: Creator declined or not pursuing\n- **likely_scam**: Suspicious patterns, too-good-to-be-true offers\n- **low_confidence**: Ambiguous, cannot determine with confidence\n\n## Deal Type Values\n\nWhen `is_deal` is true, use one of:\n- `brand_collaboration`\n- `sponsorship`\n- `affiliate`\n- `product_seeding`\n- `ambassador`\n- `content_partnership`\n- `paid_placement`\n- `other_business`\n\n## AI Summary Guidelines\n\nThe `ai_summary` field (max 1000 chars) is a context memo for the next AI evaluating this thread. Include:\n- Participants (names, emails, roles)\n- What was proposed\n- Current status\n- Any terms/compensation mentioned\n- Key dates or deadlines\n\nThis is the ONLY context available when new emails arrive later — make it count.\n\n## Incremental Mode\n\nWhen `isIncremental: true`, you receive a previous AI summary plus only new emails since the last evaluation. The summary is prior context — but new emails may change the classification. Re-evaluate fully.\n\n## Language Detection\n\nIf the primary language of the email thread is not English, set language to the ISO 639-1 code. Non-English threads can still be deals if the context is clearly understandable.\n";
 
 function groupByThread(emails) {
   const threads = {};
@@ -27897,7 +27871,7 @@ function groupByThread(emails) {
   return threads
 }
 
-function buildPrompt(emails) {
+function buildThreadData(emails) {
   const threads = groupByThread(emails);
   let threadData = '';
 
@@ -27906,10 +27880,10 @@ function buildPrompt(emails) {
       threadEmails[0].previousAiSummary != null && threadEmails[0].previousAiSummary !== '';
 
     if (isIncremental) {
-      threadData += `--- Thread: ${threadId} (isIncremental: true) ---\n`;
+      threadData += `--- Thread: ${threadId} (INCREMENTAL) ---\n`;
       threadData += `Previous AI Summary: ${threadEmails[0].previousAiSummary}\n\n`;
     } else {
-      threadData += `--- Thread: ${threadId} (isIncremental: false) ---\n`;
+      threadData += `--- Thread: ${threadId} (FULL_THREAD) ---\n`;
     }
 
     threadEmails.forEach((email, i) => {
@@ -27922,12 +27896,18 @@ function buildPrompt(emails) {
     });
   }
 
-  const systemPrompt = STRUCTURAL_TEMPLATE.replace(
-    '{{CLASSIFICATION_INSTRUCTIONS}}',
-    classificationInstructions,
-  );
+  return threadData.trim()
+}
 
-  return { systemPrompt, userPrompt: threadData.trim() }
+function buildPrompt(emails) {
+  const threadData = buildThreadData(emails);
+
+  const systemPrompt = systemTemplate
+    .replace('{{CLASSIFICATION_INSTRUCTIONS}}', classificationInstructions)
+    .replace('{{THREAD_DATA}}', '')
+    .trim();
+
+  return { systemPrompt, userPrompt: threadData }
 }
 
 /**
