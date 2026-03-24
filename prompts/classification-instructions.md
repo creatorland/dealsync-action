@@ -15,18 +15,7 @@ A deal is when a brand, company, or agency wants to work with the creator for th
 
 Even if declined, completed, or suspicious — classify as a deal. Use category to capture status.
 
-## What is NOT a Deal?
-
-- Investor/fundraising conversations
-- Legal or accounting services
-- Internal team discussions
-- Automated notifications (GMass, newsletters, platform alerts)
-- User surveys or feedback requests
-- SaaS vendor pitches (unless proposing a sponsorship)
-- Personal correspondence
-- Calendar-only threads with no business context
-- Shipping/tracking/order confirmations
-- Social media notifications or follower alerts
+When in doubt, lean toward classifying as a deal. The creator can dismiss a false positive, but a missed deal opportunity cannot be recovered. Only classify as `is_deal: false` when you are confident there is no brand/business opportunity in the thread (e.g., purely automated notifications, personal conversations, or internal team discussions).
 
 ## Scoring Guide (ai_score 1-10)
 
