@@ -38052,10 +38052,24 @@ async function runEval() {
   }
 
   // Filter out entries with empty bodies — AI can't classify without content
-  const usableEntries = groundTruth.filter((gt) =>
+  const withBody = groundTruth.filter((gt) =>
     gt.emails.some((e) => e.body && e.body.trim() !== ''),
   );
-  console.log(`[eval] model=${model} runs=${numRuns} threads=${usableEntries.length} batch_size=${batchSize} concurrency=${concurrency} prompt=${promptHash || 'bundled'} (${groundTruth.length - usableEntries.length} skipped: empty body)`);
+
+  // Apply static filter rules (same as production pipeline)
+  const filtered = [];
+  const passedFilter = [];
+  for (const gt of withBody) {
+    if (isRejected(gt.emails[0])) {
+      filtered.push(gt);
+    } else {
+      passedFilter.push(gt);
+    }
+  }
+
+  const usableEntries = passedFilter;
+  console.log(`[eval] model=${model} runs=${numRuns} threads=${usableEntries.length} batch_size=${batchSize} concurrency=${concurrency} prompt=${promptHash || 'bundled'}`);
+  console.log(`[eval] ground truth: ${groundTruth.length} total, ${groundTruth.length - withBody.length} empty body, ${filtered.length} static-filtered, ${usableEntries.length} to AI`);
 
   const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey };
   const allRuns = [];
