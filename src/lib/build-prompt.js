@@ -1,4 +1,5 @@
 import { getHeader } from './email-utils.js'
+import { sanitizeEmailBody } from './email-sanitizer.js'
 import systemTemplate from '../../prompts/system.md'
 import classificationInstructions from '../../prompts/user.md'
 
@@ -34,7 +35,8 @@ function buildThreadData(emails) {
       section += `From: ${from}\n`
       section += `Date: ${date}\n`
       section += `Subject: ${subject}\n\n`
-      const body = email.body || email.replyBody || '[no body]'
+      const rawBody = email.body || email.replyBody || ''
+      const body = sanitizeEmailBody(rawBody) || '[no body]'
       section += `${body}\n\n`
     })
 

@@ -88,32 +88,44 @@ export async function runFetchAndClassify() {
   const messageIds = metadataRows.map((r) => r.MESSAGE_ID)
 
   const MAX_PER_CHUNK = 10
+  const CONTENT_FETCH_MAX_RETRIES = 3
   const allEmails = []
   for (let i = 0; i < messageIds.length; i += MAX_PER_CHUNK) {
     const chunk = messageIds.slice(i, i + MAX_PER_CHUNK)
-    try {
-      const { signal, clear } = withTimeout()
-      const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, ...(syncStateId ? { syncStateId } : {}), messageIds: chunk }),
-        signal,
-      })
-      clear()
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      const result = await resp.json()
-      const emails = result.data || result
-      for (const email of emails) {
-        const meta = metadataRows.find((r) => r.MESSAGE_ID === email.messageId)
-        if (meta) {
-          email.id = meta.EMAIL_METADATA_ID
-          email.threadId = meta.THREAD_ID
-          if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY
+    let fetched = false
+    for (let attempt = 0; attempt < CONTENT_FETCH_MAX_RETRIES && !fetched; attempt++) {
+      try {
+        const { signal, clear } = withTimeout()
+        const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId, ...(syncStateId ? { syncStateId } : {}), messageIds: chunk }),
+          signal,
+        })
+        clear()
+        if (resp.status === 429) {
+          const body = await resp.json().catch(() => ({}))
+          const retryAfter = body.retryAfterMs || parseInt(body.message?.match(/\d+/)?.[0] || '30', 10) * 1000
+          console.log(`[classify] content fetch 429, waiting ${retryAfter}ms (attempt ${attempt + 1}/${CONTENT_FETCH_MAX_RETRIES})`)
+          await new Promise((r) => setTimeout(r, retryAfter))
+          continue
         }
-        allEmails.push(email)
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+        const result = await resp.json()
+        const emails = result.data || result
+        for (const email of emails) {
+          const meta = metadataRows.find((r) => r.MESSAGE_ID === email.messageId)
+          if (meta) {
+            email.id = meta.EMAIL_METADATA_ID
+            email.threadId = meta.THREAD_ID
+            if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY
+          }
+          allEmails.push(email)
+        }
+        fetched = true
+      } catch (err) {
+        console.log(`[classify] content fetch failed: ${err.message}`)
       }
-    } catch (err) {
-      console.log(`[classify] content fetch failed: ${err.message}`)
     }
   }
 

@@ -11,7 +11,9 @@
     "all": "npm run format:write && npm run test && npm run package"
   },
   "dependencies": {
-    "@actions/core": "^1.11.1"
+    "@actions/core": "^1.11.1",
+    "email-reply-parser": "^2.3.5",
+    "html-to-text": "^9.0.5"
   },
   "devDependencies": {
     "@rollup/plugin-commonjs": "^28.0.0",
