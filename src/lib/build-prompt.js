@@ -1,6 +1,6 @@
 import { getHeader } from './email-utils.js'
-import systemTemplate from '../../prompts/system-template.md'
-import classificationInstructions from '../../prompts/classification-instructions.md'
+import systemTemplate from '../../prompts/system-prompt.md'
+import classificationInstructions from '../../prompts/user-prompt.md'
 
 function groupByThread(emails) {
   const threads = {}
