@@ -36904,7 +36904,7 @@ var groundTruth = [
 			}
 		],
 		expected: {
-			is_deal: false,
+			is_deal: true,
 			category: "likely_scam",
 			likely_scam: true,
 			score_range: [
@@ -36942,7 +36942,7 @@ var groundTruth = [
 			}
 		],
 		expected: {
-			is_deal: false,
+			is_deal: true,
 			category: "likely_scam",
 			likely_scam: true,
 			score_range: [
@@ -36980,7 +36980,7 @@ var groundTruth = [
 			}
 		],
 		expected: {
-			is_deal: false,
+			is_deal: true,
 			category: "likely_scam",
 			likely_scam: true,
 			score_range: [
@@ -37056,7 +37056,7 @@ var groundTruth = [
 			}
 		],
 		expected: {
-			is_deal: false,
+			is_deal: true,
 			category: "likely_scam",
 			likely_scam: true,
 			score_range: [
@@ -37094,7 +37094,7 @@ var groundTruth = [
 			}
 		],
 		expected: {
-			is_deal: false,
+			is_deal: true,
 			category: "likely_scam",
 			likely_scam: true,
 			score_range: [
