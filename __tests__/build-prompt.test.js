@@ -47,8 +47,8 @@ describe('buildPrompt', () => {
 
     expect(systemPrompt).toContain('Classification Instructions')
     expect(systemPrompt).toContain('brand deal email classifier')
-    expect(userPrompt).toContain('(FULL_THREAD)')
-    expect(userPrompt).not.toContain('(INCREMENTAL)')
+    expect(userPrompt).toContain('--- Thread: thread-1 ---')
+    expect(userPrompt).not.toContain('Previous AI Summary')
     expect(userPrompt).toContain('Email 1:')
     expect(userPrompt).toContain('From: alice@example.com')
     expect(userPrompt).toContain('Subject: Partnership Opportunity')
@@ -60,7 +60,7 @@ describe('buildPrompt', () => {
     const emails = [makeEmail({ previousAiSummary: 'Previous deal discussion about sponsorship.' })]
     const { userPrompt } = buildPrompt(emails)
 
-    expect(userPrompt).toContain('(INCREMENTAL)')
+    expect(userPrompt).toContain('---')
     expect(userPrompt).toContain('Previous AI Summary: Previous deal discussion about sponsorship.')
   })
 
@@ -76,8 +76,8 @@ describe('buildPrompt', () => {
     ]
     const { userPrompt } = buildPrompt(emails)
 
-    expect(userPrompt).toContain('--- Thread: thread-a (FULL_THREAD)')
-    expect(userPrompt).toContain('--- Thread: thread-b (INCREMENTAL)')
+    expect(userPrompt).toContain('--- Thread: thread-a ---')
+    expect(userPrompt).toContain('--- Thread: thread-b ---')
     expect(userPrompt).toContain('Previous AI Summary: Existing summary.')
   })
 

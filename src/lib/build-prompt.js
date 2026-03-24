@@ -17,14 +17,10 @@ function buildThreadData(emails) {
   let threadData = ''
 
   for (const [threadId, threadEmails] of Object.entries(threads)) {
-    const isIncremental =
-      threadEmails[0].previousAiSummary != null && threadEmails[0].previousAiSummary !== ''
-
-    if (isIncremental) {
-      threadData += `--- Thread: ${threadId} (INCREMENTAL) ---\n`
-      threadData += `Previous AI Summary: ${threadEmails[0].previousAiSummary}\n\n`
-    } else {
-      threadData += `--- Thread: ${threadId} (FULL_THREAD) ---\n`
+    threadData += `--- Thread: ${threadId} ---\n`
+    const previousSummary = threadEmails[0].previousAiSummary
+    if (previousSummary != null && previousSummary !== '') {
+      threadData += `Previous AI Summary: ${previousSummary}\n\n`
     }
 
     threadEmails.forEach((email, i) => {

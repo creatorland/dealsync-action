@@ -69,9 +69,9 @@ The `ai_summary` field (max 1000 chars) is a context memo for the next AI evalua
 
 This is the ONLY context available when new emails arrive later — make it count.
 
-## Incremental Mode
+## Previous AI Summary
 
-When `isIncremental: true`, you receive a previous AI summary plus only new emails since the last evaluation. The summary is prior context — but new emails may change the classification. Re-evaluate fully.
+When a "Previous AI Summary" is provided for a thread, it means this thread was evaluated before and new emails have arrived. The summary is prior context — but new emails may change the classification. Re-evaluate the thread fully considering the new information.
 
 ## Language Detection
 
