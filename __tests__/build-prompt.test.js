@@ -8,11 +8,11 @@ jest.unstable_mockModule('@actions/core', () => ({
   error: jest.fn(),
 }))
 
-jest.unstable_mockModule('../prompts/system-template.md', () => ({
+jest.unstable_mockModule('../prompts/system-prompt.md', () => ({
   default: 'You are an email classifier for influencer inboxes. Return JSON only.',
 }))
 
-jest.unstable_mockModule('../prompts/classification-instructions.md', () => ({
+jest.unstable_mockModule('../prompts/user-prompt.md', () => ({
   default:
     'Classify each thread.\n\n{{CLASSIFICATION_INSTRUCTIONS}}\n\n# Threads to Classify\n\n{{THREAD_DATA}}',
 }))
