@@ -9,6 +9,8 @@ import { runSaveDeals } from './commands/save-deals.js'
 import { runSaveEvals } from './commands/save-evals.js'
 import { runSxtQuery } from './commands/sxt-execute.js'
 import { runUpdateDealStates } from './commands/update-deal-states.js'
+import { runEval } from './commands/eval.js'
+import { runEvalCompare } from './commands/eval-compare.js'
 
 const COMMANDS = {
   dispatch: runDispatch,
@@ -21,6 +23,8 @@ const COMMANDS = {
   'update-deal-states': runUpdateDealStates,
   'sync-deal-states': runSyncDealStates,
   'dispatch-deal-state-sync': runDispatchDealStateSync,
+  'eval': runEval,
+  'eval-compare': runEvalCompare,
 }
 
 export async function run() {

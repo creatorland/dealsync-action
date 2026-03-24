@@ -34586,6 +34586,139 @@ const VALID_DEAL_TYPES = new Set([
 ]);
 
 /**
+ * Call a model with HTTP retries + exponential backoff.
+ * Returns { content, usage } or throws on total failure.
+ *
+ * @param {string} model - Model ID
+ * @param {Array} messages - Chat messages
+ * @param {Object} opts - { temperature, apiUrl, apiKey }
+ */
+async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= MAX_HTTP_RETRIES; attempt++) {
+    try {
+      console.log(`[ai-client] ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES})`);
+      const resp = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens: MAX_TOKENS,
+          response_format: { type: 'json_object' },
+        }),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+      });
+
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 200)}`);
+        console.log(`[ai-client] ${model} HTTP ${resp.status}: ${errBody.substring(0, 200)}`);
+        if (attempt < MAX_HTTP_RETRIES) {
+          const delay = AI_RETRY_DELAY_MS * Math.pow(AI_BACKOFF_MULTIPLIER, attempt - 1);
+          await new Promise((r) => setTimeout(r, delay));
+          continue
+        }
+        throw lastError
+      }
+
+      const result = await resp.json();
+      const content = result.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Empty response from model')
+
+      const usage = result.usage || {};
+      return { content, usage }
+    } catch (err) {
+      lastError = err;
+      if (attempt < MAX_HTTP_RETRIES) {
+        const delay = AI_RETRY_DELAY_MS * Math.pow(AI_BACKOFF_MULTIPLIER, attempt - 1);
+        console.log(`[ai-client] ${model} attempt ${attempt} failed: ${err.message}, retrying in ${delay}ms`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES} attempts`)
+}
+
+/**
+ * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
+ * Returns validated array or throws with parse error details.
+ */
+function parseAndValidate(raw) {
+  let content = raw.trim();
+
+  // Strip markdown fences
+  content = content.replace(/^```(?:json)?\s*\n?/gi, '').replace(/\n?```\s*$/gi, '').trim();
+
+  // Try to find JSON array in mixed output
+  if (!content.startsWith('[')) {
+    const arrayStart = content.indexOf('[');
+    const arrayEnd = content.lastIndexOf(']');
+    if (arrayStart !== -1 && arrayEnd > arrayStart) {
+      content = content.slice(arrayStart, arrayEnd + 1);
+    }
+  }
+
+  // Parse
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    // Try to extract from wrapper object like {"results": [...]}
+    const objStart = content.indexOf('{');
+    const objEnd = content.lastIndexOf('}');
+    if (objStart !== -1 && objEnd > objStart) {
+      const obj = JSON.parse(content.slice(objStart, objEnd + 1));
+      const arrays = Object.values(obj).filter(Array.isArray);
+      if (arrays.length === 1) {
+        parsed = arrays[0];
+      } else {
+        throw new Error('Cannot extract JSON array from response')
+      }
+    } else {
+      throw new Error('No valid JSON found in response')
+    }
+  }
+
+  // Unwrap if object with single array property
+  if (!Array.isArray(parsed)) {
+    const arrays = Object.values(parsed).filter(Array.isArray);
+    if (arrays.length === 1) {
+      parsed = arrays[0];
+    } else {
+      throw new Error('Response is not a JSON array')
+    }
+  }
+
+  // Schema validation and coercion
+  return parsed.map((r) => ({
+    thread_id: String(r.thread_id || ''),
+    is_deal: Boolean(r.is_deal),
+    is_english: r.is_english !== false,
+    language: r.language || null,
+    ai_score: Math.min(10, Math.max(1, Math.round(Number(r.ai_score) || 5))),
+    category: r.is_deal
+      ? (VALID_CATEGORIES.has(r.category) ? r.category : 'low_confidence')
+      : null,
+    likely_scam: Boolean(r.likely_scam) || r.category === 'likely_scam',
+    ai_insight: String(r.ai_insight || ''),
+    ai_summary: String(r.ai_summary || '').slice(0, 1000),
+    main_contact: r.is_deal ? (r.main_contact || null) : null,
+    deal_brand: r.is_deal ? (r.deal_brand || null) : null,
+    deal_type: r.is_deal
+      ? (VALID_DEAL_TYPES.has(r.deal_type) ? r.deal_type : 'other_business')
+      : null,
+    deal_name: r.is_deal ? (r.deal_name || null) : null,
+    deal_value: r.deal_value != null ? Number(r.deal_value) : null,
+    deal_currency: r.deal_currency || null,
+  }))
+}
+
+/**
  * Step 1: Fetch content + call AI + save audit checkpoint.
  *
  * Resilience pipeline:
@@ -34695,135 +34828,10 @@ async function runFetchAndClassify() {
   const { systemPrompt, userPrompt } = buildPrompt(allEmails);
 
   // =========================================================================
-  //  AI RESILIENCE PIPELINE
+  //  AI RESILIENCE PIPELINE (callModel + parseAndValidate from ai-client.js)
   // =========================================================================
 
-  /**
-   * Call a model with HTTP retries + exponential backoff.
-   * Returns raw content string or throws on total failure.
-   */
-  async function callModel(model, messages, { temperature = 0 } = {}) {
-    let lastError;
-    for (let attempt = 1; attempt <= MAX_HTTP_RETRIES; attempt++) {
-      try {
-        console.log(`[classify] AI: ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES})`);
-        const resp = await fetch(aiApiUrl, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${hyperbolicKey}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            model,
-            messages,
-            temperature,
-            max_tokens: MAX_TOKENS,
-            response_format: { type: 'json_object' },
-          }),
-          signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
-        });
-
-        if (!resp.ok) {
-          const errBody = await resp.text().catch(() => '');
-          lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 200)}`);
-          console.log(`[classify] AI ${model} HTTP ${resp.status}: ${errBody.substring(0, 200)}`);
-          if (attempt < MAX_HTTP_RETRIES) {
-            const delay = AI_RETRY_DELAY_MS * Math.pow(AI_BACKOFF_MULTIPLIER, attempt - 1);
-            await new Promise((r) => setTimeout(r, delay));
-            continue
-          }
-          throw lastError
-        }
-
-        const result = await resp.json();
-        const content = result.choices?.[0]?.message?.content;
-        if (!content) throw new Error('Empty response from model')
-        return content
-      } catch (err) {
-        lastError = err;
-        if (attempt < MAX_HTTP_RETRIES) {
-          const delay = AI_RETRY_DELAY_MS * Math.pow(AI_BACKOFF_MULTIPLIER, attempt - 1);
-          console.log(`[classify] AI ${model} attempt ${attempt} failed: ${err.message}, retrying in ${delay}ms`);
-          await new Promise((r) => setTimeout(r, delay));
-        }
-      }
-    }
-    throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES} attempts`)
-  }
-
-  /**
-   * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
-   * Returns validated array or throws with parse error details.
-   */
-  function parseAndValidate(raw) {
-    let content = raw.trim();
-
-    // Strip markdown fences
-    content = content.replace(/^```(?:json)?\s*\n?/gi, '').replace(/\n?```\s*$/gi, '').trim();
-
-    // Try to find JSON array in mixed output
-    if (!content.startsWith('[')) {
-      const arrayStart = content.indexOf('[');
-      const arrayEnd = content.lastIndexOf(']');
-      if (arrayStart !== -1 && arrayEnd > arrayStart) {
-        content = content.slice(arrayStart, arrayEnd + 1);
-      }
-    }
-
-    // Parse
-    let parsed;
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      // Try to extract from wrapper object like {"results": [...]}
-      const objStart = content.indexOf('{');
-      const objEnd = content.lastIndexOf('}');
-      if (objStart !== -1 && objEnd > objStart) {
-        const obj = JSON.parse(content.slice(objStart, objEnd + 1));
-        const arrays = Object.values(obj).filter(Array.isArray);
-        if (arrays.length === 1) {
-          parsed = arrays[0];
-        } else {
-          throw new Error('Cannot extract JSON array from response')
-        }
-      } else {
-        throw new Error('No valid JSON found in response')
-      }
-    }
-
-    // Unwrap if object with single array property
-    if (!Array.isArray(parsed)) {
-      const arrays = Object.values(parsed).filter(Array.isArray);
-      if (arrays.length === 1) {
-        parsed = arrays[0];
-      } else {
-        throw new Error('Response is not a JSON array')
-      }
-    }
-
-    // Schema validation and coercion
-    return parsed.map((r) => ({
-      thread_id: String(r.thread_id || ''),
-      is_deal: Boolean(r.is_deal),
-      is_english: r.is_english !== false,
-      language: r.language || null,
-      ai_score: Math.min(10, Math.max(1, Math.round(Number(r.ai_score) || 5))),
-      category: r.is_deal
-        ? (VALID_CATEGORIES.has(r.category) ? r.category : 'low_confidence')
-        : null,
-      likely_scam: Boolean(r.likely_scam) || r.category === 'likely_scam',
-      ai_insight: String(r.ai_insight || ''),
-      ai_summary: String(r.ai_summary || '').slice(0, 1000),
-      main_contact: r.is_deal ? (r.main_contact || null) : null,
-      deal_brand: r.is_deal ? (r.deal_brand || null) : null,
-      deal_type: r.is_deal
-        ? (VALID_DEAL_TYPES.has(r.deal_type) ? r.deal_type : 'other_business')
-        : null,
-      deal_name: r.is_deal ? (r.deal_name || null) : null,
-      deal_value: r.deal_value != null ? Number(r.deal_value) : null,
-      deal_currency: r.deal_currency || null,
-    }))
-  }
+  const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey };
 
   const classifyMessages = [
     { role: 'system', content: systemPrompt },
@@ -34836,7 +34844,8 @@ async function runFetchAndClassify() {
   // --- Layer 0: Primary model call ---
   let primaryRaw;
   try {
-    primaryRaw = await callModel(primaryModel, classifyMessages, { temperature: 0 });
+    const result = await callModel(primaryModel, classifyMessages, { temperature: 0, ...aiOpts });
+    primaryRaw = result.content;
   } catch (primaryApiError) {
     console.log(`[classify] Primary model API failed: ${primaryApiError.message}`);
     primaryRaw = null;
@@ -34861,7 +34870,8 @@ async function runFetchAndClassify() {
             content: `Your previous classification response could not be parsed as valid JSON.\n\nParse error:\n${parseError.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting issue. Do not change any classification decisions. Return ONLY the JSON array with no other text.`,
           },
         ];
-        const correctedRaw = await callModel(primaryModel, correctiveMessages, { temperature: 0 });
+        const corrected = await callModel(primaryModel, correctiveMessages, { temperature: 0, ...aiOpts });
+        const correctedRaw = corrected.content;
         threads = parseAndValidate(correctedRaw);
         modelUsed = `${primaryModel}(corrective-retry)`;
         console.log(`[classify] Corrective retry succeeded: ${threads.length} threads`);
@@ -34876,7 +34886,8 @@ async function runFetchAndClassify() {
     console.log(`[classify] Falling back to ${fallbackModel}`);
     modelUsed = fallbackModel;
     try {
-      const fallbackRaw = await callModel(fallbackModel, classifyMessages, { temperature: 0.6 });
+      const fallbackResult = await callModel(fallbackModel, classifyMessages, { temperature: 0.6, ...aiOpts });
+      const fallbackRaw = fallbackResult.content;
       threads = parseAndValidate(fallbackRaw);
       console.log(`[classify] Fallback model succeeded: ${threads.length} threads`);
     } catch (fallbackError) {
@@ -35492,6 +35503,2724 @@ async function runUpdateDealStates() {
   return { deal: dealCount, not_deal: notDealCount }
 }
 
+/**
+ * Compute { mean, min, max, stddev } from an array of numbers.
+ */
+function aggregateStats(values) {
+  if (values.length === 0) return { mean: 0, min: 0, max: 0, stddev: 0 }
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const stddev = Math.sqrt(values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length);
+  return { mean: +mean.toFixed(4), min: +min.toFixed(4), max: +max.toFixed(4), stddev: +stddev.toFixed(4) }
+}
+
+/**
+ * Compute detection metrics (recall, precision, F2) across N runs.
+ * Each run is an array of classification results from the AI.
+ * Ground truth is the array from ground-truth.json.
+ */
+function computeDetectionMetrics(allRuns, groundTruth) {
+  const recallPerRun = [];
+  const precisionPerRun = [];
+  const f2PerRun = [];
+
+  for (const run of allRuns) {
+    const resultMap = new Map(run.map((r) => [r.thread_id, r]));
+    let tp = 0, fp = 0, fn = 0;
+
+    for (const gt of groundTruth) {
+      const result = resultMap.get(gt.id);
+      if (!result) {
+        if (gt.expected.is_deal) fn++;
+        continue
+      }
+      if (gt.expected.is_deal && result.is_deal) tp++;
+      else if (!gt.expected.is_deal && result.is_deal) fp++;
+      else if (gt.expected.is_deal && !result.is_deal) fn++;
+    }
+
+    const recall = tp + fn > 0 ? tp / (tp + fn) : 1;
+    const precision = tp + fp > 0 ? tp / (tp + fp) : 1;
+    const f2 = precision + recall > 0
+      ? (5 * precision * recall) / (4 * precision + recall)
+      : 0;
+
+    recallPerRun.push(recall);
+    precisionPerRun.push(precision);
+    f2PerRun.push(f2);
+  }
+
+  return {
+    recall: aggregateStats(recallPerRun),
+    precision: aggregateStats(precisionPerRun),
+    f2: aggregateStats(f2PerRun),
+  }
+}
+
+/**
+ * For deal threads correctly detected, was category correct?
+ */
+function computeCategoryAccuracy(allRuns, groundTruth) {
+  const accuracyPerRun = [];
+  const dealThreads = groundTruth.filter((gt) => gt.expected.is_deal && gt.expected.category);
+
+  for (const run of allRuns) {
+    const resultMap = new Map(run.map((r) => [r.thread_id, r]));
+    let correct = 0;
+    let total = 0;
+
+    for (const gt of dealThreads) {
+      const result = resultMap.get(gt.id);
+      if (!result || !result.is_deal) continue
+      total++;
+      if (result.category === gt.expected.category) correct++;
+    }
+
+    accuracyPerRun.push(total > 0 ? correct / total : 1);
+  }
+
+  return { accuracy: aggregateStats(accuracyPerRun) }
+}
+
+/**
+ * For each thread, was ai_score within expected score_range?
+ */
+function computeScoreInRange(allRuns, groundTruth) {
+  const ratePerRun = [];
+
+  for (const run of allRuns) {
+    const resultMap = new Map(run.map((r) => [r.thread_id, r]));
+    let inRange = 0;
+    let total = 0;
+
+    for (const gt of groundTruth) {
+      if (!gt.expected.score_range) continue
+      const result = resultMap.get(gt.id);
+      if (!result) continue
+      total++;
+      const [lo, hi] = gt.expected.score_range;
+      if (result.ai_score >= lo && result.ai_score <= hi) inRange++;
+    }
+
+    ratePerRun.push(total > 0 ? inRange / total : 1);
+  }
+
+  return { in_range_rate: aggregateStats(ratePerRun) }
+}
+
+/**
+ * For threads where expected.likely_scam = true, did AI flag likely_scam?
+ */
+function computeScamDetection(allRuns, groundTruth) {
+  const scamThreads = groundTruth.filter((gt) => gt.expected.likely_scam);
+  const accuracyPerRun = [];
+
+  for (const run of allRuns) {
+    const resultMap = new Map(run.map((r) => [r.thread_id, r]));
+    let caught = 0;
+
+    for (const gt of scamThreads) {
+      const result = resultMap.get(gt.id);
+      if (result && result.likely_scam) caught++;
+    }
+
+    accuracyPerRun.push(scamThreads.length > 0 ? caught / scamThreads.length : 1);
+  }
+
+  return {
+    accuracy: aggregateStats(accuracyPerRun),
+    total_scam_threads: scamThreads.length,
+  }
+}
+
+/**
+ * Per-thread breakdown: how many runs got each metric right.
+ */
+function computePerThread(allRuns, groundTruth) {
+  return groundTruth.map((gt) => {
+    let detectionCorrect = 0;
+    let categoryCorrect = 0;
+    let scoreInRange = 0;
+    let scamCorrect = 0;
+
+    for (const run of allRuns) {
+      const result = run.find((r) => r.thread_id === gt.id);
+      if (!result) continue
+
+      // Detection
+      if (result.is_deal === gt.expected.is_deal) detectionCorrect++;
+
+      // Category (only for deals)
+      if (gt.expected.is_deal && result.is_deal && gt.expected.category) {
+        if (result.category === gt.expected.category) categoryCorrect++;
+      }
+
+      // Score range
+      if (gt.expected.score_range) {
+        const [lo, hi] = gt.expected.score_range;
+        if (result.ai_score >= lo && result.ai_score <= hi) scoreInRange++;
+      }
+
+      // Scam
+      if (result.likely_scam === gt.expected.likely_scam) scamCorrect++;
+    }
+
+    return {
+      id: gt.id,
+      description: gt.description,
+      expected: gt.expected,
+      detection_correct: detectionCorrect,
+      category_correct: categoryCorrect,
+      score_in_range: scoreInRange,
+      scam_correct: scamCorrect,
+      total_runs: allRuns.length,
+    }
+  })
+}
+
+/**
+ * Compute JSON health metrics across runs.
+ * Each run tracks: clean_parse, repaired, corrective_retry, failed
+ */
+function computeJsonHealth(jsonHealthPerRun) {
+  const cleanRates = [];
+  const repairedRates = [];
+  const correctiveRates = [];
+  let totalFailures = 0;
+
+  for (const run of jsonHealthPerRun) {
+    cleanRates.push(run.clean ? 1 : 0);
+    repairedRates.push(run.repaired ? 1 : 0);
+    correctiveRates.push(run.corrective_retry ? 1 : 0);
+    if (run.failed) totalFailures++;
+  }
+
+  return {
+    clean_parse_rate: aggregateStats(cleanRates),
+    repaired_rate: aggregateStats(repairedRates),
+    corrective_retry_rate: aggregateStats(correctiveRates),
+    total_failures: totalFailures,
+  }
+}
+
+var groundTruth = [
+	{
+		id: "gt-001",
+		description: "Contract signed, all deliverables confirmed completed, payment processed....",
+		emails: [
+			{
+				messageId: "gt-001-msg-1",
+				threadId: "gt-001",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "brand@fashioncompany.com"
+					},
+					{
+						name: "to",
+						value: "creator@example.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Summer Collection Campaign - Contract Signed"
+					},
+					{
+						name: "date",
+						value: "Fri, 01 Mar 2026 09:15:00 \\+0000"
+					}
+				],
+				body: "Great news! We have finalized and signed the contract for the Summer Collection campaign. Your deliverables include:\n\n- 3 TikTok videos (completed and approved)\n\n- 5 Instagram Reels (completed and approved)\n\n- 1 long-form YouTube video (completed and approved)\n\nPayment of $5,000 has been processed to your account via PayPal. Final analytics show 2.3M views across all platforms with a 4.7% engagement rate.\n\nThank you for the amazing work! The content performed well above our benchmarks. Looking forward to future collaborations for our Fall line.\n\nBest regards,\n\nJamie Chen\n\nMarketing Director\n\nFashion Company"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "completed",
+			likely_scam: false,
+			score_range: [
+				9,
+				10
+			]
+		}
+	},
+	{
+		id: "gt-002",
+		description: "All deliverables fulfilled, final payment processed, performance metrics...",
+		emails: [
+			{
+				messageId: "gt-002-msg-1",
+				threadId: "gt-002",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "partnerships@techstartup.io"
+					},
+					{
+						name: "to",
+						value: "influencer@creators.com"
+					},
+					{
+						name: "subject",
+						value: "Campaign Complete - Final Report Attached"
+					},
+					{
+						name: "date",
+						value: "Wed, 10 Feb 2026 14:22:00 \\+0000"
+					}
+				],
+				body: "Our Q1 partnership is officially complete. All deliverables have been fulfilled and approved by our marketing team:\n\n1\\. Product review video - published on your YouTube channel (350K views in first week)\n\n2\\. Instagram carousel series - 5 posts published (80K total engagement, 6.2% engagement rate)\n\n3\\. Story takeover - completed March 1st (60K impressions)\n\n4\\. Invoice #INV-2026-0147 paid in full ($3,500 via direct deposit on March 5th)\n\nAttached is the final performance report. Your authentic content really resonated with our audience, especially the unboxing segment which drove 2,400 clicks to our product page.\n\nWe are planning our Q2 campaign calendar now. Would love to discuss a potential ongoing partnership. Are you available for a quick call next week?\n\nBest,\n\nSarah Martinez\n\nPartnership Manager\n\nTech Startup Inc."
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "completed",
+			likely_scam: false,
+			score_range: [
+				9,
+				10
+			]
+		}
+	},
+	{
+		id: "gt-003",
+		description: "Brand outreach for paid TikTok campaign. Creator responded but platform...",
+		emails: [
+			{
+				messageId: "gt-003-msg-1",
+				threadId: "gt-003",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Emma Alexandria <emma.alexandria@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "novemberbellea@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Nifemi Aina 💕 — Paid TikTok Campaign for Dealsync via Creatorland"
+					},
+					{
+						name: "date",
+						value: "Fri, 13 Mar 2026 12:30:29 -0700"
+					}
+				],
+				body: "You’re right to ask: this specific launch is for dedicated YouTube videos\n\n(3–5 minutes) only, so we aren’t accepting TikTok integrations for this\n\ncampaign. I totally understand that YouTube isn’t your focus — we’d love to\n\nkeep you on file for upcoming TikTok-first opportunities that better match\n\nyour content.\n\nIf you’d like to try Dealsync now (skip the waitlist), you can claim a free\n\nmonth here: Dealsync claim 1 month free\n\n<https://dealsync-beta.creatorland.com>. Use code 86C7L2X9A10 at checkout.\n\nThanks again for your interest — I appreciate you getting back to me.\n\nEmma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\nCreatorland.com\n\nOn Fri, Mar 13, 2026 at 12:28 PM novemberbellea@gmail.com wrote:\n\n> Hi Emma,\n\n>\n\n> Thank you for reaching out and for thinking of me for this campaign.\n\n>\n\n> I just wanted to quickly clarify something. The subject line of the email\n\n> mentions a paid TikTok campaign, but the details in the brief refer to a\n\n> dedicated YouTube video. I currently don’t run a YouTube channel and my\n\n> content is focused on short-form platforms, primarily TikTok.\n\n>\n\n>\n\n> Could you confirm whether the campaign is intended for YouTube\n\n> specifically, or if you’re also open to TikTok content?\n\n>\n\n>\n\n> If TikTok is an option, I’d be happy to explore how we could structure the\n\n> collaboration there. My audience engages primarily through short-form\n\n> video, and I typically integrate brand partnerships through native TikTok\n\n> storytelling, demos, or creator-style ad reads that fit naturally into my\n\n> content.\n\n>\n\n> If that aligns with what your team is considering, I’d be glad to share my\n\n> TikTok rates and examples of previous brand collaborations.\n\n>\n\n> Looking forward to your clarification.\n\n>\n\n> Best,\n\n>\n\n> Nifemi\n\n>\n\n>\n\n> On Fri, 13 Mar 2026 at 20:21, Emma Alexandria <\n\n> emma.alexandria@creatorland.com> wrote:\n\n>\n\n>> Hi Nifemi 💕,\n\n>>\n\n>> We’re running a paid+affiliate launch campaign for Dealsync, an\n\n>> AI-powered inbox dashboard for creators who manage brand partnerships.\n\n>> Dealsync automatically detects brand deal emails, organizes conversations\n\n>> by status, surfaces follow-ups, and saves creators 5–10 hours per week.\n\n>>\n\n>> We’re seeking creators for a dedicated YouTube video (3–5 minutes) about\n\n>> Dealsync and why it matters.\n\n>>\n\n>> What you’ll get:\n\n>>\n\n>>    - Paid dedicated YouTube video\n\n>>    - Early access to Dealsync (skip the waitlist)\n\n>>    - 7-day free trial with your real inbox\n\n>>    - Locked-in early pricing (discounted forever)\n\n>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>    - Direct access to the founding team\n\n>>\n\n>> If you’re interested, please share your rate for a dedicated video and\n\n>> any samples of brand deals or ad reads you’ve done.\n\n>>\n\n>> 💜 Emma\n\n>> Creator Partnerships Team, Creatorland\n\n>> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>> Creatorland.com\n\n>>\n\n>> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>> Creatorland.com\n\n>>\n\n>"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-004",
+		description: "Paid TikTok campaign for new creator-focused email product. Creator...",
+		emails: [
+			{
+				messageId: "gt-004-msg-1",
+				threadId: "gt-004",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Tiana <tiana.cameron@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "ashleymeyleiz@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Ashley <> Paid TikTok Campaign for New Creator Focused Email Product"
+					},
+					{
+						name: "date",
+						value: "Wed, 11 Mar 2026 11:33:48 -0400"
+					}
+				],
+				body: "Just following up on my previous emails about a paid, dedicated 3–5 minute\n\nYouTube video to explain Dealsync—the AI-powered inbox for creators\n\nmanaging brand partnerships.\n\nWhat you’ll get:\n\n- Paid dedicated video (3–5 minutes)\n\n- Early access to Dealsync (skip the waitlist)\n\n- 7-day trial with your real inbox\n\n- Locked-in early pricing (discounted forever)\n\n- Optional 15% recurring affiliate commission (12 months)\n\n- Direct access to the founding team\n\nIf you’re open to it, what are your typical rates for a dedicated video? I\n\ncan share a brief or sample outcomes to help you decide.\n\nDealsync overview: https://dealsync.creatorland.com\n\nThanks for considering, and I’m happy to answer any questions.\n\nBest,\n\nTiana\n\nReply-To: all\n\nTiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\nCreatorland.com\n\nOn Tue, Mar 10, 2026 at 7:00 PM tiana.cameron@creatorland.com wrote:\n\n> Hi Ashley,\n\n>\n\n> Thanks for letting me know — I appreciate you getting back to me. If you’d\n\n> like to try Dealsync in the future, feel free to skip the waitlist and\n\n> claim 1 month free here: Dealsync claim 1 month free\n\n> <https://dealsync-beta.creatorland.com>. Use promo code 86C7L2X9A10 at\n\n> checkout.\n\n>\n\n> If you ever want to revisit collaborations down the road, we’d love to\n\n> connect. Appreciate your time!\n\n>\n\n> Tiana C - tiana.cameron@creatorland.com Creator Partnerships @\n\n> Creatorland.com\n\n>\n\n> On Tue, Mar 10, 2026 at 6:59 PM ashleymeyleiz@gmail.com wrote:\n\n>\n\n>> Hello,\n\n>>\n\n>> Thank you for the email. I appreciate the offer, but I am not interested\n\n>> at this time. Please feel free to reach out in the future! Thank you for\n\n>> your time.\n\n>>\n\n>> Best,\n\n>> Ashley\n\n>>\n\n>> On Sun, Mar 8, 2026 at 8:33 AM Tiana <tiana.cameron@creatorland.com>\n\n>> wrote:\n\n>>\n\n>>> Hi Ashley,\n\n>>>\n\n>>> Following up on my note about a paid, dedicated 3–5 minute YouTube video\n\n>>> explaining Dealsync—the AI-powered inbox for creators managing brand\n\n>>> partnerships.\n\n>>>\n\n>>> What you’ll get:\n\n>>>\n\n>>>    - Paid dedicated video (3–5 minutes)\n\n>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>    - 7-day trial with your real inbox\n\n>>>    - Locked-in early pricing (discounted forever)\n\n>>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>>    - Direct access to the founding team\n\n>>>\n\n>>> If you’re open to it, what are your typical rates for a dedicated video?\n\n>>> I can share a brief or sample outcomes to help you decide.\n\n>>>\n\n>>> Here’s Dealsync to review: https://dealsync.creatorland.com\n\n>>>\n\n>>> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n>>> Creatorland.com\n\n>>>\n\n>>> On Thu, Mar 5, 2026 at 7:31 AM tiana.cameron@creatorland.com wrote:\n\n>>>\n\n>>>> Hi Ashley 👋,\n\n>>>>\n\n>>>> I’m reaching from Creatorland’s Creator Partnerships team about a paid\n\n>>>> YouTube collaboration with Dealsync, our AI-powered inbox dashboard for\n\n>>>> creators who manage brand partnerships.\n\n>>>>\n\n>>>> We’d love to have you create a dedicated 3–5 minute YouTube video that\n\n>>>> explains Dealsync, how it works, and why it matters for creators like you.\n\n>>>> It’s a standalone video (not in-read) and we’re prioritizing clear\n\n>>>> storytelling over subscriber count.\n\n>>>>\n\n>>>> What you’ll get:\n\n>>>>\n\n>>>>    - Paid dedicated YouTube video (3–5 minutes)\n\n>>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>>    - 7-day free trial with your real inbox\n\n>>>>    - Locked-in early pricing (discounted forever)\n\n>>>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>>>    - Direct access to the founding team\n\n>>>>\n\n>>>> Payment on delivery. This is for a high-quality, creator-focused piece\n\n>>>> about software.\n\n>>>>\n\n>>>> If you’re interested, could you share your typical rates for a\n\n>>>> dedicated video? If you’d like, I can share sample briefs or outcome\n\n>>>> expectations to help you decide.\n\n>>>>\n\n>>>> Here’s more about Dealsync: https://dealsync.creatorland.com\n\n>>>>\n\n>>>> P.S. I took a quick look at your TikTok profile:\n\n>>>> https://www.tiktok.com/@6961544783287862277\n\n>>>>\n\n>>>> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n>>>> Creatorland.com & Dealsync\n\n>>>>\n\n>>>"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-005",
+		description: "Paid YouTube campaign for Dealsync with Kennedy Goebel. Creator engaged, and...",
+		emails: [
+			{
+				messageId: "gt-005-msg-1",
+				threadId: "gt-005",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Emma A. - Creator Partnerships\" <emma.alexandria@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "kennedygoebel@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Kennedy Goebel <> Paid YouTube Campaign for Dealsync"
+					},
+					{
+						name: "date",
+						value: "Thu, 12 Mar 2026 18:16:21 -0700"
+					}
+				],
+				body: "Thanks so much for getting back — I really appreciate it. Totally\n\nunderstand that this campaign isn’t the right fit.\n\nIf you’d like to try Dealsync anyway, we’d be happy to skip the waitlist\n\nand offer you a free month. You can claim it here: Dealsync claim 1 month\n\nfree <https://dealsync-beta.creatorland.com>. Use promo code 86C7L2X9A10 at\n\ncheckout.\n\nIf you’re open to being considered for future opportunities, I can add you\n\nto our list — or you can tell me what types of brand work fit you best\n\n(platforms, formats, topics) and I’ll keep an eye out.\n\nThanks again — hope we can work together another time!\n\nEmma A. - emma.alexandria@creatorland.com\n\nCreator Partnerships @ Creatorland.com\n\nEmma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\nCreatorland.com\n\nOn Thu, Mar 12, 2026 at 6:15 PM kennedygoebel@gmail.com wrote:\n\n> This particular campaign does not align with my profile, but I would love\n\n> others. Thank you!!\n\n>\n\n>\n\n> Sent from my iPhone\n\n>\n\n> On Mar 12, 2026, at 6:33 PM, Emma Alexandria <\n\n> emma.alexandria@creatorland.com> wrote:\n\n>\n\n>\n\n> Hi Kennedy 👋,\n\n>\n\n> Following up on my note about a paid YouTube campaign for Dealsync — the\n\n> AI-powered inbox dashboard that helps creators manage brand partnerships.\n\n>\n\n> Would you share your rate for a dedicated 3–5 minute YouTube video? If\n\n> possible, please include 1–2 sample videos or ad reads.\n\n>\n\n> What you’d get:\n\n>\n\n>    - Paid dedicated YouTube video (3–5 minutes)\n\n>    - Early access to Dealsync (skip the waitlist)\n\n>    - 7-day free trial with your real inbox\n\n>    - Locked-in early pricing (discounted forever)\n\n>    - Optional 15% recurring affiliate commission (12 months)\n\n>    - Direct access to the founding team\n\n>\n\n> If you’re interested, just reply with your rates and samples and we’ll\n\n> take it from there.\n\n>\n\n> 💜 Emma A. - Creator Partnerships\n\n>\n\n> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n> Creatorland.com\n\n>\n\n> On Mon, Mar 9, 2026 at 3:32 PM emma.alexandria@creatorland.com wrote:\n\n>\n\n>> Hi Kennedy 👋,\n\n>>\n\n>> I’m Emma from Creatorland, reaching out about a paid YouTube campaign to\n\n>> promote Dealsync — the AI-powered inbox dashboard that helps creators\n\n>> manage brand partnerships.\n\n>>\n\n>> We think you’d be a great fit for a dedicated YouTube video (3–5 minutes)\n\n>> plus a standalone video and a creator-to-creator explainer about Dealsync.\n\n>> Could you share your rates for a dedicated YouTube video? If possible,\n\n>> please include 1–2 sample videos or ad reads.\n\n>>\n\n>> What you’d get:\n\n>>\n\n>>    - Paid dedicated YouTube video (3–5 minutes)\n\n>>    - Early access to Dealsync (skip the waitlist)\n\n>>    - 7-day free trial with your real inbox\n\n>>    - Locked-in early pricing (discounted forever)\n\n>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>    - Direct access to the founding team\n\n>>\n\n>> If you’re interested, just reply with your rates and a couple of samples\n\n>> and we’ll take it from there.\n\n>>\n\n>> 💜 Emma\n\n>>\n\n>> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>> Creatorland.com\n\n>>\n\n>"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-006",
+		description: "Paid YouTube campaign outreach to creator Patricia. Creator declined in...",
+		emails: [
+			{
+				messageId: "gt-006-msg-1",
+				threadId: "gt-006",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Emma Alexandria <emma.alexandria@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "patricia@casasolagency.com, emma.alexandria@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Patricia — Paid YouTube Campaign for Dealsync"
+					},
+					{
+						name: "date",
+						value: "Mon, 2 Mar 2026 16:03:48 \\+0000"
+					}
+				],
+				body: "Content-Type: text/plain; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\nHi Patricia, Paula, Brian, and Nick \\=E2=80=94\n\nThanks again for considering Dealsync. If you=E2=80=99d ever like to revisi=\n\nt, you\n\ncan try Dealsync with a free one-month trial here:\n\nhttps://dealsync-beta.creatorland.com\n\nPromo code to use at checkout: 86C7L2X9A10\n\nNo pressure \\=E2=80=94 I=E2=80=99m here to answer questions anytime.\n\nEmma\n\nCreator Partnerships, Creatorland\n\nemma.alexandria@creatorland.com\n\nEmma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\nCreatorland.com\n\nOn Fri, Feb 27, 2026 at 8:03 AM emma.alexandria@creatorland.com wrote:\n\n> Hi Patricia \\=E2=80=94\n\n>\n\n> Thanks again for considering Dealsync. If you or Paula have any questions\n\n> in the future, we=E2=80=99re happy to chat. In the meantime, Patricia can=\n\nstill\n\n> explore Dealsync with a free one-month trial here:\n\n> https://dealsync-beta.creatorland.com\n\n>\n\n> Promo code to use at checkout: 86C7L2X9A10\n\n>\n\n> Best regards,\n\n> Emma\n\n> Creator Partnerships, Creatorland\n\n>\n\n> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n> Creatorland.com\n\n>\n\n> On Wed, Feb 25, 2026 at 10:52 AM emma.alexandria@creatorland.com wrote:\n\n>\n\n>> Hi Paula \\=E2=80=94\n\n>>\n\n>> Thanks for letting me know, and please pass along to Patricia that we\n\n>> really appreciate you both taking the time to consider this.\n\n>>\n\n>> If it=E2=80=99s helpful down the road, Patricia can skip the waitlist an=\n\nd try\n\n>> Dealsync free for one month here: https://dealsync-beta.creatorland.com\n\n>>\n\n>> Promo code to use at checkout: 86C7L2X9A10\n\n>>\n\n>> No pressure \\=E2=80=94 happy to answer any questions in the future. Thank=\n\ns again\n\n>> and have a great day!\n\n>>\n\n>> Emma\n\n>>\n\n>> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>> Creatorland.com\n\n>>\n\n>> On Wed, Feb 25, 2026 at 10:51 AM patricia@casasolagency.com wrote:\n\n>>\n\n>>> Hi Emma,\n\n>>>\n\n>>> Thank you so much for reaching out! I'm Paula, Patricia's Talent\n\n>>> Manager. At this time, Patricia will pass on this opportunity. Let me k=\n\nnow\n\n>>> if you have any questions.\n\n>>>\n\n>>> Have a great rest of your day!\n\n>>>\n\n>>> xx,\n\n>>> *Paula Quinones-Roman*\n\n>>> CEO & Founder\n\n>>>\n\n>>>\n\n>>> On Tue, Feb 24, 2026 at 11:02=E2=80=AFAM Emma Alexandria <\n\n>>> emma.alexandria@creatorland.com> wrote:\n\n>>>\n\n>>>> Hi Patricia \\=F0=9F=91=8B,\n\n>>>>\n\n>>>> I'm Emma from Creatorland's Creator Partnerships team. We're running a\n\n>>>> paid YouTube campaign for Dealsync, an AI-powered inbox dashboard that\n\n>>>> helps creators manage brand partnerships. Dealsync automatically detec=\n\nts\n\n>>>> brand deal emails, organizes conversations by deal status, surfaces\n\n>>>> follow-ups, and saves creators 5=E2=80=9310 hours per week.\n\n>>>>\n\n>>>> We think you'd be a great fit. The campaign includes:\n\n>>>>\n\n>>>>    - A dedicated YouTube video (3=E2=80=935 minutes)\n\n>>>>    - A standalone video (not in-read or short)\n\n>>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>>    - 7-day free trial using your real inbox\n\n>>>>    - Locked-in early pricing (discounted forever)\n\n>>>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>>>    - Direct access to the founding team\n\n>>>>\n\n>>>> Payment is on delivery (net terms). We=E2=80=99re not discussing rates=\n\nyet, but\n\n>>>> if you=E2=80=99re open to it, please share your typical rate for a ded=\n\nicated video\n\n>>>> and any examples of YouTube brand deals or ad reads.\n\n>>>>\n\n>>>> Learn more about Dealsync: https://dealsync.creatorland.com\n\n>>>>\n\n>>>> Looking forward to hearing from you!\n\n>>>>\n\n>>>> \\=F0=9F=92=9C Emma\n\n>>>> Creator Partnerships, Creatorland\n\n>>>> emma.alexandria@creatorland.com\n\n>>>>\n\n>>>> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>>>> Creatorland.com\n\n>>>>\n\n>>>\n\n>>> xx,\n\n>>> Casa Sol Agency\n\n>>>\n\n>>\n\n--0000000000007b3eaf064c0cbbdd\n\nContent-Type: text/html; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\n<div>Hi Patricia, Paula, Brian, and Nick \\=E2=80=94<br><br>Thanks again for \\=\n\nconsidering Dealsync. If you=E2=80=99d ever like to revisit, you can try De=\n\nalsync with a free one-month trial here: <a href=3D\"https://dealsync-beta.c=\n\nreatorland.com\">https://dealsync-beta.creatorland.com</a><br><br>Promo code=\n\nto use at checkout: 86C7L2X9A10<br><br>No pressure \\=E2=80=94 I=E2=80=99m h=\n\nere to answer questions anytime.<br><br>Emma<br>Creator Partnerships, Creat=\n\norland<br><a href=3D\"mailto:emma.alexandria@creatorland.com\">emma.alexandri=\n\na@creatorland.com</a><br><br><h2>Emma A. - <a href=3D\"mailto:emma.alexandri=\n\na@creatorland.com\">emma.alexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Fri, Feb 27, 2026 at 8:03 AM=\n\n<a href=3D\"mailto:emma.alexandria@creatorland.com\">emma.alexandria@creator=\n\nland.com</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;b=\n\norder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div>Hi Patricia \\=E2=80=94<br><br>Thanks again for considering Deal=\n\nsync. If you or Paula have any questions in the future, we=E2=80=99re happy=\n\nto chat. In the meantime, Patricia can still explore Dealsync with a free \\=\n\none-month trial here: <a href=3D\"https://dealsync-beta.creatorland.com\">htt=\n\nps://dealsync-beta.creatorland.com</a><br><br>Promo code to use at checkout=\n\n: 86C7L2X9A10<br><br>Best regards,<br>Emma<br>Creator Partnerships, Creator=\n\nland<br><br><h2>Emma A. - <a href=3D\"mailto:emma.alexandria@creatorland.com=\n\n\">emma.alexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Wed, Feb 25, 2026 at 10:52 AM \\=\n\n<a href=3D\"mailto:emma.alexandria@creatorland.com\">emma.alexandria@creatorl=\n\nand.com</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;bor=\n\nder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div>Hi Paula \\=E2=80=94<br><br>Thanks for letting me know, and please=\n\npass along to Patricia that we really appreciate you both taking the time \\=\n\nto consider this.<br><br>If it=E2=80=99s helpful down the road, Patricia ca=\n\nn skip the waitlist and try Dealsync free for one month here: <a href=3D\"ht=\n\ntps://dealsync-beta.creatorland.com\">https://dealsync-beta.creatorland.com<=\n\n/a><br><br>Promo code to use at checkout: 86C7L2X9A10<br><br>No pressure \\=\n\n\\=E2=80=94 happy to answer any questions in the future. Thanks again and hav=\n\ne a great day!<br><br>Emma<br><br><h2>Emma A. - <a href=3D\"mailto:emma.alex=\n\nandria@creatorland.com\">emma.alexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Wed, Feb 25, 2026 at 10:51 AM <a h=\n\nref=3D\"mailto:patricia@casasolagency.com\">patricia@casasolagency.com</a> wr=\n\note:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-=\n\nleft:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div dir=3D\"ltr\"><div>Hi Emma,=C2=A0</div><div><br></div><div>Thank you so \\=\n\nmuch for reaching out! I&#39;m Paula, Patricia&#39;s Talent Manager. At thi=\n\ns time, Patricia will pass on this opportunity. Let me know if you have any=\n\nquestions.=C2=A0</div><div><br></div><div>Have a great rest of your day!=\n\n\\=C2=A0</div><div><br></div><div><div dir=3D\"ltr\" class=3D\"gmail_signature\" \\=\n\ndata-smartmail=3D\"gmail_signature\"><div dir=3D\"ltr\"><div style=3D\"margin:0p=\n\nx;padding:0px;border:0px;font-family:verdana,geneva;font-size:13.3333px;fon=\n\nt-stretch:inherit;line-height:inherit;vertical-align:baseline;color:rgb(0,0=\n\n,0)\">xx,</div><div style=3D\"margin:0px;padding:0px;border:0px;font-family:v=\n\nerdana,geneva;font-size:13.3333px;font-stretch:inherit;line-height:inherit;=\n\nvertical-align:baseline;color:rgb(0,0,0)\"><b>Paula Quinones-Roman</b></div>=\n\n<div style=3D\"margin:0px;padding:0px;border:0px;font-family:verdana,geneva;=\n\nfont-size:13.3333px;font-stretch:inherit;line-height:inherit;vertical-align=\n\n:baseline;color:rgb(0,0,0)\">CEO &amp; Founder</div><div style=3D\"margin:0px=\n\n;padding:0px;border:0px;font-family:verdana,geneva;font-size:13.3333px;font=\n\n-stretch:inherit;line-height:inherit;vertical-align:baseline;color:rgb(0,0,=\n\n0)\"><img width=3D\"96\" height=3D\"96\" src=3D\"https://ci3.googleusercontent.co=\n\nm/mail-sig/AIorK4xEHARqzaz99L8IaPgXMSHqLPDiq3mu3P-zCQVNZ58aPCmVtAVTdQgE-jXb=\n\nPg-eHnLE58XqamNeBOXT\"></div></div></div></div><br></div><br><div class=3D\"g=\n\nmail_quote gmail_quote_container\"><div dir=3D\"ltr\" class=3D\"gmail_attr\">On \\=\n\nTue, Feb 24, 2026 at 11:02=E2=80=AFAM Emma Alexandria &lt;<a href=3D\"mailto=\n\n:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a>&gt; w=\n\nrote:<br></div><blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0p=\n\nx 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex\"><div>Hi Pa=\n\ntricia \\=F0=9F=91=8B,<br><br>I&#39;m Emma from Creatorland&#39;s Creator Par=\n\ntnerships team. We&#39;re running a paid YouTube campaign for Dealsync, an \\=\n\nAI-powered inbox dashboard that helps creators manage brand partnerships. D=\n\nealsync automatically detects brand deal emails, organizes conversations by=\n\ndeal status, surfaces follow-ups, and saves creators 5=E2=80=9310 hours pe=\n\nr week.<br><br>We think you&#39;d be a great fit. The campaign includes:<br=\n\n><ul>\n\n<li>A dedicated YouTube video (3=E2=80=935 minutes)</li>\n\n<li>A standalone video (not in-read or short)</li>\n\n<li>Early access to Dealsync (skip the waitlist)</li>\n\n<li>7-day free trial using your real inbox</li>\n\n<li>Locked-in early pricing (discounted forever)</li>\n\n<li>Optional 15% recurring affiliate commission (12 months)</li>\n\n<li>Direct access to the founding team</li>\n\n</ul>\n\nPayment is on delivery (net terms). We=E2=80=99re not discussing rates yet,=\n\nbut if you=E2=80=99re open to it, please share your typical rate for a ded=\n\nicated video and any examples of YouTube brand deals or ad reads.<br><br>Le=\n\narn more about Dealsync: <a href=3D\"https://dealsync.creatorland.com\" targe=\n\nt=3D\"_blank\">https://dealsync.creatorland.com</a><br><br>Looking forward to=\n\nhearing from you!<br><br>=F0=9F=92=9C Emma<br>Creator Partnerships, Creato=\n\nrland<br><a href=3D\"mailto:emma.alexandria@creatorland.com\" target=3D\"_blan=\n\nk\">emma.alexandria@creatorland.com</a><br><br><h2>Emma A. - <a href=3D\"mail=\n\nto:emma.alexandria@creatorland.com\" target=3D\"_blank\">emma.alexandria@creat=\n\norland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div>\n\n</blockquote></div>\n\n<br>\n\nxx,=C2=A0<div>Casa Sol Agency</div>\n\n</blockquote>\n\n</div>\n\n</blockquote>\n\n</div>\n\n</blockquote>\n\n</div>\n\n--0000000000007b3eaf064c0cbbdd--"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-007",
+		description: "Paid YouTube campaign thread with creator Fischip. Creator signaled they...",
+		emails: [
+			{
+				messageId: "gt-007-msg-1",
+				threadId: "gt-007",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Kira Ellis <kira.ellis@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "a4091218@gmail.com, kira.ellis@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Re: fischip <> Dealsync Paid YouTube Campaign"
+					},
+					{
+						name: "date",
+						value: "Thu, 19 Feb 2026 15:13:17 -0800"
+					}
+				],
+				body: "Content-Type: text/plain; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\nHi fischip \\=F0=9F=91=8B,\n\nJust a quick, final check about a paid, dedicated 3=E2=80=935 minute YouTub=\n\ne video\n\nfor Dealsync (standalone, not an in-read). It includes early access to\n\nDealysync, a 30-day free trial, and an optional 15% recurring affiliate for\n\n12 months. Direct access to the founding team. If helpful, we can share\n\nsample scripts or partner examples.\n\nIf you=E2=80=99re open to it, please share your typical rate for a dedicate=\n\nd video,\n\nor we can jump on a quick call to discuss scope and timing. If this isn=E2=\n\n\\=80=99t a\n\nfit, no worries=E2=80=94just let me know and I=E2=80=99ll pause on further \\=\n\noutreach.\n\nThanks for considering \\=E2=80=94 take care.\n\n\\=F0=9F=92=9C Kira\n\nKira A. - kira.ellis@creatorland.com Creator Partnerships @ Creatorland.com\n\nOn Wed, Feb 18, 2026 at 4:50 AM kira.ellis@creatorland.com wrote:\n\n> Hi fischip,\n\n>\n\n> Thanks for getting back and for the straight answer \\=E2=80=94 I appreciat=\n\ne it. No\n\n> worries at all.\n\n>\n\n> If you ever want to try Dealsync on your own, you can skip the waitlist\n\n> and claim a free month here: Dealsync claim 1 month free\n\n> <https://dealsync-beta.creatorland.com>. Use promo code 86C7L2X9A10 at\n\n> checkout.\n\n>\n\n> Thanks again \\=E2=80=94 take care.\n\n>\n\n> Kira A. - kira.ellis@creatorland.com Creator Partnerships @\n\n> Creatorland.com\n\n>\n\n> On Wed, Feb 18, 2026 at 4:42 AM a4091218@gmail.com wrote:\n\n>\n\n>> Pay me robux i dont want ur stupid brand\n\n>>\n\n>> On Mon, 16 Feb 2026, 23:12 Kira Ellis, <kira.ellis@creatorland.com>\n\n>> wrote:\n\n>>\n\n>>> Hi fischip \\=F0=9F=91=8B,\n\n>>>\n\n>>> Following up on our note about a paid, dedicated 3=E2=80=935 minute You=\n\nTube\n\n>>> video for Dealsync. It would be a standalone video (not an in-read) wit=\n\nh\n\n>>> early access to Dealsync, a 30-day trial, and an optional 15% recurring\n\n>>> affiliate for 12 months. We can share sample scripts or past partner\n\n>>> examples if helpful, and you=E2=80=99d have direct access to the foundi=\n\nng team.\n\n>>>\n\n>>> If you=E2=80=99re open to it, please share your typical rate for a dedi=\n\ncated\n\n>>> video. If you=E2=80=99d prefer, we can jump on a quick call to discuss \\=\n\nscope and\n\n>>> timing.\n\n>>>\n\n>>> Thanks for your time!\n\n>>>\n\n>>> \\=F0=9F=92=9C Kira\n\n>>>\n\n>>> Kira E. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>>> Creatorland.com\n\n>>>\n\n>>> On Fri, Feb 13, 2026 at 3:11 PM kira.ellis@creatorland.com wrote:\n\n>>>\n\n>>>> Hi fischip \\=F0=9F=91=8B,\n\n>>>>\n\n>>>> I came across your YouTube channel and noticed you frequently partner\n\n>>>> with brands. We'd love to partner with you for a paid launch campaign \\=\n\nfor\n\n>>>> Dealsync, an AI-powered inbox dashboard built specifically for creator=\n\ns.\n\n>>>> Dealsync helps manage brand partnerships by automatically organizing d=\n\neal\n\n>>>> emails, surfacing follow-ups, and saving creators 5=E2=80=9310 hours p=\n\ner week. It\n\n>>>> uses read-only Gmail access to keep your inbox safe.\n\n>>>>\n\n>>>> For this campaign, we=E2=80=99re offering a dedicated 3=E2=80=935 minu=\n\nte YouTube video\n\n>>>> that explains what Dealsync is, how it works, and why it matters for\n\n>>>> creators.\n\n>>>>\n\n>>>> What you=E2=80=99ll get:\n\n>>>>\n\n>>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>>    - 30-day free trial\n\n>>>>    - Anyone who uses your custom link can skip the waitlist\n\n>>>>    - Optional 15% recurring affiliate commission for 12 months\n\n>>>>    - Direct access to the founding team\n\n>>>>\n\n>>>> If you=E2=80=99re interested, could you share your typical rates for a\n\n>>>> dedicated video? I=E2=80=99m happy to answer any questions you have.\n\n>>>>\n\n>>>> Looking forward to hearing from you!\n\n>>>>\n\n>>>> \\=F0=9F=92=9C Kira\n\n>>>>\n\n>>>> Kira E. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>>>> Creatorland.com\n\n>>>>\n\n>>>\n\n--00000000000031f6cc064b357313\n\nContent-Type: text/html; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\n<div>Hi fischip \\=F0=9F=91=8B,<br><br>Just a quick, final check about a paid=\n\n, dedicated 3=E2=80=935 minute YouTube video for Dealsync (standalone, not \\=\n\nan in-read). It includes early access to Dealysync, a 30-day free trial, an=\n\nd an optional 15% recurring affiliate for 12 months. Direct access to the f=\n\nounding team. If helpful, we can share sample scripts or partner examples.<=\n\nbr><br>If you=E2=80=99re open to it, please share your typical rate for a d=\n\nedicated video, or we can jump on a quick call to discuss scope and timing.=\n\nIf this isn=E2=80=99t a fit, no worries=E2=80=94just let me know and I=E2=\n\n\\=80=99ll pause on further outreach.<br><br>Thanks for considering \\=E2=80=94=\n\ntake care.<br><br>=F0=9F=92=9C Kira<br><br><h2>Kira A. - <a href=3D\"mailto=\n\n:kira.ellis@creatorland.com\">kira.ellis@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Wed, Feb 18, 2026 at 4:50 AM=\n\n<a href=3D\"mailto:kira.ellis@creatorland.com\">kira.ellis@creatorland.com</=\n\na> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;b=\n\norder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div>Hi fischip,<br><br>Thanks for getting back and for the straigh=\n\nt answer \\=E2=80=94 I appreciate it. No worries at all.<br><br>If you ever w=\n\nant to try Dealsync on your own, you can skip the waitlist and claim a free=\n\nmonth here: <a href=3D\"https://dealsync-beta.creatorland.com\">Dealsync cla=\n\nim 1 month free</a>. Use promo code 86C7L2X9A10 at checkout.<br><br>Thanks \\=\n\nagain \\=E2=80=94 take care.<br><br><h2>Kira A. - <a href=3D\"mailto:kira.elli=\n\ns@creatorland.com\">kira.ellis@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Wed, Feb 18, 2026 at 4:42 AM <=\n\na href=3D\"mailto:a4091218@gmail.com\">a4091218@gmail.com</a> wrote:<br></div=\n\n>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;bor=\n\nder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div dir=3D\"auto\">Pay me robux i dont want ur stupid brand</div><br><=\n\ndiv class=3D\"gmail_quote gmail_quote_container\"><div dir=3D\"ltr\" class=3D\"g=\n\nmail_attr\">On Mon, 16 Feb 2026, 23:12 Kira Ellis, &lt;<a href=3D\"mailto:kir=\n\na.ellis@creatorland.com\">kira.ellis@creatorland.com</a>&gt; wrote:<br></div=\n\n><blockquote class=3D\"gmail_quote\" style=3D\"margin:0 0 0 .8ex;border-left:1=\n\npx #ccc solid;padding-left:1ex\"><div>Hi fischip \\=F0=9F=91=8B,<br><br>Follow=\n\ning up on our note about a paid, dedicated 3=E2=80=935 minute YouTube video=\n\nfor Dealsync. It would be a standalone video (not an in-read) with early a=\n\nccess to Dealsync, a 30-day trial, and an optional 15% recurring affiliate \\=\n\nfor 12 months. We can share sample scripts or past partner examples if help=\n\nful, and you=E2=80=99d have direct access to the founding team.<br><br>If y=\n\nou=E2=80=99re open to it, please share your typical rate for a dedicated vi=\n\ndeo. If you=E2=80=99d prefer, we can jump on a quick call to discuss scope \\=\n\nand timing.<br><br>Thanks for your time!<br><br>=F0=9F=92=9C Kira<br><br><h=\n\n2>Kira E. - <a href=3D\"mailto:emma.alexandria@creatorland.com\" target=3D\"_b=\n\nlank\" rel=3D\"noreferrer\">emma.alexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Fri, Feb 13, 2026 at 3:11 PM <a hr=\n\nef=3D\"mailto:kira.ellis@creatorland.com\" target=3D\"_blank\" rel=3D\"noreferre=\n\nr\">kira.ellis@creatorland.com</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-=\n\nleft:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div>Hi fischip \\=F0=9F=91=8B,<br><br>I came across your YouTube channel and=\n\nnoticed you frequently partner with brands. We&#39;d love to partner with \\=\n\nyou for a paid launch campaign for Dealsync, an AI-powered inbox dashboard \\=\n\nbuilt specifically for creators. Dealsync helps manage brand partnerships b=\n\ny automatically organizing deal emails, surfacing follow-ups, and saving cr=\n\neators 5=E2=80=9310 hours per week. It uses read-only Gmail access to keep \\=\n\nyour inbox safe.<br><br>For this campaign, we=E2=80=99re offering a dedicat=\n\ned 3=E2=80=935 minute YouTube video that explains what Dealsync is, how it \\=\n\nworks, and why it matters for creators.<br><br>What you=E2=80=99ll get:<br>=\n\n<ul>\n\n<li>Early access to Dealsync (skip the waitlist)</li>\n\n<li>30-day free trial</li>\n\n<li>Anyone who uses your custom link can skip the waitlist</li>\n\n<li>Optional 15% recurring affiliate commission for 12 months</li>\n\n<li>Direct access to the founding team</li>\n\n</ul>\n\nIf you=E2=80=99re interested, could you share your typical rates for a dedi=\n\ncated video? I=E2=80=99m happy to answer any questions you have.<br><br>Loo=\n\nking forward to hearing from you!<br><br>=F0=9F=92=9C Kira<br><br><h2>Kira \\=\n\nE. - <a href=3D\"mailto:emma.alexandria@creatorland.com\" target=3D\"_blank\" r=\n\nel=3D\"noreferrer\">emma.alexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div>\n\n</blockquote>\n\n</div>\n\n</blockquote></div>\n\n</blockquote>\n\n</div>\n\n</blockquote>\n\n</div>\n\n--00000000000031f6cc064b357313--"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-008",
+		description: "Paid YouTube campaign opportunity outreach for Dealsync. Creator declined in...",
+		emails: [
+			{
+				messageId: "gt-008-msg-1",
+				threadId: "gt-008",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Emma A.\" <emma.alexandria@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "team@marjkupps.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Paid YouTube Campaign Opportunity with Dealsync"
+					},
+					{
+						name: "date",
+						value: "Sun, 22 Feb 2026 08:46:41 -0600"
+					}
+				],
+				body: "Content-Type: text/plain; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\nHi Marjorie,\n\nThanks for letting me know \\=E2=80=94 I=E2=80=99ll remove your contact from \\=\n\nour outreach\n\nlist.\n\nIf you ever change your mind, you can skip the waitlist and claim a free\n\n1=E2=80=91month trial here: Dealsync claim 1 month free\n\n<https://dealsync-beta.creatorland.com>. Use promo code 86C7L2X9A10 at\n\ncheckout.\n\nWishing you all the best.\n\nEmma\n\nEmma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\nCreatorland.com\n\nOn Sun, Feb 22, 2026 at 6:45 AM team@marjkupps.com wrote:\n\n> Hi Emmarentia,\n\n>\n\n> I am not interested, kindly lose my contact, thanks.\n\n>\n\n> Marj Kupps & Co\n\n> Digital Lifestyle & Wellness Brand\n\n>\n\n>\n\n> On Sat, 21 Feb 2026 at 18:12, Emma A. <emma.alexandria@creatorland.com>\n\n> wrote:\n\n>\n\n>> Hi Marjorie \\=F0=9F=91=8B,\n\n>>\n\n>> Just following up on my note about a paid YouTube campaign for Dealsync,\n\n>> the AI-powered inbox for creators managing brand deals. We=E2=80=99re lo=\n\noking for a\n\n>> dedicated 3=E2=80=935 minute YouTube video plus a standalone explainer t=\n\no show how\n\n>> Dealsync helps creators stay on top of brand opportunities.\n\n>>\n\n>> What you=E2=80=99d receive:\n\n>>\n\n>>    - Paid dedicated video (3-5 minutes)\n\n>>    - Early access to Dealsync (skip the waitlist)\n\n>>    - 7-day free trial with your real inbox\n\n>>    - Locked-in early pricing (discounted forever)\n\n>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>    - Direct access to the founding team\n\n>>\n\n>> If you=E2=80=99re interested, could you share your typical turnaround ti=\n\nme for a\n\n>> video and any questions? Happy to tailor to your schedule.\n\n>>\n\n>> Cheers,\n\n>> Emma\n\n>>\n\n>>\n\n>> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>> Creatorland.com\n\n>>\n\n>> On Wed, Feb 18, 2026 at 8:11 AM emma.alexandria@creatorland.com wrote:\n\n>>\n\n>>> Hi Marjorie \\=F0=9F=91=8B,\n\n>>>\n\n>>> I'm Emma from Creatorland. We're running a paid YouTube campaign for\n\n>>> Dealsync, an AI-powered inbox for creators managing brand deals. I thin=\n\nk\n\n>>> you could be a great fit for a dedicated 3=E2=80=935 minute YouTube vid=\n\neo and a\n\n>>> standalone explainer about Dealsync.\n\n>>>\n\n>>> What you=E2=80=99d receive:\n\n>>>\n\n>>>    - Paid dedicated video (3=E2=80=935 minutes)\n\n>>>    - Early access to Dealsync (skip waitlist)\n\n>>>    - 7-day free trial with your real inbox\n\n>>>    - Locked-in early pricing (discounted forever)\n\n>>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>>    - Direct access to the founding team\n\n>>>\n\n>>> Payment on delivery. More details here: https://dealsync.creatorland.co=\n\nm\n\n>>>\n\n>>> If you=E2=80=99re interested, could you share your typical turnaround t=\n\nime for a\n\n>>> video and any questions? Happy to tailor to your schedule.\n\n>>>\n\n>>> Best,\n\n>>> Emma\n\n>>> Creator Partnerships @ Creatorland\n\n>>>\n\n>>> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>>> Creatorland.com\n\n>>>\n\n>>\n\n--000000000000f81af9064b6ab87f\n\nContent-Type: text/html; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\n<div>Hi Marjorie,<br><br>Thanks for letting me know \\=E2=80=94 I=E2=80=99ll \\=\n\nremove your contact from our outreach list.<br><br>If you ever change your \\=\n\nmind, you can skip the waitlist and claim a free 1=E2=80=91month trial here=\n\n: <a href=3D\"https://dealsync-beta.creatorland.com\">Dealsync claim 1 month \\=\n\nfree</a>. Use promo code 86C7L2X9A10 at checkout.<br><br>Wishing you all th=\n\ne best.<br><br>Emma<br><br><h2>Emma A. - <a href=3D\"mailto:emma.alexandria@=\n\ncreatorland.com\">emma.alexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Sun, Feb 22, 2026 at 6:45 AM=\n\n<a href=3D\"mailto:team@marjkupps.com\">team@marjkupps.com</a> wrote:<br></d=\n\niv>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;b=\n\norder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div dir=3D\"auto\">Hi Emmarentia,</div><div dir=3D\"auto\"><br></div><=\n\ndiv dir=3D\"auto\">I am not interested, kindly lose my contact, thanks.</div>=\n\n<div dir=3D\"auto\"><br clear=3D\"all\"><div dir=3D\"auto\"><div dir=3D\"ltr\" clas=\n\ns=3D\"gmail_signature\" data-smartmail=3D\"gmail_signature\">Marj Kupps &amp; C=\n\no<br>Digital Lifestyle &amp; Wellness Brand</div></div></div><div><br></div=\n\n><div><br><div class=3D\"gmail_quote gmail_quote_container\"><div dir=3D\"ltr\"=\n\nclass=3D\"gmail_attr\">On Sat, 21 Feb 2026 at 18:12, Emma A. &lt;<a href=3D\"=\n\nmailto:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a>=\n\n&gt; wrote:<br></div><blockquote class=3D\"gmail_quote\" style=3D\"margin:0px \\=\n\n0px 0px 0.8ex;border-left-width:1px;border-left-style:solid;padding-left:1e=\n\nx;border-left-color:rgb(204,204,204)\"><div>Hi Marjorie \\=F0=9F=91=8B,<br><br=\n\n>Just following up on my note about a paid YouTube campaign for Dealsync, t=\n\nhe AI-powered inbox for creators managing brand deals. We=E2=80=99re lookin=\n\ng for a dedicated 3=E2=80=935 minute YouTube video plus a standalone explai=\n\nner to show how Dealsync helps creators stay on top of brand opportunities.=\n\n<br><br>What you=E2=80=99d receive:<br><ul>\n\n<li>Paid dedicated video (3-5 minutes)</li>\n\n<li>Early access to Dealsync (skip the waitlist)</li>\n\n<li>7-day free trial with your real inbox</li>\n\n<li>Locked-in early pricing (discounted forever)</li>\n\n<li>Optional 15% recurring affiliate commission (12 months)</li>\n\n<li>Direct access to the founding team</li>\n\n</ul>\n\nIf you=E2=80=99re interested, could you share your typical turnaround time \\=\n\nfor a video and any questions? Happy to tailor to your schedule.<br><br>Che=\n\ners,<br>Emma</div><div><br><br><h2>Emma A. - <a href=3D\"mailto:emma.alexand=\n\nria@creatorland.com\" target=3D\"_blank\">emma.alexandria@creatorland.com</a><=\n\n/h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Wed, Feb 18, 2026 at 8:11 AM <a hr=\n\nef=3D\"mailto:emma.alexandria@creatorland.com\" target=3D\"_blank\">emma.alexan=\n\ndria@creatorland.com</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-=\n\nleft-width:1px;border-left-style:solid;padding-left:1ex;border-left-color:r=\n\ngb(204,204,204)\">\n\n<div>Hi Marjorie \\=F0=9F=91=8B,<br><br>I&#39;m Emma from Creatorland. We&#=\n\n39;re running a paid YouTube campaign for Dealsync, an AI-powered inbox for=\n\ncreators managing brand deals. I think you could be a great fit for a dedi=\n\ncated 3=E2=80=935 minute YouTube video and a standalone explainer about Dea=\n\nlsync.<br><br>What you=E2=80=99d receive:<br><ul>\n\n<li>Paid dedicated video (3=E2=80=935 minutes)</li>\n\n<li>Early access to Dealsync (skip waitlist)</li>\n\n<li>7-day free trial with your real inbox</li>\n\n<li>Locked-in early pricing (discounted forever)</li>\n\n<li>Optional 15% recurring affiliate commission (12 months)</li>\n\n<li>Direct access to the founding team</li>\n\n</ul>\n\nPayment on delivery. More details here: <a href=3D\"https://dealsync.creator=\n\nland.com\" target=3D\"_blank\">https://dealsync.creatorland.com</a><br><br>If \\=\n\nyou=E2=80=99re interested, could you share your typical turnaround time for=\n\na video and any questions? Happy to tailor to your schedule.<br><br>Best,<=\n\nbr>Emma<br>Creator Partnerships @ Creatorland<br><br><h2>Emma A. - <a href=\n\n\\=3D\"mailto:emma.alexandria@creatorland.com\" target=3D\"_blank\">emma.alexandr=\n\nia@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div>\n\n</blockquote>\n\n</div>\n\n</blockquote></div></div>\n\n</blockquote>\n\n</div>\n\n--000000000000f81af9064b6ab87f--"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-009",
+		description: "Paid YouTube campaign outreach to creator Daidai. Creator declined.",
+		emails: [
+			{
+				messageId: "gt-009-msg-1",
+				threadId: "gt-009",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Emma A.\" <emma.alexandria@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "daidaiechols@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: DaiDai <> Dealsync Paid YouTube Campaign"
+					},
+					{
+						name: "date",
+						value: "Thu, 12 Feb 2026 07:53:41 -0800"
+					}
+				],
+				body: "Content-Type: text/plain; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\nNo worries, thanks for letting me know!\n\nCreatorland <https://creatorland.com> has all types of clients, so there\n\nmay be something that's a better fit down the road.\n\nFeel free to check out our job board <https://jobs.creatorland.com>.\n\nThank you for your time,\n\nEmma\n\nEmma A. - emma.alexandria@creatorland.com\n\nCreator Partnerships @ Creatorland.com\n\nOn Thu, Feb 12, 2026 at 7:52 AM daidaiechols@gmail.com wrote:\n\n> Hello,\n\n>\n\n> I am not interested\n\n>\n\n> On Thu, Feb 12, 2026 at 9:51=E2=80=AFAM Emma A. <emma.alexandria@creatorl=\n\nand.com>\n\n> wrote:\n\n>\n\n>> Hi DaiDai \\=F0=9F=91=8B,\n\n>>\n\n>> I came across your YouTube channel and think you'd be a fantastic fit fo=\n\nr\n\n>> a paid launch campaign we're running for Dealsync.\n\n>>\n\n>> What Dealsync is: an AI-powered inbox dashboard built specifically for\n\n>> creators. It automatically organizes brand deal emails, surfaces\n\n>> follow-ups, and helps you manage conversations so you don't miss\n\n>> opportunities. It can save creators 5=E2=80=9310 hours per week.\n\n>>\n\n>> Campaign details:\n\n>>\n\n>>    - A dedicated YouTube video (3=E2=80=935 minutes) demonstrating Deals=\n\nync and\n\n>>    how it could help creators like you manage sponsorships\n\n>>    - Early access to Dealsync (skip the waitlist)\n\n>>    - 7-day free trial using your real inbox\n\n>>    - Optional 15% recurring affiliate commission for 12 months\n\n>>    - Direct access to the founding team\n\n>>\n\n>> If you're interested, please share your typical rate for a dedicated\n\n>> video and your February availability. I=E2=80=99d be happy to send over \\=\n\nfull scope\n\n>> and next steps.\n\n>>\n\n>> Best,\n\n>> Emma\n\n>> Emma A. - emma.alexandria@creatorland.com\n\n>>\n\n>> Creator Partnerships @ Creatorland.com\n\n>>\n\n>\n\n--00000000000025aa2b064aa27ef4\n\nContent-Type: text/html; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\n<div><p>No worries, thanks for letting me know!</p>\n\n<p><a href=3D\"https://creatorland.com\">Creatorland</a> has all types of cli=\n\nents, so there may be something that&#39;s a better fit down the road.</p>\n\n<p>Feel free to check out our <a href=3D\"https://jobs.creatorland.com\">job \\=\n\nboard</a>.</p>\n\n<p>Thank you for your time,</p>\n\n<p>Emma</p>\n\n<h2 id=3D\"emma-a---emmaalexandriacreatorlandcom\">Emma A. - <a href=3D\"mailt=\n\no:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a></h2>\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Thu, Feb 12, 2026 at 7:52 AM <a \\=\n\nhref=3D\"mailto:daidaiechols@gmail.com\">daidaiechols@gmail.com</a> wrote:<br=\n\n></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;borde=\n\nr-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div dir=3D\"auto\">Hello,</div><div dir=3D\"auto\"><br></div><div dir=3D\"a=\n\nuto\">I am not=C2=A0interested</div><div><br><div class=3D\"gmail_quote gmail=\n\n_quote_container\"><div dir=3D\"ltr\" class=3D\"gmail_attr\">On Thu, Feb 12, 202=\n\n6 at 9:51=E2=80=AFAM Emma A. &lt;<a href=3D\"mailto:emma.alexandria@creatorl=\n\nand.com\">emma.alexandria@creatorland.com</a>&gt; wrote:<br></div><blockquot=\n\ne class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-left-width=\n\n:1px;border-left-style:solid;padding-left:1ex;border-left-color:rgb(204,204=\n\n,204)\"><div><p>Hi DaiDai \\=F0=9F=91=8B,</p>\n\n<p>I came across your YouTube channel and think you&#39;d be a fantastic fi=\n\nt for a paid launch campaign we&#39;re running for Dealsync.</p>\n\n<p>What Dealsync is: an AI-powered inbox dashboard built specifically for c=\n\nreators. It automatically organizes brand deal emails, surfaces follow-ups,=\n\nand helps you manage conversations so you don&#39;t miss opportunities. It=\n\ncan save creators 5=E2=80=9310 hours per week.</p>\n\n<p>Campaign details:</p>\n\n<ul>\n\n<li>A dedicated YouTube video (3=E2=80=935 minutes) demonstrating Dealsync \\=\n\nand how it could help creators like you manage sponsorships</li>\n\n<li>Early access to Dealsync (skip the waitlist)</li>\n\n<li>7-day free trial using your real inbox</li>\n\n<li>Optional 15% recurring affiliate commission for 12 months</li>\n\n<li>Direct access to the founding team</li>\n\n</ul>\n\n<p>If you&#39;re interested, please share your typical rate for a dedicated=\n\nvideo and your February availability. I=E2=80=99d be happy to send over fu=\n\nll scope and next steps.</p>\n\n<p>Best,<br>Emma</p>\n\n<h2 id=3D\"m_7118144183158273685emma-a---emmaalexandriacreatorlandcom\">Emma \\=\n\nA. - <a href=3D\"mailto:emma.alexandria@creatorland.com\" target=3D\"_blank\">e=\n\nmma.alexandria@creatorland.com</a></h2>\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div>\n\n</blockquote></div></div>\n\n</blockquote>\n\n</div>\n\n--00000000000025aa2b064aa27ef4--"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-010",
+		description: "Paid YouTube campaign outreach to creator Loren. Creator declined in thread...",
+		emails: [
+			{
+				messageId: "gt-010-msg-1",
+				threadId: "gt-010",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Tiana Cameron <tiana.cameron@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "moreinfo@fishstewarding.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Loren <> Dealsync Paid YouTube Campaign"
+					},
+					{
+						name: "date",
+						value: "Tue, 10 Feb 2026 12:12:25 -0800"
+					}
+				],
+				body: "Content-Type: text/plain; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\nNo worries, thanks for letting me know!\n\nCreatorland <https://creatorland.com> has all types of clients, so there\n\nmay be something that's a better fit down the road.\n\nFeel free to check out our job board <https://jobs.creatorland.com>.\n\nThank you for your time,\n\nTiana\n\nTiana C - emma.alexandria@creatorland.com\n\nCreator Partnerships @ Creatorland.com\n\nOn Tue, Feb 10, 2026 at 12:11 PM moreinfo@fishstewarding.com wrote:\n\n> Stop spamming please\n\n>\n\n>\n\n> On Feb 10, 2026, at 3:03=E2=80=AFPM, Tiana Cameron <tiana.cameron@creator=\n\nland.com>\n\n> wrote:\n\n>\n\n> Hi Loren \\=F0=9F=91=8B,\n\n>\n\n> I came across your YouTube channel and think you=E2=80=99d be a fantastic=\n\nfit for\n\n> a paid launch campaign we=E2=80=99re running for Dealsync, a creator-focu=\n\nsed AI\n\n> inbox dashboard.\n\n>\n\n> What is Dealsync? It automatically detects and organizes brand-deal\n\n> emails, surfaces follow-ups, and helps creators reclaim 5=E2=80=9310 hour=\n\ns per\n\n> week=E2=80=94without giving up read-only Gmail access.\n\n>\n\n> Campaign details:\n\n>\n\n>    - Dedicated YouTube video (3=E2=80=935 minutes) explaining Dealsync, h=\n\now it\n\n>    works, and why it matters for creators\n\n>    - Standalone video (not in-read or short)\n\n>    - Early access and a 7-day free trial\n\n>    - Optional 15% recurring affiliate commission for 12 months\n\n>    - Direct access to the founding team\n\n>    - Payment on delivery; no price negotiations here, we will align on\n\n>    terms if you=E2=80=99re interested\n\n>    - This is focused on content quality and clarity, not subscriber count\n\n>\n\n> If you=E2=80=99re open to it, could you share your typical rate for a ded=\n\nicated\n\n> video? I=E2=80=99d love to hop on a quick call to discuss details and see=\n\nif this\n\n> is a good fit.\n\n>\n\n> Thanks,\n\n> Tiana\n\n> Creator Partnerships @ Creatorland\n\n> Tiana C. - emma.alexandria@creatorland.com\n\n>\n\n> Creator Partnerships @ Creatorland.com\n\n>\n\n>\n\n>\n\n--000000000000c6b998064a7ddfeb\n\nContent-Type: text/html; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\n<div><p>No worries, thanks for letting me know!</p>\n\n<p><a href=3D\"https://creatorland.com\">Creatorland</a> has all types of cli=\n\nents, so there may be something that&#39;s a better fit down the road.</p>\n\n<p>Feel free to check out our <a href=3D\"https://jobs.creatorland.com\">job \\=\n\nboard</a>.</p>\n\n<p>Thank you for your time,</p>\n\n<p>Tiana</p>\n\n<h2 id=3D\"tiana-c---emmaalexandriacreatorlandcom\">Tiana C - <a href=3D\"mail=\n\nto:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a></h2=\n\n>\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Tue, Feb 10, 2026 at 12:11 PM <a=\n\nhref=3D\"mailto:moreinfo@fishstewarding.com\">moreinfo@fishstewarding.com</a=\n\n> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;borde=\n\nr-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<html aria-label=3D\"message body\"><head><meta http-equiv=3D\"content-typ=\n\ne\" content=3D\"text/html; charset=3Dutf-8\"></head><body style=3D\"line-break:=\n\nafter-white-space\">Stop spamming please<br id=3D\"lineBreakAtBeginningOfMess=\n\nage\"><div>\n\n<meta charset=3D\"UTF-8\"><div dir=3D\"auto\" style=3D\"color:rgb(0,0,0);letter-=\n\nspacing:normal;text-align:start;text-indent:0px;text-transform:none;white-s=\n\npace:normal;word-spacing:0px;text-decoration:none;line-break:after-white-sp=\n\nace\"><div><p class=3D\"MsoNormal\" style=3D\"margin-bottom:9pt\"><br></p></div>=\n\n</div></div><div><blockquote type=3D\"cite\"><div>On Feb 10, 2026, at 3:03=E2=\n\n\\=80=AFPM, Tiana Cameron &lt;<a href=3D\"mailto:tiana.cameron@creatorland.com=\n\n\">tiana.cameron@creatorland.com</a>&gt; wrote:</div><br class=3D\"Apple-inte=\n\nrchange-newline\"><div><div><p>Hi Loren \\=F0=9F=91=8B,</p><p>I came across yo=\n\nur YouTube channel and think you=E2=80=99d be a fantastic fit for a paid la=\n\nunch campaign we=E2=80=99re running for Dealsync, a creator-focused AI inbo=\n\nx dashboard.</p><p>What is Dealsync? It automatically detects and organizes=\n\nbrand-deal emails, surfaces follow-ups, and helps creators reclaim 5=E2=80=\n\n\\=9310 hours per week=E2=80=94without giving up read-only Gmail access.</p><=\n\np>Campaign details:</p>\n\n<ul>\n\n<li>Dedicated YouTube video (3=E2=80=935 minutes) explaining Dealsync, how \\=\n\nit works, and why it matters for creators</li>\n\n<li>Standalone video (not in-read or short)</li>\n\n<li>Early access and a 7-day free trial</li>\n\n<li>Optional 15% recurring affiliate commission for 12 months</li>\n\n<li>Direct access to the founding team</li>\n\n<li>Payment on delivery; no price negotiations here, we will align on terms=\n\nif you=E2=80=99re interested</li>\n\n<li>This is focused on content quality and clarity, not subscriber count</l=\n\ni>\n\n</ul><p>If you=E2=80=99re open to it, could you share your typical rate for=\n\na dedicated video? I=E2=80=99d love to hop on a quick call to discuss deta=\n\nils and see if this is a good fit.</p><p>Thanks,<br>Tiana<br>Creator Partne=\n\nrships @ Creatorland</p>\n\n<h2 id=3D\"tiana-c---emmaalexandriacreatorlandcom\">Tiana C. - <a href=3D\"mai=\n\nlto:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a></h=\n\n2><p>Creator Partnerships @ Creatorland.com</p>\n\n</div>\n\n</div></blockquote></div><br></body></html>\n\n</blockquote>\n\n</div>\n\n--000000000000c6b998064a7ddfeb--"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-011",
+		description: "Creator pushes back on Raybee Furniture collab, requesting payment for...",
+		emails: [
+			{
+				messageId: "gt-011-msg-1",
+				threadId: "gt-011",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "RaybeUS_Wade098@viralbrandinghub.com"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Raybee Furniture TikTok Collaboration"
+					},
+					{
+						name: "date",
+						value: "2024-06-17"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				5,
+				7
+			]
+		}
+	},
+	{
+		id: "gt-012",
+		description: "Fitnessathomeshop reaching out about gifting collaboration with commission....",
+		emails: [
+			{
+				messageId: "gt-012-msg-1",
+				threadId: "gt-012",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Fitnessathomeshop (Kaylee)"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Fitness Collaboration Inquiry"
+					},
+					{
+						name: "date",
+						value: "Not specified"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "new",
+			likely_scam: false,
+			score_range: [
+				5,
+				7
+			]
+		}
+	},
+	{
+		id: "gt-013",
+		description: "Vitalitown supplement collaboration offer via TikTok store. Generic outreach...",
+		emails: [
+			{
+				messageId: "gt-013-msg-1",
+				threadId: "gt-013",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Niki from Vitalitown TikTok store"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Vitalitown Collaboration Opportunity"
+					},
+					{
+						name: "date",
+						value: "Not specified"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "new",
+			likely_scam: false,
+			score_range: [
+				3,
+				4
+			]
+		}
+	},
+	{
+		id: "gt-014",
+		description: "Seedshub Kitchen kitchenware collaboration request. Brand reaching out with...",
+		emails: [
+			{
+				messageId: "gt-014-msg-1",
+				threadId: "gt-014",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Guko from Seedshub Kitchen"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Seedshub Kitchen Collaboration Request"
+					},
+					{
+						name: "date",
+						value: "Not specified"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "new",
+			likely_scam: false,
+			score_range: [
+				5,
+				7
+			]
+		}
+	},
+	{
+		id: "gt-015",
+		description: "FAN MAKEUP highlighting collaboration opportunity. Brand manager reaching...",
+		emails: [
+			{
+				messageId: "gt-015-msg-1",
+				threadId: "gt-015",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Sarah from FAN MAKEUP"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "FAN MAKEUP Collaboration Opportunity"
+					},
+					{
+						name: "date",
+						value: "Not specified"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "new",
+			likely_scam: false,
+			score_range: [
+				5,
+				7
+			]
+		}
+	},
+	{
+		id: "gt-016",
+		description: "AppicPlay Black Friday TikTok collaboration offer. Brand reaching out about...",
+		emails: [
+			{
+				messageId: "gt-016-msg-1",
+				threadId: "gt-016",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "AppicPlay"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "AppicPlay - Black Friday TikTok Collaboration"
+					},
+					{
+						name: "date",
+						value: "Not specified"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "new",
+			likely_scam: false,
+			score_range: [
+				5,
+				7
+			]
+		}
+	},
+	{
+		id: "gt-017",
+		description: "Cold B2B service outreach about employee benefits. NOT a scam despite .info...",
+		emails: [
+			{
+				messageId: "gt-017-msg-1",
+				threadId: "gt-017",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Jacob Guidi <j.guidi@thrivebenefits360.info>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "payroll benefits for Brian"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 15:48:31 \\+0000"
+					}
+				],
+				body: "We're helping companies like Creatorland to gain tax relief from their existing payroll that allows them to save 13K in taxes in just 4 weeks.\n\nAnd guess what? We create, manage & run everything with 0 effort on your part.\n\nI'd be happy to share more information on how we do this if it's worth exploring.\n\nWarm regards,\n\nJacob\n\nCo-founder | Thrive Benefits Group\n\nIf not, simply reply \"Nope\" & I'll disappear from your inbox."
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "new",
+			likely_scam: false,
+			score_range: [
+				3,
+				4
+			]
+		}
+	},
+	{
+		id: "gt-018",
+		description: "Out-of-office auto-reply from Brian regarding a paid YouTube campaign. OOO...",
+		emails: [
+			{
+				messageId: "gt-018-msg-1",
+				threadId: "gt-018",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Brian Freeman\" <brian@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "tiana.cameron@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "OOO - Slow to Respond Re: Paid YouTube Campaign for Dealsync — CampbellCreatives|UGC"
+					},
+					{
+						name: "date",
+						value: "Sun, 15 Mar 2026 08:42:53 -0700"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				5,
+				7
+			]
+		}
+	},
+	{
+		id: "gt-019",
+		description: "Multi-message thread about paid YouTube campaign. Creator collaboration...",
+		emails: [
+			{
+				messageId: "gt-019-msg-1",
+				threadId: "gt-019",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Tiana Cameron <tiana.cameron@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "renaystone82@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Paid YouTube Campaign for Dealsync — Creator Collaboration Opportunity"
+					},
+					{
+						name: "date",
+						value: "Sun, 15 Mar 2026 12:32:36 -0500"
+					}
+				],
+				body: "Just a quick third note about the Dealsync paid YouTube collaboration.\n\nWe’re still keen on a dedicated 3–5 minute video plus a standalone\n\nexplainer video.\n\nWhat you’d get:\n\n- Paid dedicated YouTube video (3–5 minutes)\n\n- Early access to Dealsync (skip the waitlist)\n\n- 7-day free trial with your real inbox\n\n- Locked-in early pricing\n\n- Optional 15% recurring affiliate (12 months)\n\n- Direct access to the founding team\n\nPayment on delivery.\n\nYou mentioned a rate of $250. We’ve captured that and will pass it to Nick,\n\nour campaign manager, to confirm timeline, scope, and deliverables. If you\n\nhave a portfolio or examples of software brands you’ve worked with, feel\n\nfree to share them to help us assess fit quickly.\n\nIf this is a fit, please reply with any questions or a confirmation that\n\nthe rate works so Nick can proceed with next steps.\n\nCheers,\n\nTiana C. - tiana.cameron@creatorland.com\n\nCreator Partnerships @ Creatorland.com & Dealsync\n\nTiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\nCreatorland.com\n\nOn Thu, Mar 12, 2026 at 10:38 AM tiana.cameron@creatorland.com wrote:\n\n> Awesome! We're pumped!\n\n>\n\n> I've looped in Nick who is the campaign manager for the Dealsync Campaign,\n\n> and he will jump in as the primary contact from Creatorland on this\n\n> initiative from here.\n\n>\n\n> More soon!\n\n>\n\n> Tiana\n\n>\n\n> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n> Creatorland.com\n\n>\n\n> On Thu, Mar 12, 2026 at 10:37 AM renaystone82@gmail.com wrote:\n\n>\n\n>> Yes, I would be interested.My rate for this campaign is $250 is this in\n\n>> your budget? Looking forward to hear from you.\n\n>>\n\n>> On Thu, Mar 12, 2026 at 12:32 PM Tiana Cameron <\n\n>> tiana.cameron@creatorland.com> wrote:\n\n>>\n\n>>> Hi key_stone_ren 👋,\n\n>>>\n\n>>> Just following up on my previous note about a paid YouTube collaboration\n\n>>> for Dealsync — an AI-powered inbox dashboard that helps creators manage\n\n>>> brand deals. We’re aiming for a dedicated 3–5 minute video plus a\n\n>>> standalone explainer video.\n\n>>>\n\n>>> What you get:\n\n>>>\n\n>>>    - Paid dedicated YouTube video (3–5 minutes)\n\n>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>    - 7-day free trial with your real inbox\n\n>>>    - Locked-in early pricing (discounted forever)\n\n>>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>>    - Direct access to the founding team\n\n>>>\n\n>>> Payment is delivered on delivery.\n\n>>>\n\n>>> If you're interested, please share your rate for a dedicated video and\n\n>>> any examples of software brands you've worked with. I’m happy to answer\n\n>>> questions or share more details on scope, timing, or payment terms.\n\n>>>\n\n>>>\n\n>>> Cheers,\n\n>>> Tiana C. - tiana.cameron@creatorland.com\n\n>>> Creator Partnerships @ Creatorland.com & Dealsync\n\n>>>\n\n>>> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n>>> Creatorland.com\n\n>>>\n\n>>> On Mon, Mar 9, 2026 at 10:31 AM tiana.cameron@creatorland.com wrote:\n\n>>>\n\n>>>> Hi key_stone_ren 👋,\n\n>>>>\n\n>>>> I'm Emma from Creator Partnerships at Creatorland. We're running a paid\n\n>>>> YouTube campaign for Dealsync, an AI-powered inbox dashboard that helps\n\n>>>> creators manage brand deals. We believe you could be a fantastic fit for a\n\n>>>> dedicated 3–5 minute video, plus a standalone explanation video about\n\n>>>> Dealsync.\n\n>>>>\n\n>>>> What you get:\n\n>>>>\n\n>>>>    - Paid dedicated YouTube video (3–5 minutes)\n\n>>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>>    - 7-day free trial with your real inbox\n\n>>>>    - Locked-in early pricing (discounted forever)\n\n>>>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>>>    - Direct access to the founding team\n\n>>>>\n\n>>>> Payment is delivered on delivery.\n\n>>>>\n\n>>>> If you're interested, reply with a quick note on alignment and any\n\n>>>> questions. We can also share sample brand deals or ad reads for review.\n\n>>>>\n\n>>>> Cheers,\n\n>>>> Tiana C. - tiana.cameron@creatorland.com\n\n>>>> Creator Partnerships @ Creatorland.com & Dealsync\n\n>>>>\n\n>>>> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n>>>> Creatorland.com & Dealsync\n\n>>>>\n\n>>>"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-020",
+		description: "Paid YouTube campaign opportunity with Dealsync. Active negotiation between...",
+		emails: [
+			{
+				messageId: "gt-020-msg-1",
+				threadId: "gt-020",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Tiana Cameron <tiana.cameron@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "onyinyesplace@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Paid YouTube Campaign Opportunity: Dealsync x Creatorland"
+					},
+					{
+						name: "date",
+						value: "Wed, 11 Mar 2026 10:34:58 -0500"
+					}
+				],
+				body: "Awesome! We’re moving forward and have looped in Nick, the campaign\n\nmanager, who will handle pricing discussions and next steps from here.\n\nThe campaign includes a dedicated 3–5 minute YouTube video and a standalone\n\nexplainer, plus:\n\n- Early access to Dealsync\n\n- 7-day free trial with your real inbox\n\n- Locked-in early pricing\n\n- Optional 15% recurring affiliate for 12 months\n\n- Direct access to the founding team\n\n- Payment on delivery (net terms)\n\nThis campaign is for dedicated videos only.\n\nIf you have any questions for Nick or want to share timing and scope\n\npreferences, please reply here and we’ll coordinate.\n\nBest,\n\nTiana\n\nCreator Partnerships @ Creatorland\n\nhttps://creatorland.com\n\n— Tiana C. | tiana.cameron@creatorland.com\n\nCreator Partnerships @ Creatorland.com\n\nTiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\nCreatorland.com\n\nOn Sun, Mar 8, 2026 at 9:11 AM tiana.cameron@creatorland.com wrote:\n\n> Awesome! We're pumped!\n\n>\n\n> I've looped in Nick who is the campaign manager for the Dealsync Campaign,\n\n> and he will jump in as the primary contact from Creatorland on this\n\n> initiative from here.\n\n>\n\n> More soon!\n\n>\n\n> Tiana\n\n>\n\n> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n> Creatorland.com\n\n>\n\n> On Sun, Mar 8, 2026 at 9:10 AM onyinyesplace@gmail.com wrote:\n\n>\n\n>> Hi hun\n\n>>\n\n>> Thank you for reaching out❤️ Yes I would love to collaborate with you,\n\n>> but I do charge $600 per video for collaborations\n\n>>\n\n>>\n\n>> On Sun, 8 Mar 2026 at 15:33, Tiana Cameron <tiana.cameron@creatorland.com>\n\n>> wrote:\n\n>>\n\n>>> Hi Iamonyinyeh,\n\n>>>\n\n>>> Just a quick follow-up on the paid YouTube campaign for Dealsync. We’re\n\n>>> excited to see if you’d be interested in a dedicated 3–5 minute video plus\n\n>>> a standalone explainer, to share how Dealsync helps creators manage brand\n\n>>> deals.\n\n>>>\n\n>>> Perks include:\n\n>>>\n\n>>>    - Early access to Dealsync\n\n>>>    - 7-day free trial with your real inbox\n\n>>>    - Locked-in early pricing\n\n>>>    - Optional 15% recurring affiliate (12 months)\n\n>>>    - Direct access to the founding team\n\n>>>    - Payment on delivery (net terms)\n\n>>>\n\n>>> If this sounds like a fit, please reply with a quick yes and any\n\n>>> questions — we can share timing and scope details.\n\n>>>\n\n>>>\n\n>>> Best,\n\n>>> Tiana\n\n>>> Creator Partnerships @ Creatorland\n\n>>> https://creatorland.com\n\n>>>\n\n>>> — Tiana C. | tiana.cameron@creatorland.com\n\n>>> Creator Partnerships @ Creatorland.com\n\n>>>\n\n>>> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n>>> Creatorland.com\n\n>>>\n\n>>> On Thu, Mar 5, 2026 at 7:31 AM tiana.cameron@creatorland.com wrote:\n\n>>>\n\n>>>> Hi Iamonyinyeh 👋,\n\n>>>>\n\n>>>> We’re running a paid YouTube campaign for Dealsync, an AI-powered inbox\n\n>>>> dashboard that helps creators manage brand deals. We think you could be a\n\n>>>> fantastic fit.\n\n>>>>\n\n>>>> What you’d get:\n\n>>>>\n\n>>>>    - A dedicated YouTube video (3–5 minutes)\n\n>>>>    - A standalone video (not an in-read)\n\n>>>>    - A creator-to-creator explainer of what Dealsync is, how it works,\n\n>>>>    and why it matters\n\n>>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>>    - 7-day free trial with your real inbox\n\n>>>>    - Locked-in early pricing (discounted forever)\n\n>>>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>>>    - Direct access to the founding team\n\n>>>>\n\n>>>> Payment on delivery (net terms). Dealsync uses read-only Gmail access;\n\n>>>> it cannot send, delete, or modify emails.\n\n>>>>\n\n>>>> Note: This campaign is for dedicated YouTube videos only.\n\n>>>>\n\n>>>> If you’re interested, simply reply with a quick yes and any questions\n\n>>>> you have. It’s great to see how creators like you could tell the Dealsync\n\n>>>> story.\n\n>>>>\n\n>>>> Best,\n\n>>>> Tiana\n\n>>>> Creator Partnerships @ Creatorland\n\n>>>> https://creatorland.com\n\n>>>>\n\n>>>> — Tiana C. | tiana.cameron@creatorland.com\n\n>>>> Creator Partnerships @ Creatorland.com & Dealsync\n\n>>>>\n\n>>>> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n>>>> Creatorland.com & Dealsync\n\n>>>>\n\n>>>"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-021",
+		description: "Paid YouTube collaboration for Dealsync. Active thread with creator...",
+		emails: [
+			{
+				messageId: "gt-021-msg-1",
+				threadId: "gt-021",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Kira Ellis <kira.ellis@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "makaylanaputi12@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Paid YouTube collaboration for Dealsync"
+					},
+					{
+						name: "date",
+						value: "Tue, 10 Mar 2026 11:13:57 -0700"
+					}
+				],
+				body: "Just checking in about the Dealsync YouTube collaboration. We'd love to\n\nfeature a dedicated 3–5 minute video plus a creator-to-creator explainer on\n\nhow Dealsync helps creators manage brand partnerships.\n\nIf you're still interested, please share your rate for a dedicated video\n\nand any examples of software-brand content you've done.\n\nHappy to provide the campaign brief and answer any questions about scope,\n\ntiming, or payment terms.\n\nBest,\n\nKira\n\nKira E. - kira.ellis@creatorland.com Creator Partnerships @ Creatorland.com\n\nOn Sun, Mar 8, 2026 at 11:40 PM kira.ellis@creatorland.com wrote:\n\n> Awesome! We're pumped!\n\n>\n\n> I've looped in Nick who is the campaign manager for the Dealsync Campaign,\n\n> and he will jump in as the primary contact from Creatorland on this\n\n> initiative from here.\n\n>\n\n> More soon!\n\n>\n\n> Kira\n\n>\n\n> Kira E. - kira.ellis@creatorland.com Creator Partnerships @\n\n> Creatorland.com\n\n>\n\n> On Sun, Mar 8, 2026 at 11:39 PM makaylanaputi12@gmail.com wrote:\n\n>\n\n>> Hi Kira,\n\n>>\n\n>>  I hope you had a great weekend! I get very overwhelmed with my inbox, so\n\n>> something like Dealsync would save me a lot of time.\n\n>>\n\n>> Here’s a link to a UGC ad I created for Jergen’s and a sit-down style\n\n>> video where I speak directly to th viewer.\n\n>>\n\n>> https://www.instagram.com/reel/C8rzx1dpSYU/?igsh=NTc4MTIwNjQ2YQ==\n\n>>\n\n>> https://www.tiktok.com/t/ZP84Y273S/\n\n>>\n\n>>\n\n>> I don’t have any current examples of software-content however I am\n\n>> extremely flexible with why your team wants to accomplish!\n\n>>\n\n>>\n\n>>  Would you be able to send me more info on the campaign? I can provide\n\n>> you with a quote afterwards. I am more than happy to negotiate with your\n\n>> team budget to create some great content! If you have any more questions\n\n>> for me, please let me know. （╹◡╹）\n\n>>\n\n>>  Kind regards,\n\n>>\n\n>>  Makayla\n\n>>\n\n>> On Sat, Mar 7, 2026 at 10:12 AM Kira Ellis <kira.ellis@creatorland.com>\n\n>> wrote:\n\n>>\n\n>>> Hi Makayla 👋,\n\n>>>\n\n>>> Just following up on the paid Dealsync YouTube collaboration. We’d love\n\n>>> to feature a dedicated 3–5 minute video plus a creator-to-creator explainer\n\n>>> on how Dealsync helps creators manage brand partnerships.\n\n>>>\n\n>>> If you’re still interested, please share your rate for a dedicated video\n\n>>> and any examples of software-brand content you’ve done.\n\n>>>\n\n>>> If you have questions or want more details on scope, timing, or payment\n\n>>> terms, I’m happy to provide them.\n\n>>>\n\n>>>\n\n>>> Kira E. - kira.ellis@creatorland.com Creator Partnerships @\n\n>>> Creatorland.com\n\n>>>\n\n>>> On Wed, Mar 4, 2026 at 10:11 AM kira.ellis@creatorland.com wrote:\n\n>>>\n\n>>>> Hi Makayla 👋,\n\n>>>>\n\n>>>> We’re running a paid YouTube collaboration for Dealsync, an AI-powered\n\n>>>> inbox dashboard that helps creators manage brand partnerships. Dealsync\n\n>>>> automatically detects brand deal emails, organizes conversations by status,\n\n>>>> surfaces follow-ups, and saves creators 5–10 hours per week.\n\n>>>>\n\n>>>> We think you’d be a great fit for a dedicated 3–5 minute video plus a\n\n>>>> creator-to-creator explanation of how Dealsync works and why it matters.\n\n>>>>\n\n>>>> What you’d get:\n\n>>>>\n\n>>>>    - Paid dedicated YouTube video (3–5 minutes)\n\n>>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>>    - 7-day free trial using your real inbox\n\n>>>>    - Forever-discounted early pricing\n\n>>>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>>>    - Direct access to the founding team\n\n>>>>\n\n>>>> If you’re interested, please share your rate for a dedicated video and\n\n>>>> any samples of brand-deal content you’ve done.\n\n>>>>\n\n>>>> Looking forward to hearing from you!\n\n>>>>\n\n>>>> Best,\n\n>>>> Kira\n\n>>>>\n\n>>>> Kira E. - kira.ellis@creatorland.com Creator Partnerships @\n\n>>>> Creatorland.com\n\n>>>>\n\n>>>"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-022",
+		description: "Paid YouTube campaign for Dealsync. Quick follow-up note from Creatorland...",
+		emails: [
+			{
+				messageId: "gt-022-msg-1",
+				threadId: "gt-022",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Tiana Cameron <tiana.cameron@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "nyahugc@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Paid YouTube campaign for Dealsync — quick note from Creatorland"
+					},
+					{
+						name: "date",
+						value: "Tue, 10 Mar 2026 11:30:04 -0700"
+					}
+				],
+				body: "Thanks again for the quick reply and for sharing your rate and portfolio.\n\nWe’re excited about the fit and your openness to testing Dealsync during\n\nthe trial and affiliate option.\n\nNext steps: I can share 3–4 sample script options (3–5 minutes) and a\n\nconcise campaign brief with tone, messaging, and deliverables to help you\n\nevaluate the concept.\n\nWould you like me to send those now, or would you prefer a quick call to\n\nreview?\n\nBest,\n\nTiana Cameron\n\nCreator Partnerships\n\nCreatorland\n\nhttps://creatorland.com\n\nhttps://dealsync.creatorland.com\n\nTiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\nCreatorland.com\n\nOn Tue, Mar 10, 2026 at 10:42 AM tiana.cameron@creatorland.com wrote:\n\n> Awesome! We're pumped!\n\n>\n\n> I've looped in Nick who is the campaign manager for the Dealsync Campaign,\n\n> and he will jump in as the primary contact from Creatorland on this\n\n> initiative from here.\n\n>\n\n> More soon!\n\n>\n\n> Tiana\n\n>\n\n> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n> Creatorland.com\n\n>\n\n> On Tue, Mar 10, 2026 at 10:41 AM nyahugc@gmail.com wrote:\n\n>\n\n>> Hi Emma,\n\n>>\n\n>>\n\n>> Thanks for reaching out and for thinking of me for this campaign.\n\n>> Dealsync sounds like a really useful tool for creators managing brand\n\n>> partnerships, so I’d be happy to learn more.\n\n>>\n\n>>\n\n>> For a dedicated 3–5 minute YouTube video, my rate would be $250. I’m also\n\n>> open to exploring the affiliate component and testing the platform during\n\n>> the trial to make sure the content feels authentic and helpful for my\n\n>> audience.\n\n>>\n\n>>\n\n>> You can view examples of my work and creative strategy here:\n\n>>\n\n>> https://creativelynyah.my.canva.site/ugc-creaative-strategy\n\n>>\n\n>>\n\n>> I’d love to see the example scripts you mentioned and hear more about the\n\n>> creative direction for the campaign.\n\n>>\n\n>>\n\n>> Looking forward to hearing from you.\n\n>>\n\n>>\n\n>> Best,\n\n>>\n\n>> Nyah\n\n>>\n\n>>\n\n>> On Sun, 8 Mar 2026 at 02:12, Tiana Cameron <tiana.cameron@creatorland.com>\n\n>> wrote:\n\n>>\n\n>>> Hi Roseyposey 👋,\n\n>>>\n\n>>> I’m Emma from Creatorland’s Creator Partnerships team, reaching out on\n\n>>> behalf of Dealsync — an AI-powered inbox dashboard built specifically for\n\n>>> creators managing brand partnerships. We’re running a paid YouTube campaign\n\n>>> and think your storytelling style would be a perfect fit.\n\n>>>\n\n>>> What you’d get:\n\n>>>\n\n>>>    - A dedicated YouTube video (3–5 minutes)\n\n>>>    - A standalone video (not an in-read or short)\n\n>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>    - 7-day free trial using your real inbox\n\n>>>    - Locked-in early pricing (discounted forever)\n\n>>>    - Optional 15% recurring affiliate commission for 12 months\n\n>>>    - Direct access to the founding team\n\n>>>\n\n>>> Details:\n\n>>>\n\n>>>    - We prioritize content quality and clarity over follower count.\n\n>>>    - Payment on delivery (net terms).\n\n>>>\n\n>>> Next steps:\n\n>>> If you’re interested, please share your typical rates for a dedicated\n\n>>> video and any sample brand collaborations (links or clips). We’ll review\n\n>>> quickly and follow up.\n\n>>>\n\n>>> If you’d like, I can share a few example scripts to help you evaluate\n\n>>> the concept.\n\n>>>\n\n>>> Looking forward to hearing from you!\n\n>>>\n\n>>> — Tiana Cameron\n\n>>> Creator Partnerships\n\n>>> Creatorland\n\n>>> https://creatorland.com\n\n>>> https://dealsync.creatorland.com\n\n>>>\n\n>>> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n>>> Creatorland.com\n\n>>>\n\n>>> On Wed, Mar 4, 2026 at 10:11 AM tiana.cameron@creatorland.com wrote:\n\n>>>\n\n>>>> Hi Roseyposey 👋,\n\n>>>>\n\n>>>> I’m Emma from Creatorland’s Creator Partnerships team, reaching out on\n\n>>>> behalf of Dealsync — an AI-powered inbox dashboard built specifically for\n\n>>>> creators managing brand partnerships. We’re running a paid YouTube campaign\n\n>>>> and think your storytelling style would be a perfect fit.\n\n>>>>\n\n>>>> What you’d get:\n\n>>>>\n\n>>>>    - A dedicated YouTube video (3–5 minutes)\n\n>>>>    - A standalone video (not an in-read or short)\n\n>>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>>    - 7-day free trial using your real inbox\n\n>>>>    - Locked-in early pricing (discounted forever)\n\n>>>>    - Optional 15% recurring affiliate commission for 12 months\n\n>>>>    - Direct access to the founding team\n\n>>>>\n\n>>>> Details:\n\n>>>>\n\n>>>>    - We prioritize content quality and clarity over follower count.\n\n>>>>    - Payment on delivery (net terms).\n\n>>>>\n\n>>>> Next steps:\n\n>>>> If you’re interested, please share your typical rates for a dedicated\n\n>>>> video and any sample brand collaborations (links or clips). We’ll review\n\n>>>> quickly and follow up.\n\n>>>>\n\n>>>> If you’d like, I can share a few example scripts to help you evaluate\n\n>>>> the concept.\n\n>>>>\n\n>>>> Looking forward to hearing from you!\n\n>>>>\n\n>>>> — Tiana Cameron\n\n>>>> Creator Partnerships\n\n>>>> Creatorland\n\n>>>> https://creatorland.com\n\n>>>> https://dealsync.creatorland.com\n\n>>>>\n\n>>>> Tiana C. - tiana.cameron@creatorland.com Creator Partnerships @\n\n>>>> Creatorland.com & Dealsync\n\n>>>>\n\n>>>"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-023",
+		description: "Multi-message thread about paid YouTube campaign with creator Tadii. Active...",
+		emails: [
+			{
+				messageId: "gt-023-msg-1",
+				threadId: "gt-023",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Nick Zier <nick@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "Brian Freeman <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "Fwd: Tadii <> Dealsync Paid YouTube Campaign"
+					},
+					{
+						name: "date",
+						value: "Thu, 19 Feb 2026 19:38:03 -0800"
+					}
+				],
+				body: "Content-Type: text/plain; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\nthis is for the usage fee, so we can use it after the campaign is over.\n\nStill worth it? Or pass on this one\n\n---------- Forwarded message ---------\n\n**From:** Tadi Gudza <hello@tadiig.co.uk>\n\n**Date:** Wed, Feb 18, 2026 at 7:31=E2=80=AFAM\n\n**Subject:** Re: Tadii <> Dealsync Paid YouTube Campaign\n\n**To:** Nick Zier <nick@creatorland.com>\n\nHiya,\n\nHere=E2=80=99s the pricing for 90-day usage:\n\n-\n\nOrganic only (socials, website, email): $87.50\n\n-\n\nOrganic \\+ Paid Ads: $113.75\n\nThese cover the 90-day period, and we can easily extend the usage after\n\nthat if needed.\n\nPlease let me know your thoughts\n\nKindest Regards\n\nTadii G\n\nhello@tadiig.co.uk\n\nYouTube\n\nInstagram\n\nThe Starter Kit\n\nOn Wed, 18 Feb 2026 at 15:24, Nick Zier <nick@creatorland.com> wrote:\n\n> Understood, what is the amount of the usage fee?\n\n>\n\n> On Tue, Feb 17, 2026 at 11:21=E2=80=AFPM Tadi Gudza <hello@tadiig.co.uk> \\=\n\nwrote:\n\n>\n\n>> Hello,\n\n>>\n\n>> That=E2=80=99s fine but there will be a usage fee associated with using \\=\n\nmy\n\n>> content.\n\n>>\n\n>> Kindest Regards\n\n>>\n\n>> Tadii G\n\n>> hello@tadiig.co.uk\n\n>> YouTube\n\n>> Instagram\n\n>> The Starter Kit\n\n>>\n\n>>\n\n>> On Wed, 18 Feb 2026 at 01:32, Nick Zier <nick@creatorland.com> wrote:\n\n>>\n\n>>> Received! Will send for signature on our end. Before proceeding, we wan=\n\nt\n\n>>> to clarify that we're interested in using the raw content footage from \\=\n\nthe\n\n>>> YouTube short for our own marketing purposes, highlighting to Creatorla=\n\nnd\n\n>>> users, etc.\n\n>>>\n\n>>> I just want to confirm that's okay with you.\n\n>>>\n\n>>> On Tue, Feb 17, 2026 at 12:33=E2=80=AFPM Tadi Gudza <hello@tadiig.co.uk=\n\n> wrote:\n\n>>>\n\n>>>> Hello Nick,\n\n>>>>\n\n>>>> Please find attached the signed agreement.\n\n>>>>\n\n>>>> Kindest Regards\n\n>>>>\n\n>>>> Tadii G\n\n>>>> hello@tadiig.co.uk\n\n>>>> YouTube <https://www.youtube.com/c/TadiiG>\n\n>>>> Instagram <https://www.instagram.com/tadii.g/>\n\n>>>> The Starter Kit\n\n>>>> <https://mailchi.mp/dd9fcb7408ef/clothingbrandstarterkit>\n\n>>>>\n\n>>>>\n\n>>>> *This email and its attachments may be confidential and are intended\n\n>>>> solely for the use of the intended recipient. If you are not the inten=\n\nded\n\n>>>> recipient of this email and its attachments, you must take no action b=\n\nased\n\n>>>> upon them, nor must you copy or show them to anyone. Please contact th=\n\ne\n\n>>>> sender if you believe you have received this email in error.*\n\n>>>>\n\n>>>>\n\n>>>> On Tue, Feb 17, 2026 at 4:01=E2=80=AFAM Nick Zier <nick@creatorland.co=\n\nm> wrote:\n\n>>>>\n\n>>>>> Great! I'm attaching the agreement to this email; please review and\n\n>>>>> sign at your earliest convenience. Once returned, I'll coordinate sig=\n\nnature\n\n>>>>> on our end \\+ send you a copy of the final agreement before we get sta=\n\nrted.\n\n>>>>>\n\n>>>>> Let me know if you have any questions!\n\n>>>>>\n\n>>>>> On Wed, Feb 11, 2026 at 11:45=E2=80=AFPM Tadi Gudza <hello@tadiig.co.=\n\nuk>\n\n>>>>> wrote:\n\n>>>>>\n\n>>>>>> Hiya,\n\n>>>>>>\n\n>>>>>> I am happy to agree to that!\n\n>>>>>>\n\n>>>>>> Kindest Regards\n\n>>>>>>\n\n>>>>>> Tadii G\n\n>>>>>> hello@tadiig.co.uk\n\n>>>>>> YouTube\n\n>>>>>> Instagram\n\n>>>>>> The Starter Kit\n\n>>>>>>\n\n>>>>>>\n\n>>>>>> On Thu, 12 Feb 2026 at 03:51, Nick Zier <nick@creatorland.com> wrote=\n\n:\n\n>>>>>>\n\n>>>>>>> Hi,\n\n>>>>>>>\n\n>>>>>>> I spoke with the team about this, we can do $175, but that's the\n\n>>>>>>> highest we can extend for a YouTube Short campaign.\n\n>>>>>>>\n\n>>>>>>> Let me know what you think!\n\n>>>>>>>\n\n>>>>>>> On Wed, Feb 11, 2026 at 3:40=E2=80=AFAM Tadi Gudza <hello@tadiig.co=\n\n.uk>\n\n>>>>>>> wrote:\n\n>>>>>>>\n\n>>>>>>>> Hello,\n\n>>>>>>>>\n\n>>>>>>>> For your budget of 300usd I am happy to create a dedicated YouTube\n\n>>>>>>>> short.\n\n>>>>>>>>\n\n>>>>>>>> Kindest Regards\n\n>>>>>>>>\n\n>>>>>>>> Tadii G\n\n>>>>>>>> hello@tadiig.co.uk\n\n>>>>>>>> YouTube\n\n>>>>>>>> Instagram\n\n>>>>>>>> The Starter Kit\n\n>>>>>>>>\n\n>>>>>>>>\n\n>>>>>>>> On Wed, 11 Feb 2026 at 04:41, Nick Zier <nick@creatorland.com>\n\n>>>>>>>> wrote:\n\n>>>>>>>>\n\n>>>>>>>>> Hey Tadii! Excited to continue the conversation here.\n\n>>>>>>>>>\n\n>>>>>>>>> We're working with other creators with similar engagement priced\n\n>>>>>>>>> at $150-300 USD. Would that work for you?\n\n>>>>>>>>>\n\n>>>>>>>>> I'll attach the brief as well that contains more details of our\n\n>>>>>>>>> expectations here:\n\n>>>>>>>>>\n\n>>>>>>>>>    - Dealsync Opportunity for Creators\n\n>>>>>>>>>    <https://docs.google.com/document/d/1Zd9ZlF9o1FTHuidoIynetpeyt=\n\nzT7UGtvKUqmWMk_RNs/edit?tab=3Dt.0#heading=3Dh.ttgahyn6385m>\n\n>>>>>>>>>\n\n>>>>>>>>>\n\n>>>>>>>>> Looking forward!\n\n>>>>>>>>>\n\n>>>>>>>>> Nick\n\n>>>>>>>>>\n\n>>>>>>>>> On Tue, Feb 10, 2026 at 8:39=E2=80=AFPM Kira Ellis <\n\n>>>>>>>>> kira.ellis@creatorland.com> wrote:\n\n>>>>>>>>>\n\n>>>>>>>>>> Glad to hear it!\n\n>>>>>>>>>>\n\n>>>>>>>>>> I've looped in Nick who is the campaign manager for the Dealsync\n\n>>>>>>>>>> Campaign, and he will jump in as the primary contact from Creato=\n\nrland on\n\n>>>>>>>>>> this initiative from here.\n\n>>>>>>>>>>\n\n>>>>>>>>>> More soon!\n\n>>>>>>>>>>\n\n>>>>>>>>>> Kira\n\n>>>>>>>>>> Kira E. - emma.alexandria@creatorland.com\n\n>>>>>>>>>>\n\n>>>>>>>>>> Creator Partnerships @ Creatorland.com\n\n>>>>>>>>>>\n\n>>>>>>>>>> On Mon, Feb 9, 2026 at 12:39 PM hello@tadiig.co.uk wrote:\n\n>>>>>>>>>>\n\n>>>>>>>>>>> Hi Kira,\n\n>>>>>>>>>>>\n\n>>>>>>>>>>> Thank you for your email and for following up. I=E2=80=99m defi=\n\nnitely\n\n>>>>>>>>>>> interested in this collaboration, and organising collaborative \\=\n\nemails is\n\n>>>>>>>>>>> something I can really relate to.\n\n>>>>>>>>>>>\n\n>>>>>>>>>>> For a dedicated YouTube video, my current rate is \\=C2=A3500, wh=\n\nich\n\n>>>>>>>>>>> includes 90-day usage rights. Please let me know if that works \\=\n\nfor you, and\n\n>>>>>>>>>>> I=E2=80=99d be happy to discuss next steps and any campaign det=\n\nails.\n\n>>>>>>>>>>>\n\n>>>>>>>>>>>\n\n>>>>>>>>>>> Looking forward to hearing from you.\n\n>>>>>>>>>>>\n\n>>>>>>>>>>> Kindest Regards\n\n>>>>>>>>>>>\n\n>>>>>>>>>>> Tadii G\n\n>>>>>>>>>>> hello@tadiig.co.uk\n\n>>>>>>>>>>> YouTube\n\n>>>>>>>>>>> Instagram\n\n>>>>>>>>>>> The Starter Kit\n\n>>>>>>>>>>>\n\n>>>>>>>>>>>\n\n>>>>>>>>>>> On Mon, 9 Feb 2026 at 20:32, Kira E. <kira.ellis@creatorland.co=\n\nm>\n\n>>>>>>>>>>> wrote:\n\n>>>>>>>>>>>\n\n>>>>>>>>>>>> Hi Tadii G \\=F0=9F=91=8B,\n\n>>>>>>>>>>>>\n\n>>>>>>>>>>>> Just following up on the paid, dedicated YouTube video for\n\n>>>>>>>>>>>> Dealsync. If you=E2=80=99re open to it, here=E2=80=99s what we=\n\n\\=E2=80=99re offering:\n\n>>>>>>>>>>>>\n\n>>>>>>>>>>>>    - 3=E2=80=935 minute dedicated video \\+ standalone explainer\n\n>>>>>>>>>>>>    - Early access to Dealsync (skip the waitlist) and a 30-day\n\n>>>>>>>>>>>>    free trial with your real inbox\n\n>>>>>>>>>>>>    - Optional 15% recurring affiliate for 12 months\n\n>>>>>>>>>>>>    - Direct access to the founding team\n\n>>>>>>>>>>>>    - Payment on delivery (net terms)\n\n>>>>>>>>>>>>\n\n>>>>>>>>>>>> If you have a rate in mind for the dedicated video or any\n\n>>>>>>>>>>>> questions, I=E2=80=99m happy to chat. If now isn=E2=80=99t the=\n\nright time, no problem=E2=80=94just\n\n>>>>>>>>>>>> let me know and I can circle back later.\n\n>>>>>>>>>>>>\n\n>>>>>>>>>>>> Cheers,\n\n>>>>>>>>>>>> Kira\n\n>>>>>>>>>>>> Kira E. - emma.alexandria@creatorland.com\n\n>>>>>>>>>>>>\n\n>>>>>>>>>>>> Creator Partnerships @ Creatorland.com\n\n>>>>>>>>>>>>\n\n>>>>>>>>>>>> On Fri, Feb 6, 2026 at 12:31 PM kira.ellis@creatorland.com\n\n>>>>>>>>>>>> wrote:\n\n>>>>>>>>>>>>\n\n>>>>>>>>>>>>> Hi Tadii G \\=F0=9F=91=8B,\n\n>>>>>>>>>>>>>\n\n>>>>>>>>>>>>> I came across your YouTube channel and think you=E2=80=99d be=\n\na\n\n>>>>>>>>>>>>> fantastic fit for a paid launch we=E2=80=99re running for Dea=\n\nlsync, our\n\n>>>>>>>>>>>>> creator-focused AI inbox dashboard.\n\n>>>>>>>>>>>>>\n\n>>>>>>>>>>>>> Dealsync helps creators manage brand partnerships by\n\n>>>>>>>>>>>>> automatically organizing deal emails, surfacing follow-ups, a=\n\nnd saving you\n\n>>>>>>>>>>>>> 5=E2=80=9310 hours per week.\n\n>>>>>>>>>>>>>\n\n>>>>>>>>>>>>> For this campaign you=E2=80=99d produce a dedicated YouTube v=\n\nideo (3=E2=80=935\n\n>>>>>>>>>>>>> minutes) explaining Dealsync, plus a standalone explainer vid=\n\neo. Perks\n\n>>>>>>>>>>>>> include:\n\n>>>>>>>>>>>>>\n\n>>>>>>>>>>>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>>>>>>>>>>>    - 30-day free trial to test it and create content\n\n>>>>>>>>>>>>>    - Optional 15% recurring affiliate commission for 12 month=\n\ns\n\n>>>>>>>>>>>>>    - Direct access to the founding team and priority support\n\n>>>>>>>>>>>>>    - Payment on delivery (net terms)\n\n>>>>>>>>>>>>>\n\n>>>>>>>>>>>>> We=E2=80=99re prioritizing content quality and clarity over s=\n\nubscriber\n\n>>>>>>>>>>>>> count. If you=E2=80=99re interested, please share your typica=\n\nl rate for a dedicated\n\n>>>>>>>>>>>>> video and any questions you have.\n\n>>>>>>>>>>>>>\n\n>>>>>>>>>>>>> Thanks,\n\n>>>>>>>>>>>>> Kira E. - emma.alexandria@creatorland.com\n\n>>>>>>>>>>>>>\n\n>>>>>>>>>>>>> Creator Partnerships @ Creatorland.com\n\n>>>>>>>>>>>>>\n\n>>>>>>>>>>>>\n\n--000000000000a51369064b3926cc\n\nContent-Type: text/html; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\n<div dir=3D\"ltr\">this is for the usage fee, so we can use it after the camp=\n\naign is over. Still worth it? Or pass on this one<br><br><div class=3D\"gmai=\n\nl_quote gmail_quote_container\"><div dir=3D\"ltr\" class=3D\"gmail_attr\">------=\n\n---- Forwarded message ---------<br>From: <strong class=3D\"gmail_sendername=\n\n\" dir=3D\"auto\">Tadi Gudza</strong> <span dir=3D\"auto\">&lt;<a href=3D\"mailto=\n\n:hello@tadiig.co.uk\">hello@tadiig.co.uk</a>&gt;</span><br>Date: Wed, Feb 18=\n\n, 2026 at 7:31=E2=80=AFAM<br>Subject: Re: Tadii &lt;&gt; Dealsync Paid YouT=\n\nube Campaign<br>To: Nick Zier &lt;<a href=3D\"mailto:nick@creatorland.com\">n=\n\nick@creatorland.com</a>&gt;<br></div><br><br><div><div style=3D\"font-size:i=\n\nnherit\">\n\n<div style=3D\"font-size:inherit\">\n\n<p dir=3D\"auto\">Hiya,</p><p dir=3D\"auto\"><span style=3D\"font-size:inherit;f=\n\nont-family:-apple-system,sans-serif\">Here=E2=80=99s the pricing for 90-day \\=\n\nusage:</span><br></p>\n\n<p></p><ul><li>\n\n<p>Organic only (socials, website, email): $87.50</p>\n\n</li><li>\n\n<p dir=3D\"auto\">Organic \\+ Paid Ads: $113.75</p></li></ul>\n\n<p>These cover the 90-day period, and we can easily extend the usage after \\=\n\nthat if needed.</p>\n\n<p dir=3D\"auto\"><span style=3D\"font-family:-apple-system,sans-serif;font-si=\n\nze:inherit\">Please let me know your thoughts=C2=A0</span></p><p dir=3D\"auto=\n\n\"><span style=3D\"font-family:-apple-system,sans-serif;font-size:inherit\"><b=\n\nr></span></p><p dir=3D\"auto\"><span style=3D\"font-family:-apple-system,sans-=\n\nserif;font-size:inherit\">Kindest Regards</span><br></p></div></div><div><di=\n\nv dir=3D\"ltr\" class=3D\"gmail_signature\" data-smartmail=3D\"gmail_signature\">=\n\n<br>Tadii G<br><a href=3D\"mailto:hello@tadiig.co.uk\" target=3D\"_blank\">hell=\n\no@tadiig.co.uk</a><br>YouTube<br>Instagram<br>The Starter Kit</div></div></=\n\ndiv><div><br></div><div><br><div class=3D\"gmail_quote\"><div dir=3D\"ltr\" cla=\n\nss=3D\"gmail_attr\">On Wed, 18 Feb 2026 at 15:24, Nick Zier &lt;<a href=3D\"ma=\n\nilto:nick@creatorland.com\" target=3D\"_blank\">nick@creatorland.com</a>&gt; w=\n\nrote:<br></div><blockquote class=3D\"gmail_quote\" style=3D\"margin:0 0 0 .8ex=\n\n;border-left:1px #ccc solid;padding-left:1ex\"><div dir=3D\"ltr\">Understood, \\=\n\nwhat is the amount of the usage fee?</div><br><div class=3D\"gmail_quote\"><d=\n\niv dir=3D\"ltr\" class=3D\"gmail_attr\">On Tue, Feb 17, 2026 at 11:21=E2=80=AFP=\n\nM Tadi Gudza &lt;<a href=3D\"mailto:hello@tadiig.co.uk\" target=3D\"_blank\">he=\n\nllo@tadiig.co.uk</a>&gt; wrote:<br></div><blockquote class=3D\"gmail_quote\" \\=\n\nstyle=3D\"margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);pa=\n\ndding-left:1ex\"><div dir=3D\"auto\">Hello,</div><div dir=3D\"auto\"><br></div><=\n\ndiv dir=3D\"auto\">That=E2=80=99s fine but there will be a usage fee associat=\n\ned with using my content.=C2=A0<br clear=3D\"all\"><br clear=3D\"all\"><div dir=\n\n\\=3D\"auto\"><div dir=3D\"ltr\" class=3D\"gmail_signature\">Kindest Regards<br><br=\n\n>Tadii G<br><a href=3D\"mailto:hello@tadiig.co.uk\" target=3D\"_blank\">hello@t=\n\nadiig.co.uk</a><br>YouTube<br>Instagram<br>The Starter Kit</div></div></div=\n\n><div><br></div><div><br><div class=3D\"gmail_quote\"><div dir=3D\"ltr\" class=\n\n\\=3D\"gmail_attr\">On Wed, 18 Feb 2026 at 01:32, Nick Zier &lt;<a href=3D\"mail=\n\nto:nick@creatorland.com\" target=3D\"_blank\">nick@creatorland.com</a>&gt; wro=\n\nte:<br></div><blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px \\=\n\n0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex\"><div dir=3D\"=\n\nltr\">Received! Will send for signature on our end. Before proceeding, we wa=\n\nnt to clarify that we&#39;re interested in using the raw content footage fr=\n\nom the YouTube short for our own marketing purposes, highlighting to Creato=\n\nrland users, etc.=C2=A0<div><br></div><div>I just want to confirm that&#39;=\n\ns okay with you.</div></div><br><div class=3D\"gmail_quote\"><div dir=3D\"ltr\"=\n\nclass=3D\"gmail_attr\">On Tue, Feb 17, 2026 at 12:33=E2=80=AFPM Tadi Gudza &=\n\nlt;<a href=3D\"mailto:hello@tadiig.co.uk\" target=3D\"_blank\">hello@tadiig.co.=\n\nuk</a>&gt; wrote:<br></div><blockquote class=3D\"gmail_quote\" style=3D\"margi=\n\nn:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex=\n\n\"><div dir=3D\"ltr\"><div>Hello=C2=A0Nick,=C2=A0</div><div><br></div><div>Ple=\n\nase find attached the signed=C2=A0agreement.=C2=A0</div><div><br></div><div=\n\n><div dir=3D\"ltr\" class=3D\"gmail_signature\"><div dir=3D\"ltr\"><div style=3D\"=\n\ncolor:rgb(34,34,34)\">Kindest Regards</div><div style=3D\"color:rgb(34,34,34)=\n\n\"><br></div><div style=3D\"color:rgb(34,34,34)\">Tadii G</div><div style=3D\"c=\n\nolor:rgb(34,34,34)\"><a href=3D\"mailto:hello@tadiig.co.uk\" target=3D\"_blank\"=\n\n>hello@tadiig.co.uk</a></div><div style=3D\"color:rgb(34,34,34)\"><a href=3D\"=\n\nhttps://www.youtube.com/c/TadiiG\" target=3D\"_blank\">YouTube</a></div><div s=\n\ntyle=3D\"color:rgb(34,34,34)\"><a href=3D\"https://www.instagram.com/tadii.g/\"=\n\ntarget=3D\"_blank\">Instagram</a></div><div style=3D\"color:rgb(34,34,34)\"><a=\n\nhref=3D\"https://mailchi.mp/dd9fcb7408ef/clothingbrandstarterkit\" target=3D=\n\n\"_blank\">The Starter Kit</a></div><div style=3D\"color:rgb(34,34,34)\"><br></=\n\ndiv><div style=3D\"color:rgb(34,34,34)\"><img width=3D\"96\" height=3D\"81\" src=\n\n\\=3D\"https://ci3.googleusercontent.com/mail-sig/AIorK4weGQXvffBUHcxJvQ-UKimx=\n\nJ5GZx0mjFA9yxXMK0vsl0w2DhpPz1Rv3Gec6lTeeZfw5WA478D9to0TY\"></div><div style=\n\n\\=3D\"color:rgb(34,34,34)\"><br></div><div style=3D\"color:rgb(34,34,34)\"><span=\n\nstyle=3D\"color:rgb(29,29,29);font-family:museo-sans,Helvetica,Arial,sans-s=\n\nerif\"><font size=3D\"1\"><i>This email and its attachments may be confidentia=\n\nl and are intended solely for the use of the intended recipient. If you are=\n\nnot the intended recipient of this email and its attachments, you must tak=\n\ne no action based upon them, nor must you copy or show them to anyone. Plea=\n\nse contact the sender if you believe you have received this email in error.=\n\n</i></font></span><br></div></div></div></div><br></div><br><div class=3D\"g=\n\nmail_quote\"><div dir=3D\"ltr\" class=3D\"gmail_attr\">On Tue, Feb 17, 2026 at 4=\n\n:01=E2=80=AFAM Nick Zier &lt;<a href=3D\"mailto:nick@creatorland.com\" target=\n\n\\=3D\"_blank\">nick@creatorland.com</a>&gt; wrote:<br></div><blockquote class=\n\n\\=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-left:1px solid rg=\n\nb(204,204,204);padding-left:1ex\"><div dir=3D\"ltr\"><div id=3D\"m_-87647958097=\n\n74681038m_-7232112028594609768m_7182564859625019725m_-4311562531838159069m_=\n\n2168239390789277731m_4831693196553530205gmail-:2f0\" aria-label=3D\"Message B=\n\nody\" role=3D\"textbox\" aria-multiline=3D\"true\" style=3D\"direction:ltr;min-he=\n\night:85px\" aria-controls=3D\":2hm\" aria-expanded=3D\"false\">Great! I&#39;m at=\n\ntaching the agreement to this email; please review and sign at your earlies=\n\nt convenience. Once returned, I&#39;ll coordinate signature on our end \\+ se=\n\nnd you a copy of the final agreement before we get started.<div><br></div><=\n\ndiv>Let=C2=A0me know if you have any questions!</div></div></div><br><div c=\n\nlass=3D\"gmail_quote\"><div dir=3D\"ltr\" class=3D\"gmail_attr\">On Wed, Feb 11, \\=\n\n2026 at 11:45=E2=80=AFPM Tadi Gudza &lt;<a href=3D\"mailto:hello@tadiig.co.u=\n\nk\" target=3D\"_blank\">hello@tadiig.co.uk</a>&gt; wrote:<br></div><blockquote=\n\nclass=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-left:1px so=\n\nlid rgb(204,204,204);padding-left:1ex\"><div dir=3D\"auto\">Hiya,</div><div di=\n\nr=3D\"auto\"><br></div><div dir=3D\"auto\">I am happy to agree to that!=C2=A0<b=\n\nr clear=3D\"all\"><br clear=3D\"all\"><div dir=3D\"auto\"><div dir=3D\"ltr\" class=\n\n\\=3D\"gmail_signature\">Kindest Regards<br><br>Tadii G<br><a href=3D\"mailto:he=\n\nllo@tadiig.co.uk\" target=3D\"_blank\">hello@tadiig.co.uk</a><br>YouTube<br>In=\n\nstagram<br>The Starter Kit</div></div></div><div><br></div><div><br><div cl=\n\nass=3D\"gmail_quote\"><div dir=3D\"ltr\" class=3D\"gmail_attr\">On Thu, 12 Feb 20=\n\n26 at 03:51, Nick Zier &lt;<a href=3D\"mailto:nick@creatorland.com\" target=\n\n\\=3D\"_blank\">nick@creatorland.com</a>&gt; wrote:<br></div><blockquote class=\n\n\\=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-left:1px solid rg=\n\nb(204,204,204);padding-left:1ex\"><div dir=3D\"ltr\">Hi,<div><br></div><div>I \\=\n\nspoke with the team about this, we can do $175, but that&#39;s the highest \\=\n\nwe can extend for a YouTube Short campaign.=C2=A0</div><div><br></div><div>=\n\nLet me know what you think!</div></div><br><div class=3D\"gmail_quote\"><div \\=\n\ndir=3D\"ltr\" class=3D\"gmail_attr\">On Wed, Feb 11, 2026 at 3:40=E2=80=AFAM Ta=\n\ndi Gudza &lt;<a href=3D\"mailto:hello@tadiig.co.uk\" target=3D\"_blank\">hello@=\n\ntadiig.co.uk</a>&gt; wrote:<br></div><blockquote class=3D\"gmail_quote\" styl=\n\ne=3D\"margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);paddin=\n\ng-left:1ex\"><div dir=3D\"auto\">Hello,</div><div dir=3D\"auto\"><br></div><div \\=\n\ndir=3D\"auto\">For your budget of 300usd I am happy to create a dedicated You=\n\nTube short.=C2=A0<br clear=3D\"all\"><br clear=3D\"all\"><div dir=3D\"auto\"><div=\n\ndir=3D\"ltr\" class=3D\"gmail_signature\">Kindest Regards<br><br>Tadii G<br><a=\n\nhref=3D\"mailto:hello@tadiig.co.uk\" target=3D\"_blank\">hello@tadiig.co.uk</a=\n\n><br>YouTube<br>Instagram<br>The Starter Kit</div></div></div><div><br></di=\n\nv><div><br><div class=3D\"gmail_quote\"><div dir=3D\"ltr\" class=3D\"gmail_attr\"=\n\n>On Wed, 11 Feb 2026 at 04:41, Nick Zier &lt;<a href=3D\"mailto:nick@creator=\n\nland.com\" target=3D\"_blank\">nick@creatorland.com</a>&gt; wrote:<br></div><b=\n\nlockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-le=\n\nft:1px solid rgb(204,204,204);padding-left:1ex\"><div dir=3D\"ltr\"><div dir=\n\n\\=3D\"ltr\"><div><div dir=3D\"ltr\"><div><div id=3D\"m_-8764795809774681038m_-723=\n\n2112028594609768m_7182564859625019725m_-4311562531838159069m_21682393907892=\n\n77731m_4831693196553530205m_-8716093768279022865m_6495805237520708515m_-768=\n\n4568271301717170m_5930735168032501273m_-732155864644643946gmail-:1r5\" aria-=\n\nlabel=3D\"Message Body\" role=3D\"textbox\" aria-multiline=3D\"true\" style=3D\"di=\n\nrection:ltr;min-height:85px\" aria-controls=3D\":20j\" aria-expanded=3D\"false\"=\n\n><div dir=3D\"ltr\"><div><font style=3D\"color:rgb(0,0,0)\">Hey Tadii! Excited \\=\n\nto continue the conversation here.</font></div><div><font style=3D\"color:rg=\n\nb(0,0,0)\"><br></font></div><div><font style=3D\"color:rgb(0,0,0)\">We&#39;re \\=\n\nworking with other creators with similar engagement priced at $150-300 USD.=\n\nWould that work for you?<br></font><div><font style=3D\"color:rgb(0,0,0)\"><=\n\nbr></font></div><div><font style=3D\"color:rgb(0,0,0)\">I&#39;ll attach the b=\n\nrief as well that contains more details of our expectations here:</font><di=\n\nv><ul><li style=3D\"margin-left:15px\"><a href=3D\"https://docs.google.com/doc=\n\nument/d/1Zd9ZlF9o1FTHuidoIynetpeytzT7UGtvKUqmWMk_RNs/edit?tab=3Dt.0#heading=\n\n\\=3Dh.ttgahyn6385m\" target=3D\"_blank\"><font style=3D\"color:rgb(0,0,255)\">Dea=\n\nlsync Opportunity for Creators</font></a></li></ul><div><font style=3D\"colo=\n\nr:rgb(0,0,0)\"><br></font></div></div></div></div><div><font style=3D\"color:=\n\nrgb(0,0,0)\">Looking forward!</font></div></div></div></div></div></div></di=\n\nv></div><div dir=3D\"ltr\"><div dir=3D\"ltr\"><div><div dir=3D\"ltr\"><div><div i=\n\nd=3D\"m_-8764795809774681038m_-7232112028594609768m_7182564859625019725m_-43=\n\n11562531838159069m_2168239390789277731m_4831693196553530205m_-8716093768279=\n\n022865m_6495805237520708515m_-7684568271301717170m_5930735168032501273m_-73=\n\n2155864644643946gmail-:1r5\" aria-label=3D\"Message Body\" role=3D\"textbox\" ar=\n\nia-multiline=3D\"true\" style=3D\"direction:ltr;min-height:85px\" aria-controls=\n\n\\=3D\":20j\" aria-expanded=3D\"false\"><div dir=3D\"ltr\"><div><font style=3D\"colo=\n\nr:rgb(0,0,0)\"><br></font></div><div><font style=3D\"color:rgb(0,0,0)\">Nick</=\n\nfont></div></div></div></div></div></div></div></div><br><div class=3D\"gmai=\n\nl_quote\"><div dir=3D\"ltr\" class=3D\"gmail_attr\">On Tue, Feb 10, 2026 at 8:39=\n\n\\=E2=80=AFPM Kira Ellis &lt;<a href=3D\"mailto:kira.ellis@creatorland.com\" ta=\n\nrget=3D\"_blank\">kira.ellis@creatorland.com</a>&gt; wrote:<br></div><blockqu=\n\note class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-left:1px=\n\nsolid rgb(204,204,204);padding-left:1ex\"><div dir=3D\"ltr\"><p>Glad to hear \\=\n\nit!</p><p>I&#39;ve looped in Nick who is the campaign manager for the Deals=\n\nync Campaign, and he will jump in as the primary contact from Creatorland o=\n\nn this initiative from here.</p>\n\n<p>More soon!</p>\n\n<p>Kira</p>\n\n<h2 id=3D\"m_-8764795809774681038m_-7232112028594609768m_7182564859625019725=\n\nm_-4311562531838159069m_2168239390789277731m_4831693196553530205m_-87160937=\n\n68279022865m_6495805237520708515m_-7684568271301717170m_5930735168032501273=\n\nm_-2048143928002481057m_-639064879245571006kira-e---emmaalexandriacreatorla=\n\nndcom\">Kira E. - <a href=3D\"mailto:emma.alexandria@creatorland.com\" target=\n\n\\=3D\"_blank\">emma.alexandria@creatorland.com</a></h2>\n\n<p>Creator Partnerships @ Creatorland.com<br></p>\n\n</div><br>\n\n<div class=3D\"gmail_quote\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Mon, Feb 9, 2026 at 12:39 PM=\n\n<a href=3D\"mailto:hello@tadiig.co.uk\" target=3D\"_blank\">hello@tadiig.co.uk=\n\n</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;b=\n\norder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div dir=3D\"auto\"><div style=3D\"font-size:inherit\">\n\n<div style=3D\"font-size:inherit\">\n\n<p dir=3D\"auto\">Hi Kira,</p>\n\n<p dir=3D\"auto\">Thank you for your email and for following up. I=E2=80=99m \\=\n\ndefinitely interested in this collaboration, and organising collaborative e=\n\nmails is something I can really relate to.</p>\n\n<p>For a dedicated YouTube video, my current rate is \\=C2=A3500, which inclu=\n\ndes 90-day usage rights. Please let me know if that works for you, and I=E2=\n\n\\=80=99d be happy to discuss next steps and any campaign details.</p>\n\n<p><br></p>\n\n<p>Looking forward to hearing from you.</p>\n\n</div>\n\n</div><br></div><div dir=3D\"auto\"><div dir=3D\"auto\"><div dir=3D\"ltr\" class=\n\n\\=3D\"gmail_signature\">Kindest Regards<br><br>Tadii G<br><a href=3D\"mailto:he=\n\nllo@tadiig.co.uk\" target=3D\"_blank\">hello@tadiig.co.uk</a><br>YouTube<br>In=\n\nstagram<br>The Starter Kit</div></div></div><div><br></div><div><br><div cl=\n\nass=3D\"gmail_quote\"><div dir=3D\"ltr\" class=3D\"gmail_attr\">On Mon, 9 Feb 202=\n\n6 at 20:32, Kira E. &lt;<a href=3D\"mailto:kira.ellis@creatorland.com\" targe=\n\nt=3D\"_blank\">kira.ellis@creatorland.com</a>&gt; wrote:<br></div><blockquote=\n\nclass=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-left:1px so=\n\nlid rgb(204,204,204);padding-left:1ex\"><div><p>Hi Tadii G \\=F0=9F=91=8B,</p>\n\n<p>Just following up on the paid, dedicated YouTube video for Dealsync. If \\=\n\nyou=E2=80=99re open to it, here=E2=80=99s what we=E2=80=99re offering:</p>\n\n<ul>\n\n<li>3=E2=80=935 minute dedicated video \\+ standalone explainer</li>\n\n<li>Early access to Dealsync (skip the waitlist) and a 30-day free trial wi=\n\nth your real inbox</li>\n\n<li>Optional 15% recurring affiliate for 12 months</li>\n\n<li>Direct access to the founding team</li>\n\n<li>Payment on delivery (net terms)</li>\n\n</ul>\n\n<p>If you have a rate in mind for the dedicated video or any questions, I=\n\n\\=E2=80=99m happy to chat. If now isn=E2=80=99t the right time, no problem=\n\n\\=E2=80=94just let me know and I can circle back later.</p>\n\n<p>Cheers,<br>Kira</p></div><div>\n\n<h2 id=3D\"m_-8764795809774681038m_-7232112028594609768m_7182564859625019725=\n\nm_-4311562531838159069m_2168239390789277731m_4831693196553530205m_-87160937=\n\n68279022865m_6495805237520708515m_-7684568271301717170m_5930735168032501273=\n\nm_-2048143928002481057m_-639064879245571006m_-2679602455023466218kira-e---e=\n\nmmaalexandriacreatorlandcom\">Kira E. - <a href=3D\"mailto:emma.alexandria@cr=\n\neatorland.com\" target=3D\"_blank\">emma.alexandria@creatorland.com</a></h2>\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div><br>\n\n<div class=3D\"gmail_quote\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Fri, Feb 6, 2026 at 12:31 PM <a hr=\n\nef=3D\"mailto:kira.ellis@creatorland.com\" target=3D\"_blank\">kira.ellis@creat=\n\norland.com</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-=\n\nleft:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div><p>Hi Tadii G \\=F0=9F=91=8B,</p>\n\n<p>I came across your YouTube channel and think you=E2=80=99d be a fantasti=\n\nc fit for a paid launch we=E2=80=99re running for Dealsync, our creator-foc=\n\nused AI inbox dashboard.</p>\n\n<p>Dealsync helps creators manage brand partnerships by automatically organ=\n\nizing deal emails, surfacing follow-ups, and saving you 5=E2=80=9310 hours \\=\n\nper week.</p>\n\n<p>For this campaign you=E2=80=99d produce a dedicated YouTube video (3=E2=\n\n\\=80=935 minutes) explaining Dealsync, plus a standalone explainer video. Pe=\n\nrks include:</p>\n\n<ul>\n\n<li>Early access to Dealsync (skip the waitlist)</li>\n\n<li>30-day free trial to test it and create content</li>\n\n<li>Optional 15% recurring affiliate commission for 12 months</li>\n\n<li>Direct access to the founding team and priority support</li>\n\n<li>Payment on delivery (net terms)</li>\n\n</ul>\n\n<p>We=E2=80=99re prioritizing content quality and clarity over subscriber c=\n\nount. If you=E2=80=99re interested, please share your typical rate for a de=\n\ndicated video and any questions you have.</p>\n\n<p>Thanks,</p>\n\n<h2 id=3D\"m_-8764795809774681038m_-7232112028594609768m_7182564859625019725=\n\nm_-4311562531838159069m_2168239390789277731m_4831693196553530205m_-87160937=\n\n68279022865m_6495805237520708515m_-7684568271301717170m_5930735168032501273=\n\nm_-2048143928002481057m_-639064879245571006m_-2679602455023466218kira-e---e=\n\nmmaalexandriacreatorlandcom\">Kira E. - <a href=3D\"mailto:emma.alexandria@cr=\n\neatorland.com\" target=3D\"_blank\">emma.alexandria@creatorland.com</a></h2>\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div>\n\n</blockquote>\n\n</div>\n\n</blockquote></div></div>\n\n</blockquote>\n\n</div>\n\n</blockquote></div>\n\n</blockquote></div></div>\n\n</blockquote></div>\n\n</blockquote></div></div>\n\n</blockquote></div>\n\n</blockquote></div>\n\n</blockquote></div>\n\n</blockquote></div></div>\n\n</blockquote></div>\n\n</blockquote></div></div>\n\n</div></div>\n\n--000000000000a51369064b3926cc--"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-024",
+		description: "Paid YouTube campaign with Think Smart channel. Creator engaged, discussion...",
+		emails: [
+			{
+				messageId: "gt-024-msg-1",
+				threadId: "gt-024",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Emma A.\" <emma.alexandria@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "financebrands1@gmail.com, emma.alexandria@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Think Smart <> Dealsync Paid YouTube Campaign"
+					},
+					{
+						name: "date",
+						value: "Thu, 19 Feb 2026 18:13:19 -0500"
+					}
+				],
+				body: "Content-Type: text/plain; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\nHi Think Smart,\n\nFollowing up on the Dealsync paid YouTube campaign. We're excited about\n\nyour interest and your proposal.\n\nWe originally planned a 3-5 minute dedicated video. I see you suggested\n\n8-10 minutes at $589, including full integration, CTA, high-quality\n\nediting, etc., and you're open to a 15% recurring affiliate.\n\nCould you confirm which deliverable you'd prefer (3-5 min standard vs 8-10\n\nmin at the proposed rate) and share your ideal timeline and any key points\n\nyou'd want covered? If you have questions about payment terms, happy to\n\nchat.\n\nBest,\n\nEmma\n\nEmma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\nCreatorland.com\n\nOn Mon, Feb 16, 2026 at 3:15 PM emma.alexandria@creatorland.com wrote:\n\n> Awesome! We're pumped!\n\n>\n\n> I've looped in Nick who is the campaign manager for the Dealsync Campaign=\n\n,\n\n> and he will jump in as the primary contact from Creatorland on this\n\n> initiative from here.\n\n>\n\n> More soon!\n\n>\n\n> Emma\n\n>\n\n> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n> Creatorland.com\n\n>\n\n> On Mon, Feb 16, 2026 at 3:14 PM financebrands1@gmail.com wrote:\n\n>\n\n>> Thanks for following up I really appreciate it!\n\n>>\n\n>> Yes, we=E2=80=99d be happy to explore this collaboration with Dealsync. \\=\n\nThe offer\n\n>> looks like a great fit for our audience, especially since we focus heavi=\n\nly\n\n>> on tools that help creators and online entrepreneurs save time, scale, a=\n\nnd\n\n>> automate their workflow.\n\n>>\n\n>> For a dedicated YouTube video (8=E2=80=9310 minutes), our rate is $589.\n\n>>\n\n>> This includes:\n\n>>\n\n>>\n\n>>    -\n\n>>\n\n>>    A full dedicated video focused on Dealsync\n\n>>    -\n\n>>\n\n>>    Natural integration \\+ clear explanation of the benefits\n\n>>    -\n\n>>\n\n>>    Strong CTA with your link in the description \\+ pinned comment\n\n>>    -\n\n>>\n\n>>    High-quality editing \\+ optimized title/thumbnail strategy\n\n>>\n\n>> We=E2=80=99re also open to including the affiliate option (15% recurring=\n\n) as an\n\n>> added bonus on top of the fixed campaign fee.\n\n>>\n\n>> If that works for your budget, we can start right away feel free to shar=\n\ne\n\n>> your preferred timeline, key points you=E2=80=99d like us to cover, and \\=\n\npayment\n\n>> terms.\n\n>>\n\n>> Looking forward to working together!\n\n>>\n\n>>\n\n>> On Mon, 16 Feb 2026 at 23:12 Emma A. <emma.alexandria@creatorland.com>\n\n>> wrote:\n\n>>\n\n>>> Hi Think Smart,\n\n>>>\n\n>>> Just circling back on the paid YouTube campaign for Dealsync. We'd love\n\n>>> to explore if this is a fit for your channel.\n\n>>>\n\n>>> What you'd get:\n\n>>>\n\n>>>    - A dedicated 3-5 minute video explaining Dealsync and why it\n\n>>>    matters for creators\n\n>>>    - Early access to Dealsync (skip the waitlist) \\+ 30-day free trial\n\n>>>    - Optional 15% recurring affiliate commission for 12 months\n\n>>>    - Direct access to the founding team\n\n>>>\n\n>>> If you're open to it, could you share your typical rate for a dedicated\n\n>>> video? If you have any questions or want more details on scope, timing,=\n\nor\n\n>>> payment terms, I=E2=80=99m happy to chat.\n\n>>>\n\n>>>\n\n>>> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>>> Creatorland.com\n\n>>>\n\n>>> On Fri, Feb 13, 2026 at 3:10 PM emma.alexandria@creatorland.com wrote:\n\n>>>\n\n>>>> Hi Think Smart \\=F0=9F=91=8B,\n\n>>>>\n\n>>>> I came across your YouTube channel and think you'd be a fantastic fit\n\n>>>> for a paid launch we're running this February for Dealsync, our AI-pow=\n\nered\n\n>>>> inbox dashboard designed for creators.\n\n>>>>\n\n>>>> Dealsync automatically organizes brand deal emails, surfaces\n\n>>>> follow-ups, and helps you manage partnerships=E2=80=94saving creators \\=\n\n5=E2=80=9310 hours\n\n>>>> per week.\n\n>>>>\n\n>>>> For this campaign, you'll get:\n\n>>>>\n\n>>>>    - A dedicated YouTube video (3=E2=80=935 minutes) explaining Dealsy=\n\nnc and\n\n>>>>    why it matters for creators\n\n>>>>    - Early access to Dealsync (skip the waitlist) \\+ 30-day free trial\n\n>>>>    - Optional 15% recurring affiliate commission for 12 months\n\n>>>>    - Direct access to the founding team\n\n>>>>\n\n>>>> If you're interested, could you share your typical rate for a dedicate=\n\nd\n\n>>>> video and any questions you have? The team is excited to chat.\n\n>>>>\n\n>>>> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n>>>> Creatorland.com\n\n>>>>\n\n>>>\n\n--0000000000004daa18064b35739f\n\nContent-Type: text/html; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\n<div>Hi Think Smart,<br><br>Following up on the Dealsync paid YouTube campa=\n\nign. We&#39;re excited about your interest and your proposal.<br><br>We ori=\n\nginally planned a 3-5 minute dedicated video. I see you suggested 8-10 minu=\n\ntes at $589, including full integration, CTA, high-quality editing, etc., a=\n\nnd you&#39;re open to a 15% recurring affiliate.<br><br>Could you confirm w=\n\nhich deliverable you&#39;d prefer (3-5 min standard vs 8-10 min at the prop=\n\nosed rate) and share your ideal timeline and any key points you&#39;d want \\=\n\ncovered? If you have questions about payment terms, happy to chat.<br><br>B=\n\nest,<br>Emma<br><br><h2>Emma A. - <a href=3D\"mailto:emma.alexandria@creator=\n\nland.com\">emma.alexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Mon, Feb 16, 2026 at 3:15 PM=\n\n<a href=3D\"mailto:emma.alexandria@creatorland.com\">emma.alexandria@creator=\n\nland.com</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;b=\n\norder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div>Awesome! We&#39;re pumped!<br><br>I&#39;ve looped in Nick who \\=\n\nis the campaign manager for the Dealsync Campaign, and he will jump in as t=\n\nhe primary contact from Creatorland on this initiative from here. <br><br>M=\n\nore soon!<br><br>Emma<br><br><h2>Emma A. - <a href=3D\"mailto:emma.alexandri=\n\na@creatorland.com\">emma.alexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Mon, Feb 16, 2026 at 3:14 PM <=\n\na href=3D\"mailto:financebrands1@gmail.com\">financebrands1@gmail.com</a> wro=\n\nte:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;bor=\n\nder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div><div style=3D\"font-size:inherit\">\n\n<div style=3D\"font-size:inherit\">\n\n<p dir=3D\"auto\">Thanks for following up I really appreciate it!</p>\n\n<p dir=3D\"auto\">Yes, we=E2=80=99d be happy to explore this collaboration wi=\n\nth Dealsync. The offer looks like a great fit for our audience, especially \\=\n\nsince we focus heavily on tools that help creators and online entrepreneurs=\n\nsave time, scale, and automate their workflow.</p>\n\n<p>For a dedicated YouTube video (8=E2=80=9310 minutes), our rate is $589.<=\n\n/p>\n\n<p>This includes:</p>\n\n<p></p><ul><li>\n\n<p>A full dedicated video focused on Dealsync</p>\n\n</li><li>\n\n<p>Natural integration \\+ clear explanation of the benefits</p>\n\n</li><li>\n\n<p>Strong CTA with your link in the description \\+ pinned comment</p>\n\n</li><li>\n\n<p dir=3D\"auto\">High-quality editing \\+ optimized title/thumbnail strategy</=\n\np></li></ul>\n\n<p dir=3D\"auto\">We=E2=80=99re also open to including the affiliate option (=\n\n15% recurring) as an added bonus on top of the fixed campaign fee.</p>\n\n<p dir=3D\"auto\">If that works for your budget, we can start right away feel=\n\nfree to share your preferred timeline, key points you=E2=80=99d like us to=\n\ncover, and payment terms.</p>\n\n<p>Looking forward to working together!</p>\n\n</div>\n\n</div><br></div><div><br><div class=3D\"gmail_quote gmail_quote_container\"><=\n\ndiv dir=3D\"ltr\" class=3D\"gmail_attr\">On Mon, 16 Feb 2026 at 23:12 Emma A. &=\n\nlt;<a href=3D\"mailto:emma.alexandria@creatorland.com\">emma.alexandria@creat=\n\norland.com</a>&gt; wrote:<br></div><blockquote class=3D\"gmail_quote\" style=\n\n\\=3D\"margin:0 0 0 .8ex;border-left:1px #ccc solid;padding-left:1ex\"><div>Hi \\=\n\nThink Smart,<br><br>Just circling back on the paid YouTube campaign for Dea=\n\nlsync. We&#39;d love to explore if this is a fit for your channel.<br><br>W=\n\nhat you&#39;d get:<br><ul>\n\n<li>A dedicated 3-5 minute video explaining Dealsync and why it matters for=\n\ncreators</li>\n\n<li>Early access to Dealsync (skip the waitlist) \\+ 30-day free trial</li>\n\n<li>Optional 15% recurring affiliate commission for 12 months</li>\n\n<li>Direct access to the founding team</li>\n\n</ul>\n\nIf you&#39;re open to it, could you share your typical rate for a dedicated=\n\nvideo? If you have any questions or want more details on scope, timing, or=\n\npayment terms, I=E2=80=99m happy to chat.</div><div><br><br><h2>Emma A. - \\=\n\n<a href=3D\"mailto:emma.alexandria@creatorland.com\" target=3D\"_blank\">emma.a=\n\nlexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Fri, Feb 13, 2026 at 3:10 PM <a hr=\n\nef=3D\"mailto:emma.alexandria@creatorland.com\" target=3D\"_blank\">emma.alexan=\n\ndria@creatorland.com</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-=\n\nleft:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div>Hi Think Smart \\=F0=9F=91=8B,<br><br>I came across your YouTube channel=\n\nand think you&#39;d be a fantastic fit for a paid launch we&#39;re running=\n\nthis February for Dealsync, our AI-powered inbox dashboard designed for cr=\n\neators.<br><br>Dealsync automatically organizes brand deal emails, surfaces=\n\nfollow-ups, and helps you manage partnerships=E2=80=94saving creators 5=E2=\n\n\\=80=9310 hours per week.<br><br>For this campaign, you&#39;ll get:<br><ul>\n\n<li>A dedicated YouTube video (3=E2=80=935 minutes) explaining Dealsync and=\n\nwhy it matters for creators</li>\n\n<li>Early access to Dealsync (skip the waitlist) \\+ 30-day free trial</li>\n\n<li>Optional 15% recurring affiliate commission for 12 months</li>\n\n<li>Direct access to the founding team</li>\n\n</ul>\n\nIf you&#39;re interested, could you share your typical rate for a dedicated=\n\nvideo and any questions you have? The team is excited to chat.<br><br><h2>=\n\nEmma A. - <a href=3D\"mailto:emma.alexandria@creatorland.com\" target=3D\"_bla=\n\nnk\">emma.alexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div>\n\n</blockquote>\n\n</div>\n\n</blockquote></div></div>\n\n</blockquote>\n\n</div>\n\n</blockquote>\n\n</div>\n\n--0000000000004daa18064b35739f--"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-025",
+		description: "Paid YouTube campaign discussion with Future AI creator. Creator directed to...",
+		emails: [
+			{
+				messageId: "gt-025-msg-1",
+				threadId: "gt-025",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Emma <emma.alexandria@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "partnership@future-ai-brain.com, emma.alexandria@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Future AI <> Dealsync Paid YouTube Campaign"
+					},
+					{
+						name: "date",
+						value: "Mon, 16 Feb 2026 19:33:19 \\+0000"
+					}
+				],
+				body: "Content-Type: text/plain; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\nHi YTRanker Team,\n\nFollowing our outreach to Future AI regarding a paid YouTube collaboration\n\nfor Dealsync, we=E2=80=99re connecting with your agency to discuss terms fo=\n\nr a\n\ndedicated 3=E2=80=935 minute video and a standalone follow-up explaining ho=\n\nw\n\nDealsync helps creators manage brand deals in a chaotic inbox.\n\nCampaign highlights:\n\n- Dedicated YouTube video (3=E2=80=935 minutes)\n\n- Standalone video explaining what Dealsync is and why it matters\n\n- Early access to Dealsync (skip the waitlist) and a 7-day trial using\n\nthe creator=E2=80=99s real inbox\n\n- Locked-in early pricing for early adopters\n\n- Optional 15% recurring affiliate commission for 12 months on any\n\npaying subscribers generated from the video\n\n- Direct access to the founding team for priority support\n\nWe=E2=80=99d appreciate your flat-fee rate for a dedicated video and any te=\n\nrms or\n\nrequirements you typically need. If you have examples of similar campaigns,\n\nplease share.\n\nIf helpful, we can provide a detailed brief and timing, and coordinate\n\ndirectly with the Dealsync team.\n\nCould you also share your expected budget range for a project of this scope\n\nso we can align quickly?\n\nThank you,\n\nEmma\n\nEmma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\nCreatorland.com\n\nOn Fri, Feb 13, 2026 at 11:35 AM emma.alexandria@creatorland.com wrote:\n\n> No worries, thanks for letting me know!\n\n>\n\n> Creatorland <https://creatorland.com> has all types of clients, so there\n\n> may be something that's a better fit down the road.\n\n>\n\n> Feel free to check out our job board <https://jobs.creatorland.com>.\n\n>\n\n> Thank you for your time,\n\n>\n\n> Emma\n\n>\n\n> Emma A. - emma.alexandria@creatorland.com Creator Partnerships @\n\n> Creatorland.com\n\n>\n\n> On Fri, Feb 13, 2026 at 11:35 AM partnership@future-ai-brain.com wrote:\n\n>\n\n>> \\=EF=BB=BFHi Emma !\n\n>>\n\n>> To ensure a smoother collaboration process, please direct all partnershi=\n\np\n\n>> inquiries (flat-fee only) to our dedicated agency:\n\n>>\n\n>> Email: collab@ytranker.net\n\n>> Telegram: YTRanker_NET\n\n>>\n\n>> Important Notes:\n\n>>\n\n>> This agency manages all collaboration requests on our behalf.\n\n>>\n\n>> Only flat-fee partnership proposals will be reviewed=E2=80=94other email=\n\ns may not\n\n>> receive a response.\n\n>>\n\n>> For non-collab matters, refer to our standard support channels.\n\n>>\n\n>> Thank you for your cooperation!\n\n>>\n\n>\n\n--000000000000ffc17e064af606c4\n\nContent-Type: text/html; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\n<div>Hi YTRanker Team,<br><br>Following our outreach to Future AI regarding=\n\na paid YouTube collaboration for Dealsync, we=E2=80=99re connecting with y=\n\nour agency to discuss terms for a dedicated 3=E2=80=935 minute video and a \\=\n\nstandalone follow-up explaining how Dealsync helps creators manage brand de=\n\nals in a chaotic inbox.<br><br>Campaign highlights:<br><ul>\n\n<li>Dedicated YouTube video (3=E2=80=935 minutes)</li>\n\n<li>Standalone video explaining what Dealsync is and why it matters</li>\n\n<li>Early access to Dealsync (skip the waitlist) and a 7-day trial using th=\n\ne creator=E2=80=99s real inbox</li>\n\n<li>Locked-in early pricing for early adopters</li>\n\n<li>Optional 15% recurring affiliate commission for 12 months on any paying=\n\nsubscribers generated from the video</li>\n\n<li>Direct access to the founding team for priority support</li>\n\n</ul>\n\nWe=E2=80=99d appreciate your flat-fee rate for a dedicated video and any te=\n\nrms or requirements you typically need. If you have examples of similar cam=\n\npaigns, please share.<br><br>If helpful, we can provide a detailed brief an=\n\nd timing, and coordinate directly with the Dealsync team.<br><br>Could you \\=\n\nalso share your expected budget range for a project of this scope so we can=\n\nalign quickly?<br><br>Thank you,<br>Emma<br><br><h2>Emma A. - <a href=3D\"m=\n\nailto:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a><=\n\n/h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Fri, Feb 13, 2026 at 11:35 A=\n\nM <a href=3D\"mailto:emma.alexandria@creatorland.com\">emma.alexandria@creato=\n\nrland.com</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;b=\n\norder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div>No worries, thanks for letting me know!<br><br><a href=3D\"http=\n\ns://creatorland.com\">Creatorland</a> has all types of clients, so there may=\n\nbe something that&#39;s a better fit down the road.<br><br>Feel free to ch=\n\neck out our <a href=3D\"https://jobs.creatorland.com\">job board</a>.<br><br>=\n\nThank you for your time,<br><br>Emma<br><br><h2>Emma A. - <a href=3D\"mailto=\n\n:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a></h2>\n\nCreator Partnerships @ Creatorland.com</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Fri, Feb 13, 2026 at 11:35 AM <a h=\n\nref=3D\"mailto:partnership@future-ai-brain.com\">partnership@future-ai-brain.=\n\ncom</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-=\n\nleft:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div><div><span class=3D\"ql-cursor\">=EF=BB=BF</span>Hi Emma !</div><div><=\n\nbr></div><div>To ensure a smoother collaboration process, please direct all=\n\npartnership inquiries (flat-fee only) to our dedicated agency:</div><div><=\n\nbr></div><div>Email:=C2=A0<a href=3D\"mailto:collab@ytranker.net\" rel=3D\"noo=\n\npener noreferrer\" target=3D\"_blank\" style=3D\"color:rgb(17,85,204)\">collab@y=\n\ntranker.net</a></div><div>Telegram: YTRanker_NET</div><div><br></div><div>I=\n\nmportant Notes:</div><div><br></div><div>This agency manages all collaborat=\n\nion requests on our behalf.</div><div><br></div><div>Only flat-fee partners=\n\nhip proposals will be reviewed=E2=80=94other emails may not receive a respo=\n\nnse.</div><div><br></div><div>For non-collab matters, refer to our standard=\n\nsupport channels.</div><div><br></div><div>Thank you for your cooperation!=\n\n</div></div>\n\n</blockquote>\n\n</div>\n\n</blockquote>\n\n</div>\n\n--000000000000ffc17e064af606c4--"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-026",
+		description: "Multi-message paid YouTube campaign thread with creator Olivia Gudaniec....",
+		emails: [
+			{
+				messageId: "gt-026-msg-1",
+				threadId: "gt-026",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Nick Zier <nick@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "Brian Freeman <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "Fwd: Olivia Gudaniec <> Dealsync Paid YouTube Campaign"
+					},
+					{
+						name: "date",
+						value: "Wed, 11 Feb 2026 19:54:24 -0800"
+					}
+				],
+				body: "Content-Type: text/plain; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\nDo we have an agreement that I can amend for this and then send? I couldn't\n\nfind any past ones from Tari\n\n---------- Forwarded message ---------\n\n**From:** Nick Zier <nick@creatorland.com>\n\n**Date:** Wed, Feb 11, 2026 at 7:46=E2=80=AFPM\n\n**Subject:** Re: Olivia Gudaniec <> Dealsync Paid YouTube Campaign\n\n**To:** Olivia Gudaniec <hello@oliviagmedia.com>\n\nSounds great! Appreciate you making it work.\n\nBack soon with the agreement. Excited to partner up on this!\n\nOn Tue, Feb 10, 2026 at 9:10=E2=80=AFPM Olivia Gudaniec <hello@oliviagmedia=\n\n.com>\n\nwrote:\n\n> Hi Nick,\n\n>\n\n> Thanks so much for the quick response!\n\n>\n\n>\n\n> From my understanding, you=E2=80=99re looking for 1 dedicated YouTube vid=\n\neo (3=E2=80=935\n\n> minutes) on my channel @oliviagudaniec, describing Dealsync and how it\n\n> operates. I=E2=80=99d be happy to test out your AI-powered dashboard and \\=\n\nthen move\n\n> forward from there.\n\n>\n\n>\n\n> I charge higher rates because this is my full-time job and I have a team\n\n> supporting me. Between learning the platform, ideation, scripting, filmin=\n\ng,\n\n> editing, optimizing, and posting, this project will take at least 8=E2=80=\n\n\\=9310\n\n> hours of dedicated work. Since taking this on would also require shifting\n\n> my usual content schedule, I want to make sure it=E2=80=99s fair for both=\n\nsides.\n\n>\n\n>\n\n> For our first time working together, I=E2=80=99m happy to offer a one-tim=\n\ne\n\n> accommodation of *$500 USD*. Consider it my way of extending an olive\n\n> branch and making this collaboration possible.\n\n>\n\n>\n\n> Let me know your thoughts \\=E2=80=94 I=E2=80=99d love to make this work if=\n\nit aligns!\n\n>\n\n>\n\n> Talk soon\n\n> [image: photo] <https://oliviag.tv>\n\n>\n\n> Olivia Gudaniec\n\n> Digital Creator\n\n>\n\n> www.oliviagmedia.com  |  hello@oliviagmedia.com\n\n>\n\n> [image: tiktok] <https://www.tiktok.com/@oliviagudaniec>\n\n>\n\n> [image: instagram] <https://www.instagram.com/oliviagudaniec>\n\n>\n\n> [image: youtube] <https://oliviag.tv>\n\n>\n\n> [image: __tpx__]\n\n> On Tue, Feb 10, 2026 at 11:56=E2=80=AFPM Nick Zier <nick@creatorland.com>=\n\nwrote:\n\n>\n\n>> Hey Olivia! Excited to continue the conversation here.\n\n>>\n\n>> We're working with other creators with similar engagement priced at\n\n>> $150-300 USD. Would that work for you?\n\n>>\n\n>> I'll attach the brief as well that contains more details of our\n\n>> expectations here:\n\n>>\n\n>>    - Dealsync Opportunity for Creators\n\n>>    <https://docs.google.com/document/d/1Zd9ZlF9o1FTHuidoIynetpeytzT7UGtv=\n\nKUqmWMk_RNs/edit?tab=3Dt.0#heading=3Dh.ttgahyn6385m>\n\n>>\n\n>>\n\n>> Looking forward!\n\n>>\n\n>> Nick\n\n>>\n\n>> On Tue, Feb 10, 2026 at 8:54=E2=80=AFPM Tiana Cameron <\n\n>> tiana.cameron@creatorland.com> wrote:\n\n>>\n\n>>> Glad to hear you're interested!\n\n>>>\n\n>>> I've looped in Nick who is the campaign manager for the Dealsync\n\n>>> Campaign, and he will jump in as the primary contact from Creatorland o=\n\nn\n\n>>> this initiative from here.\n\n>>>\n\n>>> More soon!\n\n>>>\n\n>>> Tiana\n\n>>> Tiana C. - emma.alexandria@creatorland.com\n\n>>>\n\n>>> Creator Partnerships @ Creatorland.com\n\n>>>\n\n>>> On Tue, Feb 10, 2026 at 7:35 AM hello@oliviagmedia.com wrote:\n\n>>>\n\n>>>> Hello Tiana!\n\n>>>>  Thanks for reaching out. I could take on this project for $2000 USD.\n\n>>>> Let me know what the team decides. Talk soon!\n\n>>>>\n\n>>>> [image: photo] <https://oliviag.tv>\n\n>>>>\n\n>>>> Olivia Gudaniec\n\n>>>> Digital Creator\n\n>>>>\n\n>>>> www.oliviagmedia.com  |  hello@oliviagmedia.com\n\n>>>>\n\n>>>> [image: tiktok] <https://www.tiktok.com/@oliviagudaniec>\n\n>>>>\n\n>>>> [image: instagram] <https://www.instagram.com/oliviagudaniec>\n\n>>>>\n\n>>>> [image: youtube] <https://oliviag.tv>\n\n>>>>\n\n>>>> [image: __tpx__]\n\n>>>> On Mon, Feb 9, 2026 at 6:31=E2=80=AFPM Tiana C. <tiana.cameron@creator=\n\nland.com>\n\n>>>> wrote:\n\n>>>>\n\n>>>>> Hi Olivia \\=F0=9F=91=8B,\n\n>>>>>\n\n>>>>> I came across your YouTube channel and was impressed by how you work\n\n>>>>> with brands. We=E2=80=99re running a paid launch for Dealsync, an AI-=\n\npowered inbox\n\n>>>>> dashboard built for creators to manage brand partnerships. We=E2=80=\n\n\\=99d love for\n\n>>>>> you to create a dedicated 3=E2=80=935 minute video demoing Dealsync, \\=\n\nshare your\n\n>>>>> take on how it helps creators, and why it matters.\n\n>>>>>\n\n>>>>> What you=E2=80=99ll get:\n\n>>>>>\n\n>>>>>    - Early access to Dealsync (skip the waitlist) and a 30-day free\n\n>>>>>    trial\n\n>>>>>    - Anyone who uses your custom link can skip the waitlist\n\n>>>>>    - Optional 15% recurring affiliate commission for 12 months\n\n>>>>>    - Direct access to the founding team \\+ priority support\n\n>>>>>    - Payment on delivery terms\n\n>>>>>\n\n>>>>> If you=E2=80=99re interested, could you share your typical rate for a\n\n>>>>> dedicated video? If helpful, I=E2=80=99m happy to jump on a quick cal=\n\nl to go over\n\n>>>>> details. I=E2=80=99ll relay pricing questions to the team.\n\n>>>>>\n\n>>>>> Looking forward to hearing from you!\n\n>>>>>\n\n>>>>> Best,\n\n>>>>> Tiana\n\n>>>>> Tiana C. - emma.alexandria@creatorland.com\n\n>>>>>\n\n>>>>> Creator Partnerships @ Creatorland.com\n\n>>>>>\n\n>>>>\n\n--00000000000069c701064a987214\n\nContent-Type: text/html; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\n<div dir=3D\"ltr\">Do we have an agreement that I can amend for this and then=\n\nsend? I couldn&#39;t find any past ones from Tari<br><br><div class=3D\"gma=\n\nil_quote gmail_quote_container\"><div dir=3D\"ltr\" class=3D\"gmail_attr\">-----=\n\n----- Forwarded message ---------<br>From: <strong class=3D\"gmail_sendernam=\n\ne\" dir=3D\"auto\">Nick Zier</strong> <span dir=3D\"auto\">&lt;<a href=3D\"mailto=\n\n:nick@creatorland.com\">nick@creatorland.com</a>&gt;</span><br>Date: Wed, Fe=\n\nb 11, 2026 at 7:46=E2=80=AFPM<br>Subject: Re: Olivia Gudaniec &lt;&gt; Deal=\n\nsync Paid YouTube Campaign<br>To: Olivia Gudaniec &lt;<a href=3D\"mailto:hel=\n\nlo@oliviagmedia.com\">hello@oliviagmedia.com</a>&gt;<br></div><br><br><div d=\n\nir=3D\"ltr\">Sounds great! Appreciate you making it work.<div><br></div><div>=\n\nBack soon with the agreement. Excited to partner up on this!</div></div><br=\n\n><div class=3D\"gmail_quote\"><div dir=3D\"ltr\" class=3D\"gmail_attr\">On Tue, F=\n\neb 10, 2026 at 9:10=E2=80=AFPM Olivia Gudaniec &lt;<a href=3D\"mailto:hello@=\n\noliviagmedia.com\" target=3D\"_blank\">hello@oliviagmedia.com</a>&gt; wrote:<b=\n\nr></div><blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex=\n\n;border-left:1px solid rgb(204,204,204);padding-left:1ex\"><div dir=3D\"ltr\">=\n\n<div dir=3D\"ltr\"><div>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;\">Hi Nick,</p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;\">Thanks so much for the q=\n\nuick response!</p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;;min-height:15px\"><br></p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;\">From my understanding, y=\n\nou=E2=80=99re looking for 1 dedicated YouTube video (3=E2=80=935 minutes) o=\n\nn my channel @oliviagudaniec, describing Dealsync and how it operates. I=E2=\n\n\\=80=99d be happy to test out your AI-powered dashboard and then move forwar=\n\nd from there.</p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;;min-height:15px\"><br></p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;\">I charge higher rates be=\n\ncause this is my full-time job and I have a team supporting me. Between lea=\n\nrning the platform, ideation, scripting, filming, editing, optimizing, and \\=\n\nposting, this project will take at least 8=E2=80=9310 hours of dedicated wo=\n\nrk. Since taking this on would also require shifting my usual content sched=\n\nule, I want to make sure it=E2=80=99s fair for both sides.</p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;;min-height:15px\"><br></p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;\">For our first time worki=\n\nng together, I=E2=80=99m happy to offer a one-time accommodation of <b>$500=\n\nUSD</b>. Consider it my way of extending an olive branch and making this c=\n\nollaboration possible.</p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;;min-height:15px\"><br></p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;\">Let me know your thought=\n\ns \\=E2=80=94 I=E2=80=99d love to make this work if it aligns!</p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;;min-height:15px\"><br></p>\n\n<p style=3D\"margin:0px;font-variant-numeric:normal;font-variant-east-asian:=\n\nnormal;font-variant-alternates:normal;font-size-adjust:none;font-kerning:au=\n\nto;font-feature-settings:normal;font-stretch:normal;font-size:13px;line-hei=\n\nght:normal;font-family:&quot;Helvetica Neue&quot;\">Talk soon</p></div><div>=\n\n<div><div dir=3D\"ltr\"><table style=3D\"direction:ltr;border-collapse:collaps=\n\ne\"><tbody><tr><td style=3D\"font-size:0px;height:12px;line-height:0\"></td></=\n\ntr><tr><td><table cellpadding=3D\"0\" cellspacing=3D\"0\" border=3D\"0\" style=3D=\n\n\"width:100%\" width=3D\"100%\"><tbody><tr><td><table cellpadding=3D\"0\" cellspa=\n\ncing=3D\"0\" style=3D\"border-collapse:collapse;line-height:1.15\"><tbody><tr><=\n\ntd style=3D\"height:1px;width:90px;vertical-align:top;padding:0.01px 1px\"><t=\n\nable cellpadding=3D\"0\" cellspacing=3D\"0\" style=3D\"border-collapse:collapse\"=\n\n><tbody><tr><td style=3D\"vertical-align:top;padding:0.01px 1px 0.01px 0.01p=\n\nx;width:90px;text-align:center\"><a href=3D\"https://oliviag.tv\" style=3D\"dis=\n\nplay:block;font-size:0.1px\" rel=3D\"nofollow noreferrer\" target=3D\"_blank\"><=\n\nimg border=3D\"0\" src=3D\"https://d36urhup7zbd7q.cloudfront.net/u/plZVamKRqj6=\n\n/1675814332264.jpeg\" height=3D\"135\" width=3D\"90\" alt=3D\"photo\" style=3D\"wid=\n\nth:90px;vertical-align:middle;border-radius:0px;height:135px;border:0px;dis=\n\nplay:block\"></a></td></tr></tbody></table></td><td valign=3D\"top\" style=3D\"=\n\npadding:0.01px 0.01px 0.01px 14px;vertical-align:top\"><table cellpadding=3D=\n\n\"0\" cellspacing=3D\"0\" style=3D\"border-collapse:collapse\"><tbody><tr><td sty=\n\nle=3D\"line-height:1.2;padding:0.01px 0.01px 14px;border-bottom:2px solid rg=\n\nb(189,189,189)\" nowrap><p style=3D\"margin:0.1px;line-height:120%;font-size:=\n\n16px\"><span style=3D\"font-family:Arial;font-size:16px;font-weight:bold;colo=\n\nr:rgb(69,102,142);letter-spacing:0px;white-space:nowrap\">Olivia Gudaniec</s=\n\npan><br><span style=3D\"font-family:Arial;font-size:13px;font-weight:bold;co=\n\nlor:rgb(100,100,100);white-space:nowrap\">Digital Creator</span></p></td></t=\n\nr><tr><td nowrap width=3D\"337\" height=3D\"0\" style=3D\"height:0px;padding-top=\n\n:14px;white-space:nowrap;width:337px;font-family:Arial\"><p style=3D\"margin:=\n\n1px;line-height:99%;font-size:12px\"><span style=3D\"white-space:nowrap\"><a h=\n\nref=3D\"https://www.oliviagmedia.com\" style=3D\"font-family:Arial;text-decora=\n\ntion:unset\" rel=3D\"nofollow noreferrer\" target=3D\"_blank\"><span style=3D\"li=\n\nne-height:120%;font-family:Arial;font-size:12px;color:rgb(33,33,33);white-s=\n\npace:nowrap\">www.oliviagmedia.com</span></a>=C2=A0=C2=A0|=C2=A0=C2=A0<a hre=\n\nf=3D\"mailto:hello@oliviagmedia.com\" style=3D\"font-family:Arial;text-decorat=\n\nion:unset\" rel=3D\"nofollow noreferrer\" target=3D\"_blank\"><span style=3D\"lin=\n\ne-height:120%;font-family:Arial;font-size:12px;color:rgb(33,33,33);white-sp=\n\nace:nowrap\">hello@oliviagmedia.com</span></a></span></p></td></tr><tr><td h=\n\neight=3D\"0\" style=3D\"height:0px;padding:14px 0.01px 0.01px\"><table border=\n\n\\=3D\"0\" cellpadding=3D\"0\" cellspacing=3D\"0\"><tbody><tr><td align=3D\"left\" st=\n\nyle=3D\"padding-right:6px;text-align:center;padding-top:0px\"><p style=3D\"mar=\n\ngin:1px\"><a href=3D\"https://www.tiktok.com/@oliviagudaniec\" rel=3D\"nofollow=\n\nnoreferrer\" target=3D\"_blank\"><img width=3D\"24\" height=3D\"24\" src=3D\"https=\n\n://gifo.srv.wisestamp.com/s/tt/092034/48/0/background.png\" style=3D\"float:l=\n\neft;border:none\" border=3D\"0\" alt=3D\"tiktok\"></a></p></td><td align=3D\"left=\n\n\" style=3D\"padding-right:6px;text-align:center;padding-top:0px\"><p style=3D=\n\n\"margin:1px\"><a href=3D\"https://www.instagram.com/oliviagudaniec\" rel=3D\"no=\n\nfollow noreferrer\" target=3D\"_blank\"><img width=3D\"24\" height=3D\"24\" src=3D=\n\n\"https://gifo.srv.wisestamp.com/s/inst/092034/48/0/background.png\" style=3D=\n\n\"float:left;border:none\" border=3D\"0\" alt=3D\"instagram\"></a></p></td><td al=\n\nign=3D\"left\" style=3D\"padding-right:6px;text-align:center;padding-top:0px\">=\n\n<p style=3D\"margin:1px\"><a href=3D\"https://oliviag.tv\" rel=3D\"nofollow nore=\n\nferrer\" target=3D\"_blank\"><img width=3D\"24\" height=3D\"24\" src=3D\"https://gi=\n\nfo.srv.wisestamp.com/s/yt/092034/48/0/background.png\" style=3D\"float:left;b=\n\norder:none\" border=3D\"0\" alt=3D\"youtube\"></a></p></td></tr></tbody></table>=\n\n</td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></tab=\n\nle></td></tr><tr><td style=3D\"font-family:&quot;ws-id JQZKB8YNMdqd&quot;;fo=\n\nnt-size:0.01px;line-height:0\">=C2=A0</td></tr></tbody></table></div><img sr=\n\nc=3D\"https://tracy.srv.wisestamp.com/px/wsid/JQZKB8YNMdqd.png\" alt=3D\"__tpx=\n\n__\"></div></div><div class=3D\"gmail_quote\"><div dir=3D\"ltr\" class=3D\"gmail_=\n\nattr\">On Tue, Feb 10, 2026 at 11:56=E2=80=AFPM Nick Zier &lt;<a href=3D\"mai=\n\nlto:nick@creatorland.com\" target=3D\"_blank\">nick@creatorland.com</a>&gt; wr=\n\note:<br></div><blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px=\n\n0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex\"><div dir=3D=\n\n\"ltr\"><div id=3D\"m_3110724397461977608m_1998346818782240536m_72429438660709=\n\n13900m_8264742854979870806gmail-:u4\" aria-label=3D\"Message Body\" role=3D\"te=\n\nxtbox\" aria-multiline=3D\"true\" style=3D\"direction:ltr;min-height:85px\" aria=\n\n-controls=3D\":3zy\" aria-expanded=3D\"false\"><div><font color=3D\"#000000\">Hey=\n\nOlivia! Excited to continue the conversation here.</font></div><div><font \\=\n\ncolor=3D\"#000000\"><br></font></div><div><font color=3D\"#000000\">We&#39;re w=\n\norking with other creators with similar engagement priced at $150-300 USD. \\=\n\nWould that work for you?<br></font><div><font color=3D\"#000000\"><br></font>=\n\n</div><div><font color=3D\"#000000\">I&#39;ll attach the brief as well that c=\n\nontains more details of our expectations here:</font><div><ul><li style=3D\"=\n\nmargin-left:15px\"><a href=3D\"https://docs.google.com/document/d/1Zd9ZlF9o1F=\n\nTHuidoIynetpeytzT7UGtvKUqmWMk_RNs/edit?tab=3Dt.0#heading=3Dh.ttgahyn6385m\" \\=\n\ntarget=3D\"_blank\"><font color=3D\"#0000ff\">Dealsync Opportunity for Creators=\n\n</font></a></li></ul><div><font color=3D\"#000000\"><br></font></div></div></=\n\ndiv></div><div><font color=3D\"#000000\">Looking forward!</font></div><div><f=\n\nont color=3D\"#000000\"><br></font></div><div><font color=3D\"#000000\">Nick</f=\n\nont></div></div></div><br><div class=3D\"gmail_quote\"><div dir=3D\"ltr\" class=\n\n\\=3D\"gmail_attr\">On Tue, Feb 10, 2026 at 8:54=E2=80=AFPM Tiana Cameron &lt;<=\n\na href=3D\"mailto:tiana.cameron@creatorland.com\" target=3D\"_blank\">tiana.cam=\n\neron@creatorland.com</a>&gt; wrote:<br></div><blockquote class=3D\"gmail_quo=\n\nte\" style=3D\"margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204=\n\n);padding-left:1ex\"><div dir=3D\"ltr\"><div><p>Glad to hear you&#39;re intere=\n\nsted!</p>\n\n<p>I&#39;ve looped in Nick who is the campaign manager for the Dealsync Cam=\n\npaign, and he will jump in as the primary contact from Creatorland on this \\=\n\ninitiative from here. </p>\n\n<p>More soon!</p>\n\n<p>Tiana</p>\n\n<h2 id=3D\"m_3110724397461977608m_1998346818782240536m_7242943866070913900m_=\n\n8264742854979870806m_-3660343617749102719m_-9175493416797693963tiana-c---em=\n\nmaalexandriacreatorlandcom\">Tiana C. - <a href=3D\"mailto:emma.alexandria@cr=\n\neatorland.com\" target=3D\"_blank\">emma.alexandria@creatorland.com</a></h2>\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div></div><br>\n\n<div class=3D\"gmail_quote\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Tue, Feb 10, 2026 at 7:35 AM <a \\=\n\nhref=3D\"mailto:hello@oliviagmedia.com\" target=3D\"_blank\">hello@oliviagmedia=\n\n.com</a> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;borde=\n\nr-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div dir=3D\"ltr\"><div>Hello Tiana!<br>=C2=A0Thanks for reaching out. I \\=\n\ncould take on this project for $2000 USD. Let me know what the team decides=\n\n. Talk soon!</div><br><div><div><div dir=3D\"ltr\"><table style=3D\"direction:=\n\nltr;border-collapse:collapse\"><tbody><tr><td style=3D\"font-size:0px;height:=\n\n12px;line-height:0\"></td></tr><tr><td><table cellpadding=3D\"0\" cellspacing=\n\n\\=3D\"0\" border=3D\"0\" style=3D\"width:100%\" width=3D\"100%\"><tbody><tr><td><tab=\n\nle cellpadding=3D\"0\" cellspacing=3D\"0\" style=3D\"border-collapse:collapse;li=\n\nne-height:1.15\"><tbody><tr><td style=3D\"height:1px;width:90px;vertical-alig=\n\nn:top;padding:0.01px 1px\"><table cellpadding=3D\"0\" cellspacing=3D\"0\" style=\n\n\\=3D\"border-collapse:collapse\"><tbody><tr><td style=3D\"vertical-align:top;pa=\n\ndding:0.01px 1px 0.01px 0.01px;width:90px;text-align:center\"><a href=3D\"htt=\n\nps://oliviag.tv\" style=3D\"display:block;font-size:0.1px\" rel=3D\"nofollow no=\n\nreferrer\" target=3D\"_blank\"><img border=3D\"0\" src=3D\"https://d36urhup7zbd7q=\n\n.cloudfront.net/u/plZVamKRqj6/1675814332264.jpeg\" height=3D\"135\" width=3D\"9=\n\n0\" alt=3D\"photo\" style=3D\"width:90px;vertical-align:middle;border-radius:0p=\n\nx;height:135px;border:0px;display:block\"></a></td></tr></tbody></table></td=\n\n><td valign=3D\"top\" style=3D\"padding:0.01px 0.01px 0.01px 14px;vertical-ali=\n\ngn:top\"><table cellpadding=3D\"0\" cellspacing=3D\"0\" style=3D\"border-collapse=\n\n:collapse\"><tbody><tr><td style=3D\"line-height:1.2;padding:0.01px 0.01px 14=\n\npx;border-bottom:2px solid rgb(189,189,189)\" nowrap><p style=3D\"margin:0.1p=\n\nx;line-height:120%;font-size:16px\"><span style=3D\"font-family:Arial;font-si=\n\nze:16px;font-weight:bold;color:rgb(69,102,142);letter-spacing:0px;white-spa=\n\nce:nowrap\">Olivia Gudaniec</span><br><span style=3D\"font-family:Arial;font-=\n\nsize:13px;font-weight:bold;color:rgb(100,100,100);white-space:nowrap\">Digit=\n\nal Creator</span></p></td></tr><tr><td nowrap width=3D\"337\" height=3D\"0\" st=\n\nyle=3D\"height:0px;padding-top:14px;white-space:nowrap;width:337px;font-fami=\n\nly:Arial\"><p style=3D\"margin:1px;line-height:99%;font-size:12px\"><span styl=\n\ne=3D\"white-space:nowrap\"><a href=3D\"https://www.oliviagmedia.com\" style=3D\"=\n\nfont-family:Arial;text-decoration:unset\" rel=3D\"nofollow noreferrer\" target=\n\n\\=3D\"_blank\"><span style=3D\"line-height:120%;font-family:Arial;font-size:12p=\n\nx;color:rgb(33,33,33);white-space:nowrap\">www.oliviagmedia.com</span></a>=\n\n\\=C2=A0=C2=A0|=C2=A0=C2=A0<a href=3D\"mailto:hello@oliviagmedia.com\" style=3D=\n\n\"font-family:Arial;text-decoration:unset\" rel=3D\"nofollow noreferrer\" targe=\n\nt=3D\"_blank\"><span style=3D\"line-height:120%;font-family:Arial;font-size:12=\n\npx;color:rgb(33,33,33);white-space:nowrap\">hello@oliviagmedia.com</span></a=\n\n></span></p></td></tr><tr><td height=3D\"0\" style=3D\"height:0px;padding:14px=\n\n0.01px 0.01px\"><table border=3D\"0\" cellpadding=3D\"0\" cellspacing=3D\"0\"><tb=\n\nody><tr><td align=3D\"left\" style=3D\"padding-right:6px;text-align:center;pad=\n\nding-top:0px\"><p style=3D\"margin:1px\"><a href=3D\"https://www.tiktok.com/@ol=\n\niviagudaniec\" rel=3D\"nofollow noreferrer\" target=3D\"_blank\"><img width=3D\"2=\n\n4\" height=3D\"24\" src=3D\"https://gifo.srv.wisestamp.com/s/tt/092034/48/0/bac=\n\nkground.png\" style=3D\"float:left;border:none\" border=3D\"0\" alt=3D\"tiktok\"><=\n\n/a></p></td><td align=3D\"left\" style=3D\"padding-right:6px;text-align:center=\n\n;padding-top:0px\"><p style=3D\"margin:1px\"><a href=3D\"https://www.instagram.=\n\ncom/oliviagudaniec\" rel=3D\"nofollow noreferrer\" target=3D\"_blank\"><img widt=\n\nh=3D\"24\" height=3D\"24\" src=3D\"https://gifo.srv.wisestamp.com/s/inst/092034/=\n\n48/0/background.png\" style=3D\"float:left;border:none\" border=3D\"0\" alt=3D\"i=\n\nnstagram\"></a></p></td><td align=3D\"left\" style=3D\"padding-right:6px;text-a=\n\nlign:center;padding-top:0px\"><p style=3D\"margin:1px\"><a href=3D\"https://oli=\n\nviag.tv\" rel=3D\"nofollow noreferrer\" target=3D\"_blank\"><img width=3D\"24\" he=\n\night=3D\"24\" src=3D\"https://gifo.srv.wisestamp.com/s/yt/092034/48/0/backgrou=\n\nnd.png\" style=3D\"float:left;border:none\" border=3D\"0\" alt=3D\"youtube\"></a><=\n\n/p></td></tr></tbody></table></td></tr></tbody></table></td></tr></tbody></=\n\ntable></td></tr></tbody></table></td></tr><tr><td style=3D\"font-family:&quo=\n\nt;ws-id JQZKB8YNMdqd&quot;;font-size:0.01px;line-height:0\">=C2=A0</td></tr>=\n\n</tbody></table></div><img src=3D\"https://tracy.srv.wisestamp.com/px/wsid/J=\n\nQZKB8YNMdqd.png\" alt=3D\"__tpx__\"></div></div><div class=3D\"gmail_quote\"><di=\n\nv dir=3D\"ltr\" class=3D\"gmail_attr\">On Mon, Feb 9, 2026 at 6:31=E2=80=AFPM T=\n\niana C. &lt;<a href=3D\"mailto:tiana.cameron@creatorland.com\" target=3D\"_bla=\n\nnk\">tiana.cameron@creatorland.com</a>&gt; wrote:<br></div><blockquote class=\n\n\\=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-left:1px solid rg=\n\nb(204,204,204);padding-left:1ex\"><div><p>Hi Olivia \\=F0=9F=91=8B,</p>\n\n<p>I came across your YouTube channel and was impressed by how you work wit=\n\nh brands. We=E2=80=99re running a paid launch for Dealsync, an AI-powered i=\n\nnbox dashboard built for creators to manage brand partnerships. We=E2=80=99=\n\nd love for you to create a dedicated 3=E2=80=935 minute video demoing Deals=\n\nync, share your take on how it helps creators, and why it matters.</p>\n\n<p>What you=E2=80=99ll get:</p>\n\n<ul>\n\n<li>Early access to Dealsync (skip the waitlist) and a 30-day free trial</l=\n\ni>\n\n<li>Anyone who uses your custom link can skip the waitlist</li>\n\n<li>Optional 15% recurring affiliate commission for 12 months</li>\n\n<li>Direct access to the founding team \\+ priority support</li>\n\n<li>Payment on delivery terms</li>\n\n</ul>\n\n<p>If you=E2=80=99re interested, could you share your typical rate for a de=\n\ndicated video? If helpful, I=E2=80=99m happy to jump on a quick call to go \\=\n\nover details. I=E2=80=99ll relay pricing questions to the team.</p>\n\n<p>Looking forward to hearing from you!</p>\n\n<p>Best,<br>Tiana</p>\n\n<h2 id=3D\"m_3110724397461977608m_1998346818782240536m_7242943866070913900m_=\n\n8264742854979870806m_-3660343617749102719m_-9175493416797693963m_-255287986=\n\n3924653715tiana-c---emmaalexandriacreatorlandcom\">Tiana C. - <a href=3D\"mai=\n\nlto:emma.alexandria@creatorland.com\" target=3D\"_blank\">emma.alexandria@crea=\n\ntorland.com</a></h2>\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div>\n\n</blockquote></div></div>\n\n</blockquote>\n\n</div>\n\n</blockquote></div>\n\n</blockquote></div></div>\n\n</div>\n\n</blockquote></div>\n\n</div></div>\n\n--00000000000069c701064a987214--"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-027",
+		description: "Paid YouTube campaign discussion with creator Danielle. Active collaboration...",
+		emails: [
+			{
+				messageId: "gt-027-msg-1",
+				threadId: "gt-027",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Kira <kira.ellis@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "admin@danielleryan.me, kira.ellis@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Danielle <> Dealsync Paid YouTube Campaign"
+					},
+					{
+						name: "date",
+						value: "Thu, 12 Feb 2026 12:33:14 -0800"
+					}
+				],
+				body: "Content-Type: text/plain; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\nHi Danielle \\=F0=9F=91=8B,\n\nI know you=E2=80=99re busy, so I=E2=80=99ll keep this brief. We=E2=80=99re \\=\n\noffering a paid,\n\ndedicated 3=E2=80=935 minute YouTube video for Dealsync \\=E2=80=94 an AI-pow=\n\nered inbox\n\ndashboard for creators managing brand partnerships.\n\nIf now isn=E2=80=99t a fit, no worries. You can still access early Dealsync\n\nfeatures and the 7-day free trial, plus an optional 15% recurring affiliate\n\ncommission if you decide to join later.\n\nIf you=E2=80=99re open to it, could you share your typical rate for a dedic=\n\nated\n\nvideo and a link to a past partner video? Happy to answer any questions\n\nabout scope, timing, or payment terms.\n\nThank you for your time,\n\nKira \\=E2=80=94 Creator Partnerships, Creatorland\n\nKira E. - emma.alexandria@creatorland.com\n\nCreator Partnerships @ Creatorland.com\n\nOn Mon, Feb 9, 2026 at 2:17 PM kira.ellis@creatorland.com wrote:\n\n> No worries, thanks for letting me know!\n\n>\n\n> Creatorland <https://creatorland.com> has all types of clients, so there\n\n> may be something that's a better fit down the road.\n\n>\n\n> Feel free to check out our job board <https://jobs.creatorland.com>.\n\n>\n\n> Thank you for your time,\n\n>\n\n> Kira\n\n> Kira A. - emma.alexandria@creatorland.com\n\n>\n\n> Creator Partnerships @ Creatorland.com\n\n>\n\n> On Mon, Feb 9, 2026 at 2:16 PM admin@danielleryan.me wrote:\n\n>\n\n>> Hi Kira\n\n>>\n\n>> I don=E2=80=99t think this is a good fit for me.\n\n>>\n\n>> Thanks\n\n>> Danielle\n\n>>\n\n>> On Feb 9, 2026, at 12:32=E2=80=AFPM, Kira <kira.ellis@creatorland.com> w=\n\nrote:\n\n>>\n\n>> Hi Danielle \\=F0=9F=91=8B\n\n>>\n\n>> Following up on my previous email about a paid, dedicated YouTube video\n\n>> for Dealsync, the AI-powered inbox dashboard that helps creators manage\n\n>> brand deals, reduce inbox chaos, and save 5=E2=80=9310 hours per week.\n\n>>\n\n>> For this campaign, we're looking for a standalone 3=E2=80=935 minute vid=\n\neo\n\n>> showing Dealsync in action with a real inbox and explaining why it matte=\n\nrs\n\n>> for creators who juggle brand deals.\n\n>>\n\n>> What you get:\n\n>>\n\n>>    - Early access to Dealsync (skip the waitlist)\n\n>>    - 7-day free trial with your real inbox\n\n>>    - Optional 15% recurring affiliate commission (12 months)\n\n>>    - Direct access to the founding team\n\n>>\n\n>> If you're interested, please share your typical rate for a dedicated\n\n>> video and any examples of past partner videos. Happy to answer any\n\n>> questions on scope, timing, or payment terms.\n\n>>\n\n>> Thanks,\n\n>> Kira \\=E2=80=94 Creator Partnerships, Creatorland\n\n>> Kira E. - emma.alexandria@creatorland.com\n\n>>\n\n>> Creator Partnerships @ Creatorland.com\n\n>>\n\n>> On Fri, Feb 6, 2026 at 12:31 PM kira.ellis@creatorland.com wrote:\n\n>>\n\n>>> Hi Danielle \\=F0=9F=91=8B,\n\n>>>\n\n>>> I came across your YouTube channel and think you'd be a fantastic fit\n\n>>> for a paid launch campaign we're running for Dealsync, an AI-powered in=\n\nbox\n\n>>> dashboard built specifically for creators who manage brand partnerships=\n\n.\n\n>>> Dealsync automatically organizes brand deal emails, surfaces follow-ups=\n\n,\n\n>>> and saves creators 5=E2=80=9310 hours per week.\n\n>>>\n\n>>> For this campaign, we'd like you to produce a dedicated 3=E2=80=935 min=\n\nute\n\n>>> YouTube video demonstrating Dealsync, sharing your take on how it can h=\n\nelp\n\n>>> creators manage brand partnerships and inbox chaos.\n\n>>>\n\n>>> What you get:\n\n>>>\n\n>>>    - Early access to Dealsync (skip the waitlist)\n\n>>>    - 7-day free trial with your real inbox\n\n>>>    - Optional 15% recurring affiliate commission for 12 months\n\n>>>    - Direct access to the founding team\n\n>>>\n\n>>> If you're interested, could you share your typical rate for a dedicated\n\n>>> video?\n\n>>>\n\n>>> Thanks,\n\n>>> Kira \\=E2=80=94 Creator Partnerships, Creatorland\n\n>>> Kira E. - emma.alexandria@creatorland.com\n\n>>>\n\n>>> Creator Partnerships @ Creatorland.com\n\n>>>\n\n>>\n\n>>\n\n--000000000000047232064aa66635\n\nContent-Type: text/html; charset=\"UTF-8\"\n\nContent-Transfer-Encoding: quoted-printable\n\n<div><p>Hi Danielle \\=F0=9F=91=8B,</p>\n\n<p>I know you=E2=80=99re busy, so I=E2=80=99ll keep this brief. We=E2=80=99=\n\nre offering a paid, dedicated 3=E2=80=935 minute YouTube video for Dealsync=\n\n\\=E2=80=94 an AI-powered inbox dashboard for creators managing brand partne=\n\nrships.</p>\n\n<p>If now isn=E2=80=99t a fit, no worries. You can still access early Deals=\n\nync features and the 7-day free trial, plus an optional 15% recurring affil=\n\niate commission if you decide to join later.</p>\n\n<p>If you=E2=80=99re open to it, could you share your typical rate for a de=\n\ndicated video and a link to a past partner video? Happy to answer any quest=\n\nions about scope, timing, or payment terms.</p>\n\n<p>Thank you for your time,</p>\n\n<p>Kira \\=E2=80=94 Creator Partnerships, Creatorland</p>\n\n<h2 id=3D\"kira-e---emmaalexandriacreatorlandcom\">Kira E. - <a href=3D\"mailt=\n\no:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a></h2>\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Mon, Feb 9, 2026 at 2:17 PM \\=\n\n<a href=3D\"mailto:kira.ellis@creatorland.com\">kira.ellis@creatorland.com</a=\n\n> wrote:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;b=\n\norder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div><p>No worries, thanks for letting me know!</p>\n\n<p><a href=3D\"https://creatorland.com\">Creatorland</a> has all types of cli=\n\nents, so there may be something that&#39;s a better fit down the road.</p>\n\n<p>Feel free to check out our <a href=3D\"https://jobs.creatorland.com\">job \\=\n\nboard</a>.</p>\n\n<p>Thank you for your time,</p>\n\n<p>Kira</p>\n\n<h2 id=3D\"kira-a---emmaalexandriacreatorlandcom\">Kira A. - <a href=3D\"mailt=\n\no:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a></h2>\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Mon, Feb 9, 2026 at 2:16 PM <a=\n\nhref=3D\"mailto:admin@danielleryan.me\">admin@danielleryan.me</a> wrote:<br>=\n\n</div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;bor=\n\nder-left:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<html><head><meta http-equiv=3D\"content-type\" content=3D\"text/html; c=\n\nharset=3Dutf-8\"></head><body style=3D\"line-break:after-white-space\">Hi Kira=\n\n<div><br></div><div>I don=E2=80=99t think this is a good fit for me.</div><=\n\ndiv><br></div><div>Thanks</div><div>Danielle<br id=3D\"lineBreakAtBeginningO=\n\nfMessage\"><div><br><blockquote type=3D\"cite\"><div>On Feb 9, 2026, at 12:32=\n\n\\=E2=80=AFPM, Kira &lt;<a href=3D\"mailto:kira.ellis@creatorland.com\">kira.el=\n\nlis@creatorland.com</a>&gt; wrote:</div><br class=3D\"Apple-interchange-newl=\n\nine\"><div><div><p>Hi Danielle \\=F0=9F=91=8B</p><p>Following up on my previou=\n\ns email about a paid, dedicated YouTube video for Dealsync, the AI-powered \\=\n\ninbox dashboard that helps creators manage brand deals, reduce inbox chaos,=\n\nand save 5=E2=80=9310 hours per week.</p><p>For this campaign, we&#39;re l=\n\nooking for a standalone 3=E2=80=935 minute video showing Dealsync in action=\n\nwith a real inbox and explaining why it matters for creators who juggle br=\n\nand deals.</p><p>What you get:</p>\n\n<ul>\n\n<li>Early access to Dealsync (skip the waitlist)</li>\n\n<li>7-day free trial with your real inbox</li>\n\n<li>Optional 15% recurring affiliate commission (12 months)</li>\n\n<li>Direct access to the founding team</li>\n\n</ul><p>If you&#39;re interested, please share your typical rate for a dedi=\n\ncated video and any examples of past partner videos. Happy to answer any qu=\n\nestions on scope, timing, or payment terms.</p><p>Thanks,<br>Kira \\=E2=80=94=\n\nCreator Partnerships, Creatorland</p>\n\n<h2 id=3D\"kira-e---emmaalexandriacreatorlandcom\">Kira E. - <a href=3D\"mailt=\n\no:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a></h2>=\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div><br>\n\n<div class=3D\"gmail_quote gmail_quote_container\">\n\n<div dir=3D\"ltr\" class=3D\"gmail_attr\">On Fri, Feb 6, 2026 at 12:31 PM <a hr=\n\nef=3D\"mailto:kira.ellis@creatorland.com\">kira.ellis@creatorland.com</a> wro=\n\nte:<br></div>\n\n<blockquote class=3D\"gmail_quote\" style=3D\"margin:0px 0px 0px 0.8ex;border-=\n\nleft:1px solid rgb(204,204,204);padding-left:1ex\">\n\n<div><p>Hi Danielle \\=F0=9F=91=8B,</p><p>I came across your YouTube channel \\=\n\nand think you&#39;d be a fantastic fit for a paid launch campaign we&#39;re=\n\nrunning for Dealsync, an AI-powered inbox dashboard built specifically for=\n\ncreators who manage brand partnerships. Dealsync automatically organizes b=\n\nrand deal emails, surfaces follow-ups, and saves creators 5=E2=80=9310 hour=\n\ns per week.</p><p>For this campaign, we&#39;d like you to produce a dedicat=\n\ned 3=E2=80=935 minute YouTube video demonstrating Dealsync, sharing your ta=\n\nke on how it can help creators manage brand partnerships and inbox chaos.</=\n\np><p>What you get:</p>\n\n<ul>\n\n<li>Early access to Dealsync (skip the waitlist)</li>\n\n<li>7-day free trial with your real inbox</li>\n\n<li>Optional 15% recurring affiliate commission for 12 months</li>\n\n<li>Direct access to the founding team</li>\n\n</ul><p>If you&#39;re interested, could you share your typical rate for a d=\n\nedicated video?</p><p>Thanks,<br>Kira \\=E2=80=94 Creator Partnerships, Creat=\n\norland</p>\n\n<h2 id=3D\"kira-e---emmaalexandriacreatorlandcom\">Kira E. - <a href=3D\"mailt=\n\no:emma.alexandria@creatorland.com\">emma.alexandria@creatorland.com</a></h2>=\n\n<p>Creator Partnerships @ Creatorland.com</p>\n\n</div>\n\n</blockquote>\n\n</div>\n\n</div></blockquote></div><br></div></body></html>\n\n</blockquote>\n\n</div>\n\n</blockquote>\n\n</div>\n\n--000000000000047232064aa66635--"
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-028",
+		description: "Multi-email thread about Dream Pairs shoe collaboration. Creator negotiating...",
+		emails: [
+			{
+				messageId: "gt-028-msg-1",
+				threadId: "gt-028",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "artisjennie842@gmail.com"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Dream Pairs Collaboration"
+					},
+					{
+						name: "date",
+						value: "2024-06-11 to 2024-05-21"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-029",
+		description: "Jeasona/BuzzGeneratorHub paid collaboration thread. Creator agreed to...",
+		emails: [
+			{
+				messageId: "gt-029-msg-1",
+				threadId: "gt-029",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Kelaiah198002@buzzeeneratorhub.com"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Paid Collaboration - [替换成您的品牌名]"
+					},
+					{
+						name: "date",
+						value: "2024-06-25"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-030",
+		description: "TikTok Shop collaboration thread with Charlie. Creator agreed, discussing...",
+		emails: [
+			{
+				messageId: "gt-030-msg-1",
+				threadId: "gt-030",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Kyliejjezi1198005@viralbrandinghub.com"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "TikTok Shop Collaboration - Charlie"
+					},
+					{
+						name: "date",
+						value: "2024-10-08"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		}
+	},
+	{
+		id: "gt-031",
+		description: "Scam: spoofed Nike domain (n1ke-collaborations.com), urgency pressure,...",
+		emails: [
+			{
+				messageId: "gt-031-msg-1",
+				threadId: "gt-031",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "partnerships@n1ke-collaborations.com"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "URGENT: Nike Global Ambassador Program - $50,000 offer"
+					},
+					{
+						name: "date",
+						value: "Mon, 17 Mar 2026 10:00:00 \\+0000"
+					}
+				],
+				body: "Congratulations! We are excited to invite you to our exclusive Nike Global Ambassador Program. This is a VERY LIMITED offer with only 50 spots available.\n\nYou have been selected to receive a $50,000 partnership offer.\n\nHowever, this offer expires in 24 HOURS. You must act now.\n\nTo secure your spot, please provide the following information:\n\n- Full name\n\n- Phone number\n\n- Email address\n\n- Mailing address\n\n- Credit card information (for verification purposes)\n\n- Bank account details\n\nClick here to confirm your spot: [SUSPICIOUS LINK REMOVED]\n\nDo NOT share this email with anyone. This is a private invitation.\n\nBest regards,\n\nNike Partnerships Team\n\npartnerships@n1ke-collaborations.com"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: "likely_scam",
+			likely_scam: true,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-032",
+		description: "Scam: tallium.info domain has no live website associated with it....",
+		emails: [
+			{
+				messageId: "gt-032-msg-1",
+				threadId: "gt-032",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Stan Marko <stan.marko@tallium.info>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Partnership request"
+					},
+					{
+						name: "date",
+						value: "Thu, 12 Mar 2026 08:25:02 -0700"
+					}
+				],
+				body: "I was hoping to connect with you to explore a potential collaboration\n\nbetween Tallium Inc. and Creatorland, but I understand priorities can shift\n\nand timing may not always align. So this will be my final message to you.\n\nIf things change and you’d be open to a conversation down the line, I’d be\n\nglad to reconnect - I’m confident we could bring strong value to your team.\n\nIn the meantime, here are a few helpful links you might want to keep on\n\nhand for future reference:\n\n- Our portfolio\n\n<https://tallium.com/en/our-works/?utm_source=SM-email&utm_medium=email>\n\n- Our EdTech expertise\n\n<https://tallium.com/en/industries/educational-software-development/?utm_source=SM-email&utm_medium=email>\n\n- 34 reviews on Clutch <https://clutch.co/profile/tallium>\n\nWishing you all the best,\n\n*Stan Marko*\n\nBusiness Development Executive\n\nTallium Inc.\n\nPhone: \\+38 067 483 16 00\n\nEmail: stan.marko@tallium.com\n\nShould you wish to stop these emails, a reply will do.\n\nTue Feb 24, 2026, at 4:25 PM Stan Marko < stan.marko@tallium.info >:\n\nHi Brian,\n\nI hope everything’s going well on your end.\n\nI’ve reached out a couple of times in the past weeks regarding a potential\n\ncollaboration between Creatorland and Tallium, with no response,\n\nunfortunately.\n\nI understand you might be busy, so just checking in to see if it might make\n\nsense to reconnect at a later date? If it makes, I’d be happy to follow up\n\nat a time that works better for you.\n\nIn any case, I’d appreciate a quick reply - even just to let me know the\n\ntiming isn’t right.\n\nThanks again, wishing you a productive day!\n\n*Stan Marko*\n\nBusiness Development Executive\n\nTallium Inc.\n\nPhone: \\+38 067 483 16 00\n\nEmail: stan.marko@tallium.com\n\nShould you wish to stop these emails, a reply will do.\n\nThu Feb 19, 2026, at 6:30 PM Stan Marko < stan.marko@tallium.info >:\n\nHi Brian,\n\nI know that scaling an EdTech business comes with unique technical and\n\noperational challenges - from adopting emerging technologies to ensuring\n\nseamless user experiences at scale.\n\nAt Tallium, we’re partnering with numerous EdTech companies (like CoachHub,\n\nSkill Dynamics and various universities) to solve exactly these kinds of\n\nchallenges by:\n\n- *Building scalable platforms* to support rapid growth and high user\n\nloads\n\n- *Implementing adaptive learning solutions* tailored to diverse learner\n\nneeds\n\n- *Integrating AI and IoT* for more personalized, data-driven learning\n\nexperiences\n\n- *Optimizing performance and cost structures* for sustainable operations\n\n- *Strengthening cybersecurity* to meet evolving compliance and data\n\nprotection demands\n\nIs Creatorland currently navigating any similar technical hurdles? I’d be\n\nglad to learn more and explore how our team could support your efforts.\n\nLooking forward to hearing your thoughts.\n\nP.S. Just in case, here’s the link to one of our recent projects called\n\nSwitch\n\n<https://tallium.com/en/our-works/case-study/switch?utm_source=SM-email&utm_medium=email>,\n\nwhere we helped to develop a customized LMS that provides coaching programs\n\nfor top-tier European business schools.\n\nBest regards,\n\n*Stan Marko*\n\nBusiness Development Executive\n\nTallium Inc.\n\nPhone: \\+38 067 483 16 00\n\nEmail: stan.marko@tallium.com\n\nShould you wish to stop these emails, a reply will do.\n\nThu Jan 15, 2026, at 7:09 PM Stan Marko < stan.marko@tallium.info >:\n\nHi Brian,\n\nI’m Stan, Business Development Executive at Tallium\n\n<https://tallium.com/en?utm_source=SM-email&utm_medium=email>.\n\nI’m reaching out to explore a potential collaboration between Tallium and\n\nCreatorland. Our team specializes in developing high-performance, custom\n\nsoftware solutions for the EdTech\n\n<https://tallium.com/en/industries/educational-software-development?utm_source=SM-email&utm_medium=email>\n\nsector, with a strong track record of helping companies enhance user\n\nengagement, optimize learning processes, and scale efficiently.\n\n>From advanced learning management systems to interactive and gamified\n\nplatforms, we’ve supported a wide range of education-focused organizations\n\nin achieving their strategic goals through tailored technology.\n\nI’d be happy to learn more about Creatorland’s current goals and discuss\n\nhow our expertise could support your next initiative. Would you be\n\navailable for a brief call this or next week?\n\nLooking forward to your response.\n\nBest regards,\n\n*Stanislav Marko*\n\nBusiness Development Executive\n\nTallium Inc.\n\nPhone: \\+38 067 483 16 00\n\nEmail: stan.marko@tallium.com\n\nShould you wish to stop these emails, a reply will do."
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: "likely_scam",
+			likely_scam: true,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-033",
+		description: "Scam: impersonates \"official TikTok platform.\" No legitimate TikTok outreach...",
+		emails: [
+			{
+				messageId: "gt-033-msg-1",
+				threadId: "gt-033",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Official TikTok Platform"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "TikTok Platform Product Promotion Campaign"
+					},
+					{
+						name: "date",
+						value: "Not specified"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: "likely_scam",
+			likely_scam: true,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-034",
+		description: "Automated security notification with potential malicious links.",
+		emails: [
+			{
+				messageId: "gt-034-msg-1",
+				threadId: "gt-034",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Google Workspace Alerts <google-workspace-alerts-noreply@google.com>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Alert:  Suspicious login"
+					},
+					{
+						name: "date",
+						value: "Thu, 12 Mar 2026 10:31:27 -0700"
+					}
+				],
+				body: "Google Workspace Image\n\nThis Suspicious login alert is to inform you that Google has detected a\n\nsuspicious login in your domain. Google considers login activity suspicious\n\nif we notice a sign in attempt that doesn't match a user's normal behavior,\n\nsuch as a sign in from an unusual location, or because we think an\n\nunauthorized person attempted to access a user's account.\n\nThe alert details include:\n\nUser: tiana.cameron@creatorland.com\n\nAttempted Login IP: 104.193.135.122\n\nActivity Date: Thursday, Mar 12, 2026, 5:01:24 PM (UTC)\n\nPlease view the alert center for additional details, investigation options,\n\nand remediation recommendations.\n\nGo to Alert Center\n\nYou have received this important update about your Google Workspace account\n\nbecause you are the designated admin recipient for this alert type. You can\n\nturn off these alerts or change the email recipients in the System defined\n\nrules section of the Admin Console.\n\nGoogle LLC 1600 Amphitheatre Parkway Mountain View, CA 94043"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-035",
+		description: "Scam: suspicious .info domain (nassaucapitalnavigation.info), unsolicited...",
+		emails: [
+			{
+				messageId: "gt-035-msg-1",
+				threadId: "gt-035",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Juan Moreno <moreno.j@nassaucapitalnavigation.info>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "family office equity capital 2 to 35 million dollars for Creatorland"
+					},
+					{
+						name: "date",
+						value: "Thu, 12 Mar 2026 14:10:16 \\+0000"
+					}
+				],
+				body: "We have the capability to secure 2 to 35 million for Creatorland.\n\nOur network of high-net-worth individuals and multi-family offices are looking for emerging investment prospects throughout the local creator marketing vertical and Creatorland was highlighted as an option.\n\nWould that be something you'd consider?\n\nBest,\n\nJuan Moreno"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: "likely_scam",
+			likely_scam: true,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-036",
+		description: "Scam: phishing email impersonating Google Drive shared drive notification....",
+		emails: [
+			{
+				messageId: "gt-036-msg-1",
+				threadId: "gt-036",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Account Department <jalokin@seznam.cz>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "You’ve  been added to the shared drive DWSB-HRAD PAYMENT PLANS DATA 3"
+					},
+					{
+						name: "date",
+						value: "Fri, 13 Mar 2026 09:35:21 \\+0000 (UTC)"
+					}
+				],
+				body: "ACCOUNT DEPARTMENT ( brian@creatorland.com ( it@dwisolar.com.my ) ) invited you to *manage content*. Content managers can add, edit, move, and delete files in this drive.\n\nDWSB-HRAD EX-EMPLOYEE DATA 3 ( https://noncumulative846.novabytelabs.sa.com/payroll631/*brian@creatorland.com )\n\nOpen shared drive ( https://noncumulative846.novabytelabs.sa.com/payroll631/*brian@creatorland.com )\n\nGoogle LLC, 1600 Amphitheatre Parkway, Mountain View, CA 94043, USA\n\nYou received this email because you were invited to a shared drive.\n\nUnsubscribe From This List https://u59488774.ct.sendgrid.net/asm/unsubscribe/?user_id=59488774&data=eyL67hqeY2v7CmsugZKRE6hgOKPnnh5jHxQQ84ecvXpoMDAwdTAwMKeOlJKPumbqEGdcxFFeLCbuiKMzsC2RUfoDbG4ihA2I6Mvt1WtSNWXT8fqe1TR37zfiekVLRBZ6pH_r400QmreOrpLuMtBf6cIdVcVcIZM75qydhfIiSJbgK_CKQ5ZAXbnPRBVPB57OVdf0W6dPhn5mFdBgWEcU8R8l86XlkSyWKPoA9Z8Sd7amETk6f0mpgkiO9Ef7PanMLS3-tMFplZIAUO7KQS1m1c2B4J7DwvTuHoC78mzr1jyPczkExgtbDg0ZuvUrw_CAc3IjLF8K-0GC1AZLAx298-o3zn7B88btBURIr-946_EiSo93h33ttiGBv5v-LovyLZMmgdiKWSKw8TaWmArYqA33XxzJhFxlHJxSpI5dZy4It4d1MgpqzNqG72x6eUOR-sF24uTFe3jbvKYmbUkI8FacnaWo5xt6_EH6jXMbt90RKdIn8VP8jTpYNeqVSGHrrV-LnGAH7jIOP8Vtw1NrwF5AJolB9gLQB4ekekF6ceDWfN6a_Br2ygVHEaIubxuzzMClVVlqe1ha4gmDC0tgUtLuf__JDSKbxJPnV5gPbbj-FG8x_GxBS8lRYnAJ9u9hFQnQYbYJJKdKUpWJvhTEhTE8iwxrhEZpmlDdOtbreQo6byt4hqUJ5L5L4Tn202kRPy-asvqXlw6ZMIu7lSslovIqexi1tjNJbKNdKCMr3V-y5BXW9bUGmDKxEE0r48-oFvpJjqUhGqXjEYNZbs7H_d9enliVdZertXdyoPD1uXEnBiPJS7fhAZkUWMmFw7bWxQ-eXqLFvKZT1kRzr0CW3rS76M6pvHb37j5_6Ki_WlmnryODC9TCs3CS_QFafudbMwGEpCSDxFKQ0R_2ETvlZT7545ruClQjaUwXjrNXCaVi26Yln6BJyyNvafpIHPhFK-9wLxVD4xW9Zs0dqg_d8IAc23wxpixj-kuJRikpjlkFJ5j6ydN3XoVmdvh6fAw-keLZ-a_vKtPodqqkYOqYKrZHGUMxVCaKQaG-HfYdHDDLIdaTV3Mc6oimJOSNPaW0DG7iQbtugf4= | Manage Email Preferences https://u59488774.ct.sendgrid.net/asm/?user_id=59488774&data=YAqF3t1hhBFvfxBBlsR0_lN1Lew9kuwqwcDfLhZm4NBoMDAwdTAwMG07Xq0tabW-8-2Ug2sZwmizBwWPJRVlmeLoFKhfPwp3lgZt8NpXz8qPoVb169X-ZbQ5cAessiXfjtRFvOiHtoytpjQLTLktlZ4YNzA80wLFZYLmauXaraF8jZWlSd7IHF2YZSVUJSMksOJS4U8Xo0w5S_XvzbyK-V8whl__MSDvN4o9c_mD_FAghl3CwgL61I46EyMDqfxPT-8Ogpq4nBHev9ylDuTiXWXmiF38NiDOUAJDUEzKkYGIvr8mYALfbo-QhWL2TgmigdwOqv4WGu94ShHSFYg7Gya2m2SLwZbfcDWZ1NETCtuCpy04931L_tiASuqIZMsHaS2vySKopNTuSrxgLWJLwO1PqADWyOrV1CDtH_jKgzTpiTkA1jX-48IQdEH1i1QCtNM6AMRzd2U5L_BpjTtklM6eRHJ2bZK3riebnmiOjeDmVsHlTfr4Mjn1cE-V82i14ql1OoNOQtesfpOR3qeyPekbz5FoMk8YF5pOaZMU8BzWiMQpjcTJ_twU4gtTnrd-q-B5-nnUETJtJWJB6Rg8SmqgGhwg3Lq_9NY_K2dQjljm5hZmuUQGgW_Ska6Irx7jIsWlqBI9IX4kihmSymU3F0Z-ecUkZidrfze0ubgzvKPd1CIbt6-ICvVAgD1UIFRdrDPvYAEThmwuNEA9vSLyeJ7VLUp4qX2-7hfFIN84lgynOlqcA3ysN6Cjvn-hztBPgXL2uLLlA4XTY5qa5xVI57iqimgCtGUXj-svx0za_ZEN7TD2ist_d7mUuKDPve-zifQkEj8encx6Hog4HMMbOlG7pRnZCOFpahOMa0qU7lagiYd3u02qqRY7Tkr4DJwsuba4Ed3PUHwj9CrWdX0ZsXBf3WmTmbngpKh1zr-OaetTK2g6lhmqBS4fuQck8SUwUqJ87hs_4ILgiJ7-nviawBnukOR8N3pc-o2U7w3emtvJQ5wpHz-zk5eL9hXe09YbRXXnmxN5PMGeqlDosljo_pXL3cNJ3Yn-n9RyfA4nv3AL1Y0hiL3JepXjlFu8TY8JgttmuRUX1gI="
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: "likely_scam",
+			likely_scam: true,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-037",
+		description: "Edge case: ambiguous networking/potential deal email. 'Let's meet up' could...",
+		emails: [
+			{
+				messageId: "gt-037-msg-1",
+				threadId: "gt-037",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Make <info@make.com>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Watch us break an AI agent (and fix it live) ⚡️"
+					},
+					{
+						name: "date",
+						value: "Mon, 16 Mar 2026 14:41:48 \\+0000"
+					}
+				],
+				body: "Logo ( https://www.make.com?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\nHero image ( https://with-make.wistia.com/live/events/5qvsz60vt2?channelId=132103&utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\nWebinar\n\n************************************************************\n\nBuild AI Agents you can trust: Debugging, trust, and control\n\n************************************************************\n\nMarch 19\n\n•\n\n5 PM GMT+1\n\n•\n\nOnline\n\nBreak an AI agent on purpose — then fix it live. 🧰\n\nLearn how to inspect agent reasoning, understand every decision it makes, and resolve issues with confidence.\n\nSave your seat ( https://with-make.wistia.com/live/events/5qvsz60vt2?channelId=132103&utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\nMore upcoming webinars\n\n( https://luma.com/kl9jlx2f?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\nStop stalking prospects (or VCs). Start personalizing at scale\n\nLearn how to build an automated personalization engine using HubSpot and Make — join us tomorrow, March 17\\.\n\nSave your seat ( https://luma.com/kl9jlx2f?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\nBuild self-healing scenarios\n\nStop manual troubleshooting.\n\nOn March 19, we’ll show how to detect failures and fix them automatically in real time.\n\nSave your seat ( https://with-make.wistia.com/live/events/ljxp9rihuq?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\n( https://with-make.wistia.com/live/events/ljxp9rihuq?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\n( https://make.com?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\n( https://www.facebook.com/itsMakeHQ/?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\n( https://www.linkedin.com/company/itsmakehq?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\n( https://twitter.com/make_hq?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\n( https://www.instagram.com/itsmakehq/?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\n( https://www.youtube.com/@itsmake?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\nYou're receiving this email because you're subscribed to Insights & Events. Prefer fewer emails?\n\nManage your email preferences ( https://track.customer.io/manage_subscription_preferences/dgSE_wYDAOTXjgLj144CAZz3FElHPUoGITbj1n-onQ== ).\n\nNeed assistance? Our\n\nCare Team ( https://www.make.com/en/ticket?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\nis happy to help.\n\nUnsubscribe ( https://track.customer.io/unsubscribe/dgSE_wYDAOTXjgLj144CAZz3FElHPUoGITbj1n-onQ== )\n\n·\n\nPrivacy Policy ( https://www.make.com/en/privacy-and-gdpr?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\n·\n\nTerms & Conditions ( https://www.make.com/en/terms-and-conditions?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\nUnsubscribe ( https://track.customer.io/unsubscribe/dgSE_wYDAOTXjgLj144CAZz3FElHPUoGITbj1n-onQ== )\n\nPrivacy Policy ( https://www.make.com/en/privacy-and-gdpr?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\nTerms & Conditions ( https://www.make.com/en/terms-and-conditions?utm_campaign=Insights_Weekly_160326&utm_medium=email&utm_source=customer.io )\n\n© 2026 Make, Menclova 2538/2, 180 00 Prague, Czechia"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-038",
+		description: "This is an automated report sent from a product the user uses.",
+		emails: [
+			{
+				messageId: "gt-038-msg-1",
+				threadId: "gt-038",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"'beehiiv' via socials@creatorland.com\" <socials@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "Taylor <socials+taylor@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "Metrics Report - Rodeo Raises $8.5M, AI Deepfake Detection Tools Surge, and Twitch Experiments with Gifted Subscriptions"
+					},
+					{
+						name: "date",
+						value: "Fri, 13 Mar 2026 21:42:20 \\+0000"
+					}
+				],
+				body: "*The following data is based on the average of your previous 10 posts, and is measured relative to their performance precisely 6 hours after sending.\n\nPERFORMANCE RANKING: 7th out of 10\n\nEmail metrics:\n\nRECIPIENTS: 60,189\n\nOPENS: 20,970 unique\n\nOPEN RATE: 35.5% (-6.1%)\n\nCLICKS: 130 unique\n\nCLICK THROUGH RATE: 0.6% (-32.3%)\n\nUNSUBSCRIBES: 266\n\nUNSUBSCRIBE RATE: 0.5% (+15.7%)\n\nWeb metrics:\n\nWEB PAGE VIEWS: 3\n\nWEB CLICKS: 1 unique\n\nMost Clicked Links:\n\nhttps://docs.google.com/forms/d/e/1FAIpQLSd2D3-Al4y4Q3LWrIAKVSMa-175yNgyLaCYkgWbwOxxXjiP1g/viewform?utm_source=newsletter.creatorland.com&utm_medium=newsletter&utm_campaign=rodeo-raises-8-5m-ai-deepfake-detection-tools-surge-and-twitch-experiments-with-gifted-subscriptions\n\nhttps://jobs.creatorland.com/Dealsync-Ambassador-Program-Free-Dealsnyc-15-Commission-2c4d96bfcc258065bd13d21c7827c61f?utm_source=newsletter.creatorland.com&utm_medium=newsletter&utm_campaign=rodeo-raises-8-5m-ai-deepfake-detection-tools-surge-and-twitch-experiments-with-gifted-subscriptions\n\nhttps://jobs.creatorland.com/TripTrack-Seeks-Travel-Creators-for-Affiliate-Campaign-Commission-or-Flat-Fee-319d96bfcc258047a2ccdb7d1d457407?utm_source=newsletter.creatorland.com&utm_medium=newsletter&utm_campaign=rodeo-raises-8-5m-ai-deepfake-detection-tools-surge-and-twitch-experiments-with-gifted-subscriptions\n\nhttps://jobs.creatorland.com/Museum-of-Science-Boston-Director-Creator-Network-Development-125K-155K-321d96bfcc2580f2a4b1e9504287214a?utm_source=newsletter.creatorland.com&utm_medium=newsletter&utm_campaign=rodeo-raises-8-5m-ai-deepfake-detection-tools-surge-and-twitch-experiments-with-gifted-subscriptions\n\nhttps://www.wired.com/story/rodeo-swipewipe-declutter-screenshots/?utm_source=newsletter.creatorland.com&utm_medium=newsletter&utm_campaign=rodeo-raises-8-5m-ai-deepfake-detection-tools-surge-and-twitch-experiments-with-gifted-subscriptions\n\nYou can also view live analytics here: https://app.beehiiv.com/posts/661a992c-7afc-42d2-a213-43e53b1df0f4/analytics?spid=3d3ccbab-b991-4af8-ba02-0ad71d60d0d4\n\nDid you monetize this email? If not, we can help. Join the beehiiv Ad Network and make money on every send — no additional work required.\n\nDetails here: https://app.beehiiv.com/monetize/ads\n\n--\n\nYou received this message because you are subscribed to the Google Groups \"socials@creatorland.com\" group.\n\nTo unsubscribe from this group and stop receiving emails from it, send an email to socials+unsubscribe@creatorland.com.\n\nTo view this discussion visit https://groups.google.com/a/creatorland.com/d/msgid/socials/69b484bcc424e_a852f4096a2%4084eaccfa-32e9-4921-8c5c-c908ea62dce5.mail."
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-039",
+		description: "Edge case: AI-powered networking intro that could be mistaken for a brand...",
+		emails: [
+			{
+				messageId: "gt-039-msg-1",
+				threadId: "gt-039",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Boardy Boardman <boardy@boardy.ai>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Brian, putting a HBS founder on your radar"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 17:22:24 \\+0000"
+					}
+				],
+				body: "Hi Brian,\n\n>From the 100 Founders Application pool — wanted to put Jacob Bassiri on your radar.\n\nJacob is Founder/CEO of Creator Stock X (CSX), a prediction market where users trade portfolios of influencers and bet on future follower counts. The twist is the “attention dividend” model: a data rewards OS that distributes virtual currency so the market can stay liquid without upfront user capital.\n\nWhy now: CSX is in closed beta (~200 users) and raising $1.5M on a $20M cap SAFE, with $500K already soft-circled.\n\nHere’s Jacob’s LinkedIn if you want to take a closer look: [https://www.linkedin.com/in/jacob-bassiri](https://www.linkedin.com/in/jacob-bassiri)\n\nFeels relevant to Creatorland given your creator-network distribution \\+ the obvious partnership angle if CSX needs reach into creator communities.\n\nHappy to intro if it’s of interest.\n\nCheers,\n\nBoardy"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-040",
+		description: "Edge case: VIPStreamers offers 'video boost' services. Not a traditional...",
+		emails: [
+			{
+				messageId: "gt-040-msg-1",
+				threadId: "gt-040",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "VIPStreamers Info"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "VIPStreamers - Video Product Revenue Support"
+					},
+					{
+						name: "date",
+						value: "2024-10-05"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-041",
+		description: "Edge case: VIPStreamers offers 'video boost' services. Not a traditional...",
+		emails: [
+			{
+				messageId: "gt-041-msg-1",
+				threadId: "gt-041",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "VIPStreamers Email Campaign"
+					},
+					{
+						name: "to",
+						value: "beetlejuicebrat@gmail.com"
+					},
+					{
+						name: "subject",
+						value: "VIPStreamers - Video Advertising and Budget Support"
+					},
+					{
+						name: "date",
+						value: "2024-10-05"
+					}
+				],
+				body: ""
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-042",
+		description: "Newsletter: Creator Spotlight newsletter delivered via beehiiv. Industry...",
+		emails: [
+			{
+				messageId: "gt-042-msg-1",
+				threadId: "gt-042",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"'Creator Spotlight' via socials@creatorland.com\" <socials@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "\"socials+taylor@creatorland.com\" <socials+taylor@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "🔴 A LinkedIn creator's $2.5M year"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 16:06:11 \\+0000"
+					}
+				],
+				body: "View image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/3d56938f-f7ce-4784-919e-dab3c8df5287/image__39_.png?t=1748354774)\n\nFollow image link: (https://creatorspotlight.com/)\n\nCaption: Brought to you by beehiiv.\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/2fad6a69-4da1-4998-89e7-8f26f0290101/image__161_.png?t=1768500756) [Sponsored by Taplio]\n\nFollow image link: (https://taplio.com/?utm_medium=email&utm_source=newsletter&utm_campaign=nl_creatorspotlight_0126_011526)\n\nCaption:\n\nToday’s guest is Vin Matano, a part-time creator and the owner of an influencer marketing agency called Creatorbuzz.\n\nThough he’s on the usual platforms — Instagram, TikTok, YouTube — Vin’s specialty is LinkedIn. This is the core of his personal creator work (which he says brought in around $200k last year) and his agency work (Creatorbuzz’s clients are all B2B companies).\n\n**In this episode:**\n\n* 💼 Building a $200k [brand deal business](https://youtu.be/__0_dbUL8JE?t=90)\n\n* 📈 How overdelivering turned one UGC gig into [a 2.5-year partnership](https://youtu.be/__0_dbUL8JE?t=332)\n\n* 💰 How Creatorbuzz [brought in $2.5M](https://youtu.be/__0_dbUL8JE?t=1553) in its first full year\n\n**[Listen](https://www.creatorspotlight.com/podcast/ep-102-the-creator-earning-200k-posting-on-linkedin-ft-vin-matano/dee9c330-f54a-44a5-941d-cf1c7f53a332)** wherever you get your podcasts; **watch below**; and **scroll down to read **our profile.\n\nYoutube: The Creator Earning $200k+ Posting on LinkedIn (https://youtu.be/__0_dbUL8JE)\n\n_— Francis Zierer, Lead Editor_\n\n----------\n\n----------\n\n## How I’m hitting my LinkedIn growth and engagement goals this year\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/ce784a06-f1d1-474d-a7d5-d273e60e1868/image.png?t=1773667551)\n\nFollow image link: (https://taplio.com/?utm_medium=email&utm_source=newsletter&utm_campaign=nl_creatorspotlight_0126_011526)\n\nCaption:\n\nLinkedIn is _still_ the most underrated social platform. That’s why one of my goals for this year is to hit 10,000 followers there — it helps me land interviews for the podcast, connect with a more engaged audience, and just meet other people doing great work in the creator economy.\n\nI’m currently at 4949\\. The only way I’m going to hit that number is by posting useful, engaging content on _a_ _consistent_ _basis_.\n\nI’m **[using Taplio to build my routine](https://taplio.com/?utm_medium=email&utm_source=newsletter&utm_campaign=nl_creatorspotlight_0126_011526)**. It’s an all-in-one LinkedIn growth tool, that lets creators like you and me:\n\n* Generate first drafts based on your ideas\n\n* Make image-based carousels (without external graphic design tools)\n\n* Find relevant content to engage with\n\n* Track — and understand — your analytics\n\nAs the sponsor of today’s _Creator Spotlight_, **[Taplio](https://taplio.com/?utm_medium=email&utm_source=newsletter&utm_campaign=nl_creatorspotlight_0126_011526)** is also giving you:\n\n* A 7-day free trial\n\n* $1 for a 1-month membership\n\n**[Get started using Taplio today](https://taplio.com/?utm_medium=email&utm_source=newsletter&utm_campaign=nl_creatorspotlight_0126_011526)** — and **use code CREATOR1X1** to grab this special offer.\n\n_This is an advertisement._\n\n----------\n\n----------\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/eb47a50c-ecc6-4903-9943-1c384b903960/IN_THE_SPOTLIGHT.png?t=1744661614)\n\nCaption:\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/282914fb-6a25-4435-a499-34df9d911472/Vin_Matano_Featured.png?t=1773697931)\n\nFollow image link: (http://creatorspotlight.com/p/vin-matano)\n\nCaption:\n\n_**By **__**[Francis Zierer](https://www.linkedin.com/in/francis-zierer/)**_\n\n## Tripling creator revenue one year, doubling it the next\n\nThe only reason we post to LinkedIn is to make money.\n\nOn Instagram, TikTok, or YouTube, people _also_ post to make money, but it’s not the _only_ reason. We’re also posting purely for creative expression or social connection. It’s all mixed together in one feed.\n\nIn this way, **LinkedIn is the most honest platform; we all know why we’re there**.\n\nAs a part-time creator, Vin Matano made around $200k in 2025\\. This is more than double the $94k he reports making in 2024\\. But it’s only equal to around 8% of the revenue his B2B influencer marketing agency brought in during the same time period.\n\nVin started making LinkedIn content at the end of the 2010s, after graduating college without a job lined up:\n\n“\"I realized every time I posted on LinkedIn, recruiters would reach out to me, and interviews might come from it.”“ —\n\n**Even after he landed a job (as a salesperson at a tech company), he kept posting, shifting to sales topics like his client prospecting strategies**. He doesn’t remember getting much engagement until sometime in 2019, when one of his posts — a story about how closing a deal led to his meeting Gary Vaynerchuk — received over 1,000 likes and 1 million views\n\nVin spent six years at the same company, steadily climbing through the ranks, posting to LinkedIn all throughout. **Eventually, he zeroed in on a day-in-the-life series**, giving viewers a glimpse of him going to the gym in the mornings and commuting into Manhattan, showing them around the office.\n\nTikTok Video: (https://www.tiktok.com/@vinmatano/video/7146219432954563886)\n\nSoon enough, brands were paying him to post:\n\n* **The first time Vin earned any money as a creator** was a $200 brand deal. He had between 10,000 and 15,000 followers on LinkedIn; the deal was for one text-only LinkedIn post.\n\n* **The first deal that felt “major” **was $9,000 for three videos. He recalls having around 30,000 LinkedIn followers at that point.\n\n* **To date, the largest deal he’s closed as a creator** was $28,000. By this point, he didn’t have many fewer followers than he does today (just under 54,000). His end of the deal involved three videos, one LinkedIn post, and “a bunch of [Instagram] Stories.”\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/febce6e3-a188-4d9a-9b24-8af21c486ca8/Content_Breaks__1_.png?t=1723054756)\n\nCaption:\n\n## All about brand deals\n\nBrand deals made up the vast majority of Vin’s $200k creator revenue last year. **Back in 2023, his creator income was $34k, spread across six revenue streams**:\n\n* 45% from brand partnerships\n\n* 19% from advising\n\n* 12% coaching\n\n* 11% from digital products sales\n\n* 7% from User Generated Content (UGC)\n\n* 6% from affiliate links\n\n([That post](https://www.linkedin.com/posts/vinmatano_i-made-34k-in-2023-as-a-part-time-content-activity-7149036855106183169-NzFN?utm_source=share&utm_medium=member_desktop&rcm=ACoAACg41yUBY7gyIO-o639B5qWgkx60ljEHiRU), by the way, received 617 reactions and 125 comments).\n\n“As a part-time creator,” Vin told us, there’s no better value for time than brand deals.\n\nVin identifies two primary reasons he’s been able to increase his creator income so much year over year. The first is he left his job in the middle of 2024, which allowed him to expand the scope of his content:\n\n“\"Once I quit and started my own business, I started opening up my content to different types of audiences, started doing founder-led content, more storytelling stuff. And I opened it up to more brand partnerships.\"“ —\n\nThe second reason follows from the first: he’s been able to build deeper relationships with brands seeking to reach his increasingly wider audience. Two of his key partners are Adobe and — of course — LinkedIn.\n\nOne of his best-performing posts _ever,_ with 5,107 reactions at the time of writing, is an ad for LinkedIn Ads:\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/6861d192-6b99-44c6-a3a8-4ebee9bbf31e/Screenshot_2026-03-16_at_6.57.54_PM.png?t=1773701894)\n\nFollow image link: (https://www.linkedin.com/posts/vinmatano_linkedinpartner-activity-7382118482936750080-ynQR?utm_source=share&utm_medium=member_desktop&rcm=ACoAACg41yUBY7gyIO-o639B5qWgkx60ljEHiRU)\n\nCaption:\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/febce6e3-a188-4d9a-9b24-8af21c486ca8/Content_Breaks__1_.png?t=1723054756)\n\nCaption:\n\n## Over-deliver to build more prosperous relationships\n\n““I'm easy to work with; I make sure I meet deadlines, I over-communicate, and I over-deliver on content.\"“ —\n\nHow does Vin land and renew long-term brand deals? He over-delivers. If he can get his foot in the door with a brand, even for a single post at a low rate, he’ll give far more than they asked for. This is exactly how he developed a relationship with Adobe:\n\n““I did some UGC work for them, maybe in 2023 … It was one small project and I gave them three videos … I did it just to start working with Adobe and, two-and-a-half years later, I’m still working with them.”“ —\n\nThere’s nuance here — Vin isn’t necessarily suggesting that creators should create two high-produced YouTube videos where a brand only paid for one. But if a brand asks for three Instagram Stories, Vin says he might deliver 10\\. It’s minimal extra effort for him, but it goes a long way for the partner.\n\nHe also stresses the importance of building these relationships with any agencies representing brands:\n\n““If you can show that you're easy to work with to an agency that holds the budget to a lot of different brands, they're going to be really quick to recommend you across all of their brands.”“ —\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/febce6e3-a188-4d9a-9b24-8af21c486ca8/Content_Breaks__1_.png?t=1723054756)\n\nCaption:\n\n## A multi-million-dollar influencer marketing agency\n\nVin left his sales job to package everything he’d learned as a professional salesperson and building his own part-time creator business in an agency model. [**Creatorbuzz**](https://www.creatorbuzz.com/)** works on behalf of B2B businesses to assist on or fully execute influencer marketing campaigns.**\n\nTikTok Video: (https://www.tiktok.com/@vinmatano/video/7374762683297631534)\n\nFounded in the summer of 2024, **the company currently has seven full-time employees** (and additional contractors).\n\n* Two account managers focused on brand relationships\n\n* Three people focused on creator relationships\n\n* One person handling accounts payable (paying creators)\n\n* Vin rounds out the roster, doing a bit of everything as CEO\n\nBy the end of 2024, just half a year in, the team was half the size it is now; the rest were hired in October of 2025\\.\n\nEntering 2025, Vin set $1 million as their revenue goal for the year. By September they did — and from there through the end of the year, the business exploded, with an additional $1.5 million coming in to end the year at $2.5 million. To get there, **they worked with 212 creators across 26 countries, on behalf of over 20 brands**.\n\nVin’s plans for 2026 are to continue working as a part-time creator himself — he’s hired editing and shooting help to up his quality bar — and to continue growing the agency.\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/febce6e3-a188-4d9a-9b24-8af21c486ca8/Content_Breaks__1_.png?t=1723054756)\n\nCaption:\n\n**_Connect with Vin_**_ on _[_LinkedIn_](https://www.linkedin.com/in/vinmatano/)_, _[_Instagram_](https://www.instagram.com/vinmatano/)_, or _[_TikTok_](https://www.tiktok.com/@vinmatano)_._\n\n**_Work with _**[**_Creatorbuzz_**](https://www.creatorbuzz.com/)_._\n\n----------\n\n----------\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/50dcb72a-04dc-4d07-89e5-5d37a6ad34d2/STEAL_THIS_TACTIC.png?t=1744661337)\n\nCaption:\n\n## LinkedIn content strategy 101\n\nVin understands how to succeed on LinkedIn better than most — **success meaning producing content that engages his target audience and attracts clients**. At the time of this writing, his follower count sits just below 54k, higher than on any other platform where he’s actively posting.\n\nThe principles of a successful LinkedIn content strategy aren’t too different from those of any other social platform: post high-quality content consistently.\n\n**If there is a difference, it’s just that “high-quality content” here requires professional relevance.**\n\n### LinkedIn staff recommend three specific topics\n\nVin has been actively posting on LinkedIn for more than half a decade and says the platform has become better at supporting creators in that time. One way they do this is by assigning community managers to top creators, including him; he has a direct line to the LinkedIn team.\n\n**There are three topic areas Vin says the LinkedIn team recommends focusing on:**\n\n* **News and trends: **“If you are an expert in a certain industry, speak on that and share your POV. Give commentary on news and trends.”\n\n* **Workplace stories: **“What did you learn while at your last job that can be a lesson for everyone else? Did you have a really successful campaign? Did you have a really bad campaign that maybe you learned a lot from?”\n\n* **Career advice: **“What have you learned during your career so far that someone maybe two, three years behind you can learn from?”\n\nYou don’t need to be decades deep in your career to have something worth sharing:\n\n““A lot of young people I talk to are hesitant to post on LinkedIn because they don't feel they have enough to share.\n\nIn reality, veterans in the space are looking to young people to see how they're talking, how they're thinking about things. You definitely have a lot to share no matter what stage of your career you're in.”“ —\n\n### A little effort goes a long way — be earnest, have fun\n\nWatch any of Vin’s videos — most of his posts are videos — and you’ll start to notice a few patterns. There’s always a brief hook before he cuts back to the “beginning” of the story to add context. But every video creator does this; if there’s a trademark detail to Vin’s content, it’s his use of props.\n\nOne of his best-engaged posts in the last year is a photo of him with a hand-made LinkedIn “Hiring” badge around his neck. 2,149 reactions at the time of writing! It’s a little bit cringe, it shows evidence of effort, it’s earnest. And it works.\n\n““I don't think enough people are storytelling to answer your question. People are posting really bad stuff on LinkedIn, just a low quality. So the barrier, the bar is much lower.”“ —\n\nAgain, the only reason we post on or scroll LinkedIn is to make money. It’s honest; it should also be fun.\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/3e4ca9b6-71d5-4e49-bbc9-3880e358fc5f/Screenshot_2026-03-17_at_8.44.48_AM.png?t=1773751498)\n\nFollow image link: (https://www.linkedin.com/posts/vinmatano_hiring-activity-7365734680924438529-Y9Iv?utm_source=share&utm_medium=member_desktop&rcm=ACoAACg41yUBY7gyIO-o639B5qWgkx60ljEHiRU)\n\nCaption:\n\n### No need to post every day (unless you need the reps)\n\nThere’s plenty of LinkedIn content advice out there — only post during working hours, make every sentence it’s own paragraph, you have to post every single day. I asked Vin if there was one piece of advice he thinks is nonsense.\n\n““Posting every day is pretty nonsense. You don't need to post every day.”“ —\n\nOn the other hand, there’s no harm in posting every day. Recent guest [Daniel Berk](https://www.creatorspotlight.com/p/daniel-berk) posts at least that often, to the tune of consistent engagement and follower growth.\n\nVin used to post every day but has slowed to only twice or thrice per week. In the beginning, when you’re getting started, he says it’s “helpful just to build up that muscle and remove the barrier of fear you might have posting on LinkedIn.”\n\nIt’s good exercise — just not sustainable in the long term. Plus, Vin says, “Nobody really wants to hear from you every single day.”\n\n----------\n\n———\n\nYou are reading a plain text version of this post. For the best experience, copy and paste this link in your browser to view the post online:\n\nhttps://www.creatorspotlight.com/p/vin-matano\n\n--\n\nYou received this message because you are subscribed to the Google Groups \"socials@creatorland.com\" group.\n\nTo unsubscribe from this group and stop receiving emails from it, send an email to socials+unsubscribe@creatorland.com.\n\nTo view this discussion visit https://groups.google.com/a/creatorland.com/d/msgid/socials/20260317.160611.1dc69b86%40mta8."
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-043",
+		description: "Newsletter: Digiday Daily industry newsletter about advertising/creator...",
+		emails: [
+			{
+				messageId: "gt-043-msg-1",
+				threadId: "gt-043",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Digiday Daily\" <daily@mail.digiday.com>"
+					},
+					{
+						name: "to",
+						value: "\"brian@creatorland.com\" <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "The Trade Desk remains the dominant DSP but its advertisers are starting to shop around"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 22:00:20 \\+1100"
+					}
+				],
+				body: "The Trade Desk built its dominance by being the obvious choice. It’s still the obvious choice. Just not as obvious as it used to be.\n\nTOP STORY\n\nThe Programmatic Marketer [https://digiday.com/topic/programmatic-luxury?utm_campaign=digidaydis&utm_source=daily&utm_content=]                                The Trade Desk remains the dominant DSP but its advertisers are starting to shop around [https://digiday.com/media-buying/the-trade-desk-remains-the-dominant-dsp-but-its-advertisers-are-starting-to-shop-around/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nThe gap between The Trade Desk’s public confidence and what its advertisers describe on the ground has rarely been harder to close.\n\n[https://digiday.com/media-buying/the-trade-desk-remains-the-dominant-dsp-but-its-advertisers-are-starting-to-shop-around/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nAdvertisement\n\nOTHER THINGS TO KNOW\n\nBy adopting a more optimized flighting approach to ad spend, marketers can deliver more marginal ROI on their investments.  This strategy ensures that they’re not wasting any of their spending. [https://digiday.com/sponsored/how-a-precise-timing-structure-drives-material-differences-in-marketing-efficiency/] Partner insights from Keen Decision Systems. Sponsored Wifi is an effective way to reach consumers before a large event and enable retargeting. By presenting an ad and redirecting users to an advertiser’s site,  retargeting can occur post-event to keep up momentum. [https://digiday.com/sponsored/the-case-for-in-flight-advertising-for-audience-engagement-and-retargeting/] Partner insights from Viasat Ads. In the reality of today’s media environment, scale is fragile. Traffic is rented. Content alone is no longer defensible.  But participation turns audiences from passive consumers into active participants. [https://digiday.com/sponsored/from-rented-audiences-to-engaged-communities-why-participation-is-the-new-moat-for-publishers/] Partner insights from Viafoura.\n\nMARKETING\n\nMember exclusive                                Media Buying Briefing: Is ad marketplace uncertainty the new normal? [https://digiday.com/media-buying/media-buying-briefing-is-ad-marketplace-uncertainty-the-new-normal/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nDespite a war in the Middle East, rising oil, gas and consumer prices and a fresh round of tariffs that are roiling economies, brands and buyers are largely staying the course in media spending.\n\n[https://digiday.com/media-buying/media-buying-briefing-is-ad-marketplace-uncertainty-the-new-normal/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]                             Evolving Agencies [https://digiday.com/topic/evolving-agencies?utm_campaign=digidaydis&utm_source=daily&utm_content=]                ‘I’m not selling you hours’: PMG’s push beyond agencies [https://digiday.com/media-buying/im-not-selling-you-hours-pmgs-push-beyond-agencies/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nPMG never called itself an agency. Here’s why that matters now.\n\n[https://digiday.com/media-buying/im-not-selling-you-hours-pmgs-push-beyond-agencies/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nPARTNER INSIGHTS FROM CINT\n\nHow cross-platform measurement enables real-time campaign optimization [https://digiday.com/form/how-marketers-are-using-cross-platform-measurement-to-optimize-in-real-time/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nAn effective cross-platform measurement strategy helps marketers improve performance in real time — optimizing creative, frequency or even publishers during a campaign.\n\nEvolving Agencies [https://digiday.com/topic/evolving-agencies?utm_campaign=digidaydis&utm_source=daily&utm_content=]                ‘I’m not selling you hours’: PMG’s push beyond agencies [https://digiday.com/media-buying/im-not-selling-you-hours-pmgs-push-beyond-agencies/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nPMG never called itself an agency. Here’s why that matters now.\n\n[https://digiday.com/media-buying/im-not-selling-you-hours-pmgs-push-beyond-agencies/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nPARTNER INSIGHTS FROM SEEEDTAG\n\nHow neuro-contextual intelligence shifts media planning strategies [https://digiday.com/sponsored/why-neuro-contextual-ai-changes-how-marketers-plan-media/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nAudience strategy has historically focused on reaching predefined consumer segments based on assumed traits. Neuro-contextual intelligence helps media planners identify high-intent moments in real time — distinguishing between passive browsing and active consideration.\n\nAdvertisement\n\nMEDIA & PLATFORMS\n\nEvolving Agencies [https://digiday.com/topic/evolving-agencies?utm_campaign=digidaydis&utm_source=daily&utm_content=]                                After WPP reckoning: The case for and against principal media [https://digiday.com/podcasts/after-wpp-reckoning-the-case-for-and-against-principal-media/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nTen years later, principal media is back in the zeitgeist. Why agencies and brands are clashing over the so-called hidden model.\n\n[https://digiday.com/podcasts/after-wpp-reckoning-the-case-for-and-against-principal-media/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nPARTNER INSIGHTS FROM APPSFLYER\n\nWhy mobile — not AI — is the center of gravity for measurement [https://digiday.com/sponsored/ai-doesnt-fix-measurement-it-raises-the-stakes-for-cmos/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nWhen marketers implement mobile-grade measurement standards, they give AI a grounded identity source and behaviors from which to work. Without that, they may get faster, but not better, optimization.\n\nGenerative AI [https://digiday.com/topic/generative-ai?utm_campaign=digidaydis&utm_source=daily&utm_content=]                Butler/Till’s first agentic media buying tests cut media and supply chain costs [https://digiday.com/media-buying/butler-tills-first-agentic-media-buying-tests-cut-media-and-supply-chain-costs/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nInitial campaign tests by the indie agency and Pubmatic show cost reductions and time saved. Success, inevitably, brings more questions.\n\n[https://digiday.com/media-buying/butler-tills-first-agentic-media-buying-tests-cut-media-and-supply-chain-costs/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nFROM DIGIDAY+\n\nMember exclusive                                Ad Tech Briefing: The industry is rethinking its foundations as a new world order is established [https://digiday.com/marketing/ad-tech-briefing-the-industry-is-rethinking-its-foundations-as-a-new-world-order-is-established/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nThe days of ‘fake it ’til you make it’ are coming to an end.\n\n[https://digiday.com/marketing/ad-tech-briefing-the-industry-is-rethinking-its-foundations-as-a-new-world-order-is-established/?utm_campaign=digidaydis&utm_source=daily&utm_content=260317]\n\nWritten by Jim Cooper and Sara Jerde\n\nWere you forwarded this email?  Sign up [https://digiday.com/newsletters] to get it daily.\n\nAdvertise [https://digiday.com/advertise] |  Digiday+ [https://digiday.com/subscribe?tpcc=digidaydaily_footer] |  Events [https://digiday.com/events/] |  Awards [https://digiday.com/awards/]\n\nUpdate your email  https://digiday.updatemyprofile.com/t-wtjijo-04CE57C8-jdkddiykw-ty |  Unsubscribe |  Privacy policy [https://digiday.com/privacy-policy/]\n\nThis email was sent to brian@creatorland.com.\n\nIf you are no longer interested you can unsubscribe instantly:\n\nhttps://digiday.cmail20.com/t/t-u-wtjijo-jdkddiykw-l/"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-044",
+		description: "Newsletter: Digiday Daily newsletter about middle-tier creators in the...",
+		emails: [
+			{
+				messageId: "gt-044-msg-1",
+				threadId: "gt-044",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Digiday Daily\" <daily@mail.digiday.com>"
+					},
+					{
+						name: "to",
+						value: "\"brian@creatorland.com\" <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "In graphic detail: Middle-tier creators are fueling the next phase of the creator economy"
+					},
+					{
+						name: "date",
+						value: "Fri, 13 Mar 2026 22:00:15 \\+1100"
+					}
+				],
+				body: "Presented by\n\nAs top creators turn into celebrities commanding six-figure brand deals, a growing middle tier of creators is building sustainable businesses. These creators — often niche experts, educators, or hobbyists turned entrepreneurs — are monetizing audiences through a mix of newsletters, courses, digital products and smaller sponsorships.\n\nThey represent the “everyday” creator, earning revenue through channels like affiliate commerce or data-driven partnerships.\n\nAdvertisement\n\nTOP STORY\n\nThe Creator Economy [https://digiday.com/topic/creator-economy?utm_campaign=digidaydis&utm_source=daily&utm_content=]                                In graphic detail: Middle-tier creators are fueling the next phase of the creator economy [https://digiday.com/media/in-graphic-detail-middle-tier-creators-are-fueling-the-next-phase-of-the-creator-economy/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nFacts and figures behind the growing middle tier of creators who make less than macro creators, but convert more.\n\n[https://digiday.com/media/in-graphic-detail-middle-tier-creators-are-fueling-the-next-phase-of-the-creator-economy/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nOTHER THINGS TO KNOW\n\nSponsored Wifi is an effective way to reach consumers before a large event and enable retargeting. By presenting an ad and redirecting users to an advertiser’s site,  retargeting can occur post-event to keep up momentum. [https://digiday.com/sponsored/the-case-for-in-flight-advertising-for-audience-engagement-and-retargeting/] Partner insights from Viasat Ads. Audience strategy has historically focused on reaching predefined consumer segments based on assumed traits.  Neuro-contextual intelligence helps media planners identify high-intent moments in real time [https://digiday.com/sponsored/why-neuro-contextual-ai-changes-how-marketers-plan-media/] — distinguishing between passive browsing and active consideration. Partner insights from Seedtag. AI exposes where measurement breaks down, where assumptions hide and where decision-making confidence outpaces accurate outputs.  It forces marketing organizations to confront a hard reality: Automation magnifies whatever uncertainty already exists. [https://digiday.com/sponsored/ai-doesnt-fix-measurement-it-raises-the-stakes-for-cmos/] Partner insights from AppsFlyer.\n\nMARKETING\n\nMember exclusive                The Future of Marketing Briefing: a war, an oil spike and an ad market that can't see what comes next [https://digiday.com/marketing/the-future-of-marketing-briefing-a-war-an-oil-spike-and-an-ad-market-that-cant-see-what-comes-next/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nThe assumptions underpinning ad growth just got a lot more complicated.\n\n[https://digiday.com/marketing/the-future-of-marketing-briefing-a-war-an-oil-spike-and-an-ad-market-that-cant-see-what-comes-next/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]                                           As AI creative moves upstream, one production firm is pitching brands a model built on that trend [https://digiday.com/marketing/as-ai-creative-moves-upstream-one-production-firm-is-pitching-brands-a-model-built-on-that-trend/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nAs production budgets tighten, Ritual Labs is betting brands will use AI to prototype and test campaigns earlier in the creative process.\n\n[https://digiday.com/marketing/as-ai-creative-moves-upstream-one-production-firm-is-pitching-brands-a-model-built-on-that-trend/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nPARTNER INSIGHTS FROM AMAZON ADS\n\nHow brands are bridging the measurement gap between immediate ROI and long-term brand growth [https://digiday.com/sponsored/how-brands-are-measuring-value-across-the-entire-customer-journey/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nMany marketing activities create value beyond short attribution windows, but advertisers have lacked reliable ways to measure these longer-term effects with the same confidence as short-term metrics.\n\nA MESSAGE FROM DISNEY CAMPAIGN MANAGER\n\nMedia buys made easy [https://ad.doubleclick.net/ddm/trackclk/N1212560.2480502DIGIDAY/B35058838.440056661;dc_trk_aid=635064645;dc_trk_cid=251720361;dc_lat=;dc_rdid=;tag_for_child_directed_treatment=;tfua=;gdpr=$GDPR;gdpr_consent=$GDPR_CONSENT_755;ltd=;dc_tdv=1?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nStop building campaigns from scratch. Start building a playbook. Disney Campaign Manager is one ad solution for buys across Disney+, Hulu and ESPN streaming platforms, helping you turn campaign wins into repeatable strategies that deliver real results. Built-in AI tools help you optimize, see what’s working and apply those lessons across your entire portfolio. Strong setups don’t disappear after one run; they become the foundation for performance you can replicate again and again.\n\nGet Started Today [https://ad.doubleclick.net/ddm/trackclk/N1212560.2480502DIGIDAY/B35058838.440327058;dc_trk_aid=635067171;dc_trk_cid=251718669;dc_lat=;dc_rdid=;tag_for_child_directed_treatment=;tfua=;gdpr=$GDPR;gdpr_consent=$GDPR_CONSENT_755;ltd=;dc_tdv=1?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]                             Retail Revolution [https://digiday.com/topic/retail-revolution?utm_campaign=digidaydis&utm_source=daily&utm_content=]                Customer reviews become a key battleground as AI revolutionizes product discovery [https://digiday.com/marketing/customer-reviews-become-a-key-battleground-as-ai-revolutionizes-product-discovery/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nAI Platforms like ChatGPT and Perplexity are reshaping how customers discover products online.\n\n[https://digiday.com/marketing/customer-reviews-become-a-key-battleground-as-ai-revolutionizes-product-discovery/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nPARTNER INSIGHTS FROM THE WEATHER COMPANY\n\nVideo explainer: Using weather targeting to influence action [https://digiday.com/video/sponsored/wtf-is-weather-targeting-a-video-explainer/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nIn this video, learn how advertisers tap into a consumer’s mindset, motivation and emotional state at a given moment that moves the needle.\n\nBrands in Culture [https://digiday.com/topic/brands-in-culture?utm_campaign=digidaydis&utm_source=daily&utm_content=]                Sephora announces partnership with F1 Academy [https://digiday.com/marketing/sephora-announces-partnership-with-f1-academy/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nAs the official beauty retail partner of the series, the beauty giant will appear on a dedicated Sephora-branded car.\n\n[https://digiday.com/marketing/sephora-announces-partnership-with-f1-academy/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nAdvertisement\n\nPARTNER INSIGHTS FROM CINT\n\nWhy cross-platform measurement is key to optimizing in real time [https://digiday.com/form/how-marketers-are-using-cross-platform-measurement-to-optimize-in-real-time/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nWhen a campaign has clear goals, impressions are measured accurately and scale is sufficient to generate learnings, effective cross-platform measurement can help marketers turn negative lifts into positives.\n\nICYMI\n\nGenerative AI [https://digiday.com/topic/generative-ai?utm_campaign=digidaydis&utm_source=daily&utm_content=]                                OpenAI is building the ad tech stack it's currently borrowing [https://digiday.com/media-buying/openai-is-b-building-the-ad-tech-stack-its-currently-borrowing/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nTech companies don’t build out an internal ads org – let alone pay up to $385,000 to do it – if they’re planning to rely on outside vendors forever.\n\n[https://digiday.com/media-buying/openai-is-b-building-the-ad-tech-stack-its-currently-borrowing/?utm_campaign=digidaydis&utm_source=daily&utm_content=260313]\n\nWritten by Jim Cooper and Sara Jerde\n\nWere you forwarded this email?  Sign up [https://digiday.com/newsletters] to get it daily.\n\nAdvertise [https://digiday.com/advertise] |  Digiday+ [https://digiday.com/subscribe?tpcc=digidaydaily_footer] |  Events [https://digiday.com/events/] |  Awards [https://digiday.com/awards/]\n\nUpdate your email  https://digiday.updatemyprofile.com/t-wtylyjk-04CE57C8-jdkddiykw-tr |  Unsubscribe |  Privacy policy [https://digiday.com/privacy-policy/]\n\nThis email was sent to brian@creatorland.com.\n\nIf you are no longer interested you can unsubscribe instantly:\n\nhttps://digiday.cmail20.com/t/t-u-wtylyjk-jdkddiykw-l/"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-045",
+		description: "Newsletter: beehiiv platform notification about community engagement badge....",
+		emails: [
+			{
+				messageId: "gt-045-msg-1",
+				threadId: "gt-045",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Tyler @ beehiiv\"  🐝  <tyler@cx.beehiiv.com>"
+					},
+					{
+						name: "to",
+						value: "Brian Freeman <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "Creatorland: Connector badge unlocked  🔗"
+					},
+					{
+						name: "date",
+						value: "Mon, 16 Mar 2026 23:55:52 \\+0000 (UTC)"
+					}
+				],
+				body: "( https://app.beehiiv.com/recommendations?badge=community&spid=3d3ccbab-b991-4af8-ba02-0ad71d60d0d4&utm_campaign=%5BRecommendations%5D+Connector+Badge&utm_content=%5BRecommendations%5D+Connector+Badge&utm_medium=email&utm_source=customer.io&utm_term=email_action )\n\nThat’s a huge signal to the beehiiv community. You’re not just showing up. You’re a real, long-term growth partner.\n\nBadges boost your discoverability when others choose their Top 4, so this one’s doing double duty: street cred and more reach.\n\nNext stop? The Influencer badge at 1,000 referrals. Let’s get you there.\n\nView your badge ( https://app.beehiiv.com/recommendations?badge=community&spid=3d3ccbab-b991-4af8-ba02-0ad71d60d0d4&utm_campaign=%5BRecommendations%5D+Connector+Badge&utm_content=%5BRecommendations%5D+Connector+Badge&utm_medium=email&utm_source=customer.io&utm_term=email_action )\n\nIf you no longer wish to receive these emails, please\n\nupdate your preferences or unsubscribe here. ( https://app.beehiiv.com/current_user/notification_preferences?spid=3d3ccbab-b991-4af8-ba02-0ad71d60d0d4&utm_campaign=%5BRecommendations%5D+Connector+Badge&utm_content=%5BRecommendations%5D+Connector+Badge&utm_medium=email&utm_source=customer.io&utm_term=email_action )"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-046",
+		description: "Investor/VC: LinkedIn group notification about Decamillionaire Network....",
+		emails: [
+			{
+				messageId: "gt-046-msg-1",
+				threadId: "gt-046",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"'LinkedIn' via info\" <info@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "Brian Freeman <info@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "Don’t miss conversations in 🏔️ Decamillionaire Network: Mentals Models, Strategies \\+ Case Studies of Building a $10M+ Net Worth"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 18:05:40 \\+0000 (UTC)"
+					}
+				],
+				body: ".....................................🏔️ Decamillionaire Network: Mentals Models, Strategies \\+ Case Studies of Building a $10M+ Net Worth\n\nFor 3 free artificial intelligence tools and our free Decamillionaire Trail Guide Preview document please email Richard@FamilyOffices.com or WhatsApp or text  \\+1 (USA) (808) 600-9260\n\nDecamillionaire Network: Decamillionaires, founders, Investors, CEO, Directors, Business Leaders ,Real Estate, and Private Equity [1.7M Members]- Welcome to the Global Founders & C-Level Executives Network, a premier online community for leaders in startups, real estate, and private equity. We unite professionals from around the globe, including entrepreneurs, angel investors, venture capitalists, real estate developers, equity analysts, and C-level executives (CEOs, CFOs, COOs, CIOs, CTOs, CHROs), fostering a dynamic platform to connect, share insights, and drive business success through innovation.\n\nWhat We Offer:\n\n- Cross-sector Networking: Engage with leaders across startups, real estate, and private equity to expand your professional horizon.\n\n- Insightful Analysis: Delve into market trends, investment strategies, and leadership development for comprehensive growth.\n\n- Collaboration and Innovation: Join a community dedicated to sharing sector-specific knowledge, promoting innovation, and facilitating collaboration.\n\nWhether you're looking to scale your startup, explore real estate investments, or make strategic moves in private equity, our network offers unparalleled opportunities for growth and collaboration. We're committed to helping members achieve significant impact and lead the charge in industry transformation.\n\nAs one of the largest business and investment-focused groups on LinkedIn, we're dedicated to discussing the best practices and mental models of capitalism's winners.\n\nThis group is operated by an 18-year-old investor club, the Family Office Club, which has 1,000+ active investors, 17 million social media followers, 30 artificial intelligence tools, and 20 live events a year.\n\nView all posts\n\nhttps://www.linkedin.com/comm/groups/2046019?lipi=urn%3Ali%3Apage%3Aemail_email_groups_recommended_by_admin_01%3BtUfDJi5HTcOiijtGalItMw%3D%3D&midToken=AQGOF4_t3NpqHg&midSig=1lbXhMG-nt5Yc1&trk=eml-email_groups_recommended_by_admin_01-content_footer-0-view_all_posts&trkEmail=eml-email_groups_recommended_by_admin_01-content_footer-0-view_all_posts-null-ptvj4~mmuxahi7~4x-null-null&eid=ptvj4-mmuxahi7-4x\n\nDiscover inspiring conversations happening in your group\n\nManage group settings or leave this groupGo to group\n\nhttps://www.linkedin.com/comm/groups/2046019?lipi=urn%3Ali%3Apage%3Aemail_email_groups_recommended_by_admin_01%3BtUfDJi5HTcOiijtGalItMw%3D%3D&midToken=AQGOF4_t3NpqHg&midSig=1lbXhMG-nt5Yc1&trk=eml-email_groups_recommended_by_admin_01-content_footer-0-footer_leave_group_link&trkEmail=eml-email_groups_recommended_by_admin_01-content_footer-0-footer_leave_group_link-null-ptvj4~mmuxahi7~4x-null-null&eid=ptvj4-mmuxahi7-4x\n\n----------------------------------------\n\nThis email was intended for Brian Freeman (Founder & CEO of Creatorland | Building the LinkedIn for the $250B Creator Economy)\n\nLearn why we included this: https://www.linkedin.com/help/linkedin/answer/4788?lang=en&lipi=urn%3Ali%3Apage%3Aemail_email_groups_recommended_by_admin_01%3BtUfDJi5HTcOiijtGalItMw%3D%3D&midToken=AQGOF4_t3NpqHg&midSig=1lbXhMG-nt5Yc1&trk=eml-email_groups_recommended_by_admin_01-SecurityHelp-0-textfooterglimmer&trkEmail=eml-email_groups_recommended_by_admin_01-SecurityHelp-0-textfooterglimmer-null-ptvj4~mmuxahi7~4x-null-null&eid=ptvj4-mmuxahi7-4x\n\nYou are receiving LinkedIn notification emails.\n\nUnsubscribe: https://www.linkedin.com/comm/psettings/email-unsubscribe?lipi=urn%3Ali%3Apage%3Aemail_email_groups_recommended_by_admin_01%3BtUfDJi5HTcOiijtGalItMw%3D%3D&midToken=AQGOF4_t3NpqHg&midSig=1lbXhMG-nt5Yc1&trk=eml-email_groups_recommended_by_admin_01-unsubscribe-0-textfooterglimmer&trkEmail=eml-email_groups_recommended_by_admin_01-unsubscribe-0-textfooterglimmer-null-ptvj4~mmuxahi7~4x-null-null&eid=ptvj4-mmuxahi7-4x&loid=AQH9goE5usOw4wAAAZz8-ZBg2ocYakf-s5M55jaIm93WNpQ0iJ-h3byIvnAyTvVqns1Z3PFUTUgqz90DW_HXmU3znbLFPEg1Pzg9Bk-tm80\n\nHelp: https://www.linkedin.com/help/linkedin/answer/67?lang=en&lipi=urn%3Ali%3Apage%3Aemail_email_groups_recommended_by_admin_01%3BtUfDJi5HTcOiijtGalItMw%3D%3D&midToken=AQGOF4_t3NpqHg&midSig=1lbXhMG-nt5Yc1&trk=eml-email_groups_recommended_by_admin_01-help-0-textfooterglimmer&trkEmail=eml-email_groups_recommended_by_admin_01-help-0-textfooterglimmer-null-ptvj4~mmuxahi7~4x-null-null&eid=ptvj4-mmuxahi7-4x\n\n© 2026 LinkedIn Corporation, 1zwnj000 West Maude Avenue, Sunnyvale, CA 94085\\.\n\nLinkedIn and the LinkedIn logo are registered trademarks of LinkedIn.\n\n--\n\nYou received this message because you are subscribed to the Google Groups \"info\" group.\n\nTo unsubscribe from this group and stop receiving emails from it, send an email to info+unsubscribe@creatorland.com.\n\nTo view this discussion visit https://groups.google.com/a/creatorland.com/d/msgid/info/14898270.295256.1773770740134%40lva1-app85428.prod.linkedin.com."
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-047",
+		description: "Investor/VC: Short Squeez financial newsletter about private equity....",
+		emails: [
+			{
+				messageId: "gt-047-msg-1",
+				threadId: "gt-047",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Short Squeez - Overheard on Wall Street <press@shortsqueez.co>"
+					},
+					{
+						name: "to",
+						value: "\"brian@creatorland.com\" <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "🍋  Private Equity Pay Scheme Challenged"
+					},
+					{
+						name: "date",
+						value: "Fri, 13 Mar 2026 09:30:42 \\+0000 (UTC)"
+					}
+				],
+				body: "Caption:\n\n**Together With**\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/36a3c091-174f-4614-8be6-c821501d60aa/Use_this_logo.png?t=1772689019)\n\nFollow image link: (https://app.termgrid.com/for/mid-market-case-studies-campaign-landing-page-ss/?utm_source=Shortsqueez&utm_medium=sponsored+content&utm_campaign=Efficiency+case+studies+&utm_id=Efficiency+case+studies+&utm_content=How+PE+Firms+Are+Reclaiming+100%2B+Hours+Per+Year)\n\nCaption:\n\n----------\n\n“_\"Never, ever, think about something else when you should be thinking about incentives.\" — Charlie Munger_“ —\n\n--------------------\n\n**Good Morning! **A new report found PE investors would have been better off in public markets over the last five years, even stripping out Mag7 gains. Super-rich travelers are fleeing Middle East conflict via private jet, sending charter prices through the roof. And Wall Street is optimistic the worst of the software wipeout is behind us.\n\nJPMorgan says hedge funds hit their worst drawdown since last April. UBS is ordering US junior bankers back to the office five days a week. And dishwashing robot startup _Sunday _hit a $1.15 billion valuation.\n\nPlus: Why Blackstone and BlackRock can ride out the private credit storm, and how to make hard work feel easy.\n\nMost finance tools claim massive time savings, but they never provide a full audit of where and how. Termgrid has enhanced workflow for PE firms by 84%. Dig into the full breakdown [here](https://app.termgrid.com/for/mid-market-case-studies-campaign-landing-page-ss/?utm_source=Shortsqueez&utm_medium=sponsored+content&utm_campaign=Efficiency+case+studies+&utm_id=Efficiency+case+studies+&utm_content=How+PE+Firms+Are+Reclaiming+100%2B+Hours+Per+Year).\n\n--------------------\n\n## SQUEEZ OF THE DAY\n\n# Private Equity Pay Scheme Challenged\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/eee24fb1-09bd-459e-b235-f63a7228a83e/image.png?t=1773393185)\n\nCaption:\n\nPrivate equity firms spent years engineering one of the [most lucrative compensation structures](https://www.ft.com/content/e318bd2c-256c-45b0-8613-d261e7f39855) in corporate America. **Delaware courts are now asking whether shareholders got the short end of the deal.**\n\nAt the center of the fight are tax-receivable agreements, or TRAs, a mechanism that lets **founders collect payments tied to tax benefits created when a firm converts from a partnership to a public corporation**.\n\nApollo Global Management helped popularize the structure, with Carlyle and KKR following. Today roughly **150 TRAs remain outstanding, representing ~$27 billion in combined value.**\n\nWhen alternative managers went public, most used an \"Up-C\" structure pairing a listed C-corporation with a founder-controlled partnership. When founders convert partnership units into public shares, the transaction generates additional depreciation and amortization, **creating a tax shield **for the company. **TRAs allow founders to capture roughly 85% of that shield, paid out in cash over time**.\n\nShareholder lawsuits argue** the conversion was not necessarily a taxable transaction**, meaning the underlying tax benefits may never fully materialize. The suits also contend that governance reforms already rewarded founders through higher equity valuations, making TRA buyouts an unjustified second payday.\n\nApollo's case carries additional weight. Co-founder** Leon Black stepped down in 2021 after disclosing payments to Jeffrey Epstein for tax advice** that, per recently released files, touched directly on the firm's TRA structure. Apollo's board subsequently approved roughly $570 million to buy out its TRA obligations. Apollo may be nearing a settlement; Carlyle and KKR continue to contest similar claims.\n\n_**Takeaway**_**:** TRAs were designed as a clean mechanism for founders to monetize tax assets created at IPO. As payouts mounted and scrutiny intensified, what once looked like structured tax planning now looks to some shareholders like a second founder payday baked into the fine print. Delaware courts are about to decide whether it holds up.\n\n--------------------\n\n## PRESENTED BY TERMGRID\n\n# How PE Firms Are Reclaiming 100+ Hours Per Year\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/591f9f97-eefb-46ab-9645-a89b08ac06fe/Use_this_gif_3.5.gif?t=1772663286)\n\nFollow image link: (https://app.termgrid.com/for/mid-market-case-studies-campaign-landing-page-ss/?utm_source=Shortsqueez&utm_medium=sponsored+content&utm_campaign=Efficiency+case+studies+&utm_id=Efficiency+case+studies+&utm_content=How+PE+Firms+Are+Reclaiming+100%2B+Hours+Per+Year)\n\nCaption:\n\nIn private equity, capacity is king, and good tools are its power.\n\n[Termgrid](https://app.termgrid.com/for/mid-market-case-studies-campaign-landing-page-ss/?utm_source=Shortsqueez&utm_medium=sponsored+content&utm_campaign=Efficiency+case+studies+&utm_id=Efficiency+case+studies+&utm_content=How+PE+Firms+Are+Reclaiming+100%2B+Hours+Per+Year) is that power, providing deal teams with faster execution speed and deal closes.\n\nAcross client case studies, firms executing financing transactions reduced manual effort by [up to 84%](https://app.termgrid.com/for/mid-market-case-studies-campaign-landing-page-ss/?utm_source=Shortsqueez&utm_medium=sponsored+content&utm_campaign=Efficiency+case+studies+&utm_id=Efficiency+case+studies+&utm_content=How+PE+Firms+Are+Reclaiming+100%2B+Hours+Per+Year) using Termgrid.\n\nOne [mid-market buyout firm](https://app.termgrid.com/for/mid-market-case-studies-campaign-landing-page-ss/?utm_source=Shortsqueez&utm_medium=sponsored+content&utm_campaign=Efficiency+case+studies+&utm_id=Efficiency+case+studies+&utm_content=How+PE+Firms+Are+Reclaiming+100%2B+Hours+Per+Year) reduced 545 manual deal workflow hours to 86; releasing a total of 459 hours back to the deal team. Here is where they saw the time savings:\n\n* Click-Through NDAs: 113 hours\n\n* Integrated Data Room: 118 hours\n\n* Comms & Reporting: 178 hours\n\n* Term Sheets: 50 hours (not including legal fee savings)\n\nLearn more about how this was achieved and see other results from Termgrid clients in 2025\\.\n\n[Download their PE report.](https://app.termgrid.com/for/mid-market-case-studies-campaign-landing-page-ss/?utm_source=Shortsqueez&utm_medium=sponsored+content&utm_campaign=Efficiency+case+studies+&utm_id=Efficiency+case+studies+&utm_content=How+PE+Firms+Are+Reclaiming+100%2B+Hours+Per+Year)\n\n--------------------\n\n## HEADLINES\n\n# Top Reads\n\n* Private equity can’t top public markets even without Mag 7 ([BB](https://www.bloomberg.com/news/articles/2026-03-11/private-equity-can-t-top-public-markets-even-without-mag-7))\n\n* Super-rich travelers are using private jets to escape Middle East conflict, pushing charter prices sky-high ([CNN](https://www.cnn.com/2026/03/12/travel/middle-east-private-jets-scli-intl))\n\n* Wall Street is optimistic that worst of software wipeout is over ([YF](https://finance.yahoo.com/news/wall-street-optimistic-worst-software-104059646.html))\n\n* JPMorgan says hedge funds hit by worst drawdown since April ([BB](https://www.bloomberg.com/news/articles/2026-03-11/jpmorgan-says-hedge-funds-hit-by-worst-drawdown-since-april))\n\n* UBS wants its US junior bankers in the office 5 days a week now ([EFC](https://www.efinancialcareers.com/news/ubs-five-days-in-office))\n\n* Dishwashing home robot maker Sunday hits $1.15 billion valuation ([BB](https://www.bloomberg.com/news/articles/2026-03-12/dishwashing-home-robot-maker-sunday-hits-1-15-billion-valuation))\n\n* Why Blackstone and BlackRock can ride out the private-credit storm ([WSJ](https://www.wsj.com/finance/investing/blackstone-blackrock-private-credit-663b5f00))\n\n* 63% of U.S. entrepreneurs are planning to exit their businesses, a new UBS report explains why ([Fortune](https://fortune.com/2026/03/11/ubs-global-entrepreneur-report-2026-exits-optimism/))\n\n* Ares holds town hall to reassure staff on market uncertainties ([BB](https://www.bloomberg.com/news/articles/2026-03-11/ares-holds-townhall-to-reassure-staff-on-market-uncertainties))\n\n* Why gold hasn’t moved since the Iran conflict  and where it could go next ([CNBC](https://www.cnbc.com/amp/2026/03/12/gold-iran-conflict-where-next-markets.html))\n\n* Wall Street recalibrates as investors clamor to exit private credit ([Axios](https://www.axios.com/2026/03/12/wall-street-private-credit-blackrock))\n\n* Private credit: Apollo logic on loan values is a lot like Goldman Sachs ([BB](https://www.bloomberg.com/opinion/articles/2026-03-12/private-credit-apollo-logic-on-loan-values-is-a-lot-like-goldman-sachs))\n\n* Airfare prices and jet fuel: how the Iran war is hitting your travel costs ([CNBC](https://www.cnbc.com/amp/2026/03/12/airfare-prices-jet-fuel-iran-war.html))\n\n* Pimco sees crisis of bad underwriting in private credit ([YF](https://finance.yahoo.com/news/pimco-sees-crisis-bad-underwriting-103058274.html))\n\n* Middle East conflict, new tax breaks draw family offices to Hong Kong ([CNBC](https://www.cnbc.com/amp/2026/03/12/middle-east-conflict-new-tax-breaks-family-offices-hong-kong.html))\n\n* Private equity stocks down 30-40% in three months, bigger worry than geopolitical risk ([YF](https://finance.yahoo.com/news/private-equity-stocks-down-30-202849303.html))\n\n* Palantir is still using Anthropic’s Claude as Pentagon blacklist plays out, CEO Karp says ([CNBC](https://www.cnbc.com/amp/2026/03/12/karp-palantir-anthropic-claude-pentagon-blacklist.html))\n\n* Hong Kong arrests hedge fund and brokerage staff in $300mn insider trading probe ([FT](https://www.ft.com/content/f3c781d9-72e9-413e-a255-de3e75f13717))\n\n--------------------\n\n## CAPITAL PULSE\n\n# Markets Rundown\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/386e0a82-fa4c-46b9-88aa-caa469fe507e/short-squeez-index.pptx_-_2026-03-12T190346.343.png?t=1773356635)\n\nCaption:\n\n**Market Update**\n\n* **U.S. equities** declined as rising oil prices and Middle East tensions continued to weigh on sentiment\n\n* Major indexes finished broadly lower, with **energy the only sector posting gains**\n\n* **Industrials, financials, and small-cap stocks** were among the weakest areas of the market\n\n* **WTI crude oil** surged nearly **10% to about $95 per barrel** amid escalating supply disruptions\n\n* **Bond yields and the U.S. dollar** both moved higher ahead of next week’s **Federal Reserve meeting**\n\n* The **Strait of Hormuz disruption** is affecting roughly **7.5% of global oil supply**, according to the International Energy Agency\n\n**Oil Prices Remain Below $100 but Volatility Persists**\n\n* A series of attacks on **oil tankers in the Middle East** pushed crude prices higher despite Wednesday’s large emergency reserve release\n\n* The **International Energy Agency** announced a **400-million-barrel strategic reserve release**, including **172 million barrels from the U.S. Strategic Petroleum Reserve**, roughly **40% of current U.S. stockpiles**\n\n* The move is intended to **offset reduced flows through the Strait of Hormuz**, which carries a major share of global energy exports\n\n* The release has helped keep oil prices **below the $100 psychological threshold**, though skepticism remains about whether reserves can fully compensate for disrupted supply\n\n**Fed in Focus Ahead of Next Week’s Meeting**\n\n* Rising energy prices may **push inflation higher and growth lower in the near term**\n\n* The **Federal Reserve meets next week** and will release updated economic and rate projections\n\n* Central banks historically **look through temporary oil-price spikes**, though the persistence of above-target inflation complicates the outlook\n\n* **Bond markets have pushed expectations for the next rate cut from June to October**\n\n* Markets now price **one rate cut in 2026 instead of two** earlier in the year\n\n**Movers & Shakers**\n\n* **(+) Petco ($WOOF) ****+35%**** **after the pet retailer beat profitability estimates and issued stronger-than-expected full-year EBITDA guidance, prompting a Jefferies upgrade to buy.\n\n* **(+) Bumble ($BMBL) ****+34%**** **because the dating app beat Q4 earnings estimates and unveiled an AI-powered dating assistant called “Bee” as part of a broader Bumble 2.0 relaunch.\n\n* **(–) Netskope ($NTSK) ****-21%** after the cybersecurity company reported strong Q4 results but issued below-expectations revenue guidance for fiscal 2027, spooking investors despite 32% revenue growth.\n\n**Prediction Markets**\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/3edde65d-8236-43bd-90bb-e663885cf6d1/Screenshot_2026-03-06_at_11.45.25_PM.png?t=1772858734)\n\nFollow image link: (https://kalshi.com/markets/kxleavepowell/powell-leaving/leavepowell-25)\n\nCaption:\n\n* Will next week be Powell’s [last fed meeting](https://kalshi.com/markets/kxleavepowell/powell-leaving/leavepowell-25)?\n\n* Trade on real-world events with [Kalshi](http://kalshi.com/r/ows). Use code [OWS](http://kalshi.com/r/ows) to get a $10 bonus when you trade $10.\n\n**Private Dealmaking**\n\n* Savills will acquire Eastdil Secured for [$1.1 billion](https://www.reuters.com/business/uks-savills-acquire-eastdil-secured-11-billion-deal-including-debt-2026-03-12/)\n\n* Mind Robotics, an industrial robotics company spun out of Rivian, raised [$500 million](https://techcrunch.com/2026/03/11/rivian-mind-robotics-series-a-500m-fund-raise-industrial-ai-powered-robots/)\n\n* Quince, a direct-to-consumer online fashion retailer, raised [$500 million](https://wwd.com/business-news/financial/quince-10-1-billion-valuation-500-million-series-e-1238663323/)\n\n* Replit, a development environment platform, raised [$400 million](https://blog.replit.com/replit-raises-400-million-dollars)\n\n* PixVerse, an AI video generation platform, raised [$300 million](https://www.bloomberg.com/news/articles/2026-03-12/alibaba-backed-video-ai-startup-pixverse-raises-300-million)\n\n* Chowbus, an operating system for Asian restaurants, raised [$81 million](https://www.prnewswire.com/news-releases/chowbus-raises-81m-to-become-the-operating-system-for-culturally-rooted-restaurants-302710454.html)\n\n_For more PE, VC & M&A deals, subscribe to our __[Buysiders](https://magic.beehiiv.com/v1/b8c7f024-e68c-463b-ab1e-2c930167dea8?email=brian@creatorland.com)__ newsletter._\n\n--------------------\n\n## BOOK OF THE DAY\n\n# A World Appears\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/f3a27149-be18-44e8-a551-f9aa87f8997e/Screenshot_2026-03-12_at_10.12.22_PM.png?t=1773379457)\n\nCaption:\n\n**Description:** A thoughtful exploration of one of humanity’s oldest questions: what is consciousness and how does it arise. Michael Pollan blends neuroscience, psychology, philosophy, and personal reflection to examine how the mind constructs the world we experience. Through conversations with scientists and thinkers, the book investigates the nature of perception, awareness, and the mysterious relationship between the brain and subjective experience.\n\n**Book Length:** 272 pages\n\n**Release Date:** February 24, 2026\n\n**Ideal For:** Readers interested in neuroscience, philosophy of mind, psychology, and anyone curious about how human awareness shapes reality.\n\n**Understanding consciousness is not only a scientific challenge. It is also a path to understanding how humans experience meaning, identity, and the world itself.**\n\n--------------------\n\n## DAILY VISUAL\n\n# Perplexity is Cooked\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/977a6973-600c-49b4-aed6-ac72d560f211/image.png?t=1773393251)\n\nCaption: Source: Chartr\n\n--------------------\n\n## PRESENTED BY COVERD\n\n# “Am I Rich?”\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/24e243dc-79f7-400c-a6a5-cad358de6d7d/Screenshot_2026-03-03_at_3.37.55_PM.png?t=1772570289)\n\nFollow image link: (https://coverd.onelink.me/fppv/8lvodg0b)\n\nCaption:\n\nIt’s a question people ponder but don’t typically have a tangible answer for.\n\n[Coverd](https://coverd.onelink.me/fppv/8lvodg0b) gives you one.\n\nIt breaks down all of your spending, estimates your net worth, and shows how you stack up against your peers. [The best part?](https://coverd.onelink.me/fppv/8lvodg0b) It does this while also offering the ability to _win-back_ past purchases by playing mini games like flappy bird or blackjack. It’s like if Rocket Money, Robinhood, and your favorite gaming app had a baby.\n\nThe Coverd credit card (anticipated to launch by the end of Q2) is the first to ever offer up to [100% cash back](https://coverd.onelink.me/fppv/8lvodg0b) on every purchase. Users of the Coverd Card will be able to play in-app games using their points.\n\nUntil then, you can start seeing your money clearly now.\n\n[Check your net worth today.](https://coverd.onelink.me/fppv/8lvodg0b)\n\n--------------------\n\n## DAILY ACUMEN\n\n# Reputation Lag\n\nYour reputation is always a delayed reflection of your behavior. It captures who you were, not necessarily who you are, which means it can work both for and against you at inconvenient times.\n\nThe person who changed for the worse will enjoy unearned goodwill longer than they deserve. The person who changed for the better will carry old perceptions longer than feels fair. Neither situation is permanent, but both require patience.\n\nKeep behaving like the person you want to be known as. The reputation catches up eventually.\n\n--------------------\n\n## ENLIGHTENMENT\n\n# Short Squeez Picks\n\n* Four ways to [radically](https://www.wsj.com/lifestyle/workplace/working-schedules-ideas-f6330be7) rethink your work week\n\n* What [color shoes](https://www.gq.com/story/what-color-shoes-should-you-wear-with-a-navy-suit) should you wear with a navy suit?\n\n* People [who feel](https://www.psypost.org/people-who-feel-a-spiritual-connection-to-their-surroundings-tend-to-report-better-mental-health/) a spiritual connection to their surroundings report better mental health\n\n* The [high-protein](https://www.vogue.com/article/danish-high-protein-breakfast) breakfast that boosts focus\n\n* How to [make](https://www.scotthyoung.com/blog/2026/02/12/make-hard-work-feel-easy/) hard work feel easy\n\n--------------------\n\n## MEME-A-PALOOZA\n\n# Memes of the Day\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/54a652b3-0d69-4c1d-bcf1-44512aded36b/image.png?t=1773393305)\n\nCaption:\n\n———————————————————————————\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/6ab8d38d-46d7-4e8c-a6fc-bbc14f6457e0/image.png?t=1773357939)\n\nCaption:\n\n———————————————————————————\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/263e00bd-d279-4305-b3e3-03ce358a0665/image.png?t=1773357931)\n\nCaption:\n\n———————————————————————————\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/5f3a16b2-ab7d-409e-8f2e-181c4b5aafc7/image.png?t=1773357910)\n\nCaption:\n\n———————————————————————————\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/1420da44-5bd0-41cc-ab06-c885ca00b36d/image.png?t=1773357889)\n\nCaption:\n\n———————————————————————————\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/a939636d-aa49-4dd0-b43a-54fced6776c3/image.png?t=1773357925)\n\nCaption:\n\n--------------------\n\n📣 **Partner With Us: **Get in front of an audience of over 1 million finance professionals, business leaders, and policy influencers. [Submit a partnership inquiry.](https://docs.google.com/forms/d/e/1FAIpQLSfV56l-iwLAfWFrYNiEp208ZGaIyDhX7u1CI8CgnlQz2ccc9Q/viewform?usp=sf_link)\n\n📈 **Grow With Us: **Work directly with the Overheard on Wall Street team to scale your finance brand. [Schedule your free consult.](https://docs.google.com/forms/d/e/1FAIpQLSe9CjGdzcU-Ug84hTT4b2RUENhosHjnGq6mMH-OZ3CN55CX2w/viewform?usp=dialog)\n\n🔒 **Short Squeez Premium – Insiders: **Access exclusive content, including investment analysis, wellness features, career tools, and our full recruiting resource library. [Upgrade to Premium.](https://www.shortsqueez.co/upgrade)\n\n🧢 **Wall Street Shop: **Explore our collection of finance-themed apparel and merchandise. [Visit the shop.](https://overheardonwallstreet.com/)\n\n📬 **Deals Newsletter – Buysiders: **A curated roundup of major M&A, private equity, and VC activity. Plus access to private deal flow. [Subscribe here.](https://magic.beehiiv.com/v1/b8c7f024-e68c-463b-ab1e-2c930167dea8?email=brian@creatorland.com)\n\n--------------------\n\n———————————————————————————\n\nShare Short Squeez\n\nShare your referral link below with friends, classmates and co-workers and get showered in free swag.\n\nYou currently have <strong>0</strong> referrals, only <strong>1</strong> away from receiving <strong>Personal Budgeting Template</strong>.\n\nOr copy and paste this link to others: https://www.shortsqueez.co/subscribe?ref=peANR3xmRk\n\n———————————————————————————\n\n----------\n\n———\n\nYou are reading a plain text version of this post. For the best experience, copy and paste this link in your browser to view the post online:\n\nhttps://www.shortsqueez.co/p/private-equity-pay-scheme-challenged"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-048",
+		description: "Investor/VC: EquityZen email about OpenAI investment opportunity. Pre-IPO...",
+		emails: [
+			{
+				messageId: "gt-048-msg-1",
+				threadId: "gt-048",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Phil @ EquityZen\" <support@equityzen.com>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "OpenAI Investment Opportunity Now Available"
+					},
+					{
+						name: "date",
+						value: "Mon, 16 Mar 2026 11:03:22 -0400"
+					}
+				],
+				body: "Hi Brian,\n\nAs a Qualified Purchaser who has previously expressed interest in investing in AI companies on EquityZen’s platform, we wanted to share that a new investment opportunity in OpenAI (OPAI) is now live.\n\nThis offering is exclusively available to EquityZen clients. To learn more, please visit OpenAI’s page (https://m.equityzen.com/e3t/Ctc/W3+113/d2rQv904/VVr0kw7n2989N6qzT1Zc6X6lW4bWRWk5LK5F-N2C5cxF2-6YCW50kgx26lZ3ljV6VfW-5ckXqpN8ShxPB1L4JHW1RNBXB58pXc7W5s5ZgM7SrkM3Vk5jLC5pcWxpW6BCrPc8CLX7KW1qKY8756jSCBN5P4B3l7jc7HN7kg-9JymLhsW1DZwf93M_97nW1WjHkq4TRKK-W4CJM4H2tbbPFW4qwFW95R7DrlN2T7w1wJXLshW5JHCvz2M1sV0W1zVv2B8ZXJ6nf3XPzg-04 ) on EquityZen’s platform. From there you will be prompted to review and accept terms of a Non-Disclosure Agreement to gain access to details for this offering.\n\nPlease note:\n\n- This offering is only available to Qualified Purchasers (https://m.equityzen.com/e3t/Ctc/W3+113/d2rQv904/VVr0kw7n2989N6qzT1Zc6X6lW4bWRWk5LK5F-N2C5cz62-6YCW7Y8-PT6lZ3lYW8wwCRP3tpp-ZW536vlm1HF9QzW5rNH6_9l0XnmW49ssGh3FpWpZVlSDKX5BbQC7N1PvRLmGbKbsW55c2gQ3YCtlYW2Zrf903hpJhlMNvq-PJ2ts5W19RFp236gTH-N864FFjPhmZPW5q0Btm5t-KW7N4Xx3Z7Ns4yDVN_QYM8z4nQBW7_wjpK2PpX1YN6tdMyWprxnwW20V0M785nS1TW968m7g71Mb6jW6ZjKVl7CxPT2W2T9YcJ97q_5JW4NmFR-6TGWBQW4QJnHj1g296WVgk2QX7pMnJ4W8JfZHk8sKXtcW2wlG7S76sqWQN56jwLtrMnXQf6jDm1604 ) .\n\n- The fund is structured as a single-layer, Single Company (https://m.equityzen.com/e3t/Ctc/W3+113/d2rQv904/VVr0kw7n2989N6qzT1Zc6X6lW4bWRWk5LK5F-N2C5cyx2-6YCW6N1vHY6lZ3n2W3qwj7B7b_hg2W3JPbkz1ybn8qW69dk6G406kRqW2NwRX61tF1T0W8LfM8v4k_1TkW4jx3Cq4vBgvzVT53DW83d6rrW5F5CVz3qsVm0W4SGxCK3t2W8_Vp9GRH3F-CK7W3Tt9Xg7j2FN8N5ZdLSLHG9H9W4JXRxl5QCftZW37q0p918X-ZgW8nsW7J2dRQ-gN1d4Tf4yBW30W4Tvgsl5ncXMcW1Wfmst1tdpfxW4JFX2p3fzV80W2fJlhr2KQkqDVCdl0L9m4FWYW20GYZp7JHzbnf74lsKd04 ) investment opportunity, via EquityZen’s Growth Technology Fund LLC.\n\n- The investment minimum is $100,000. We are not able to accommodate lower minimums.\n\n- Sales Fee: 2% collected by EquityZen Securities LLC; includes a 1% expense reserve paid to EquityZen Advisors LLC (the fund's manager) to reimburse for fund operating expenses. Unused portions of the reserve will be returned to investors upon fund termination.\n\n- Allocations will be determined based on a first come, first served basis.\n\n- Investment commitment via signed documents on EquityZen’s platform is due by 5pm ET on Thursday, March 19\\.\n\n- The final funding deadline is 5pm ET on Friday, March 20\\.\n\n- This investment will not be eligible for resale via an Express Deal (https://m.equityzen.com/e3t/Ctc/W3+113/d2rQv904/VVr0kw7n2989N6qzT1Zc6X6lW4bWRWk5LK5F-N2C5cyd2-6YCW69sMD-6lZ3lCW4fR8nb8mTJSYW2fRfwc8ShxccN51ZNBn7pwWzW86y9j03By_G-W6NMfKl8Fv9fSW6XGDwS4syV6-W9jD8l77mR806W7JkHwR7_LSFFW1z1fsX3c_v73W4xXH5s4KnFDBW2xMs631ByJ1cW93Zl_s3ZY7nnW8V_GDH3TLCcTW6dQm9X4DNSfDW2qPmsC4BmhCmW2dY6Pb4DhDWYW1J8n0D6YbjkgW8vcX7_66rPR3W5WK8rQ1b0LY6W9lKgMV8VjQF7f5DhDqC04 ) .\n\n-\n\nAbout OpenAI:\n\nOpenAI is an AI research and deployment company, with a mission to ensure that artificial general intelligence benefits all of humanity.\n\nView OpenAI Company Page\n\n(https://m.equityzen.com/e3t/Ctc/W3+113/d2rQv904/VVr0kw7n2989N6qzT1Zc6X6lW4bWRWk5LK5F-N2C5cxF2-6YCW50kgx26lZ3ljV6VfW-5ckXqpN8ShxPB1L4JHW1RNBXB58pXc7W5s5ZgM7SrkM3Vk5jLC5pcWxpW6BCrPc8CLX7KW1qKY8756jSCBN5P4B3l7jc7HN7kg-9JymLhsW1DZwf93M_97nW1WjHkq4TRKK-W4CJM4H2tbbPFW4qwFW95R7DrlN2T7w1wJXLshW5JHCvz2M1sV0W1zVv2B8ZXJ6nf3XPzg-04 )\n\nLet us know if you have any questions by replying to this email and we will respond to questions in the order in which they are received.\n\nThank you,\n\nPhil Haslett\n\nEquityZen\n\nCo-Founder and Chief Strategy Officer\n\nThis is email and its contents are confidential and for your viewing purposes only.\n\nFacebook (https://m.equityzen.com/e3t/Ctc/W3+113/d2rQv904/VVr0kw7n2989N6qzT1Zc6X6lW4bWRWk5LK5F-N2C5cxY2-6YCW5BW0B06lZ3l1N348FndnMy-cW6ScTKF6-Ql4QW8mkdKX2xVwm_W1fNC6-6VkrMlW2qLM107LfGMXW2KFSJQ4SG2H1N7lVhJKLVpBsW875wmT1B7n59W3bQkVG1c13GQW4QLgJ313JqJwW8F8LfW9kmkWQW39rFCR9hMvzgW2RJcD43yl6qrW7lXvXR86lz50W2FnQf39bGcffW1_ZvHr7CPXnBW4W0ncg3NDTkcW3r49DN4kdQqbf4jdTcq04 )\n\nLinkedIn (https://m.equityzen.com/e3t/Ctc/W3+113/d2rQv904/VVr0kw7n2989N6qzT1Zc6X6lW4bWRWk5LK5F-N2C5cxY2-6YCW5BW0B06lZ3mfW4Tb3824wCkgKW5VzGVK3ZQ462W8sc8h04vCj1RW9l348F7yLrWsW5BVYG25R_6xLW19mt745W0HBXW4Nn_tc8Jkp45W8zNXdW1C8HTjW9lk2G-6HXBf8N94JLZySJMpwW3pkTCZ2tLRXnW3GJY0J2b8jZMW6KmMVT5zvVtqW5gD73f81t0SCW1CrFkx5Xv6TLW6hM6gl2mD_YmW2fBMjq3lhFxjW3m7pTB3wrlVZf1PQp8n04 )\n\nX (https://m.equityzen.com/e3t/Ctc/W3+113/d2rQv904/VVr0kw7n2989N6qzT1Zc6X6lW4bWRWk5LK5F-N2C5cxF2-6YCW50kgx26lZ3nLN6B6dchPl0-GW93xPMl3s3jRBMXbrrnD4q4VW23lYmL16mRZzTrtpQ67kyVFW7pM_j3574c3fW5zzkpQ295XypW90Ls9L2d8Qj4W707WdT1SgM9MVzT8-L14BWh5W1sxDtt5WgDQ8W590X9Q65R0phW3Q59294mQkf6W2WNly27JVFCYW6-pQYj87QsqKW3Q3rYP8lQBNsf9ldQdd04 )\n\nYou are receiving this because you signed up on EquityZen's investor site. EquityZen's funds provide accredited investors with exclusive investment opportunities in established private companies. Investments in private companies are illiquid, may be speculative, and have substantial risks, including the risk of loss. Not all private companies will go public or get acquired, and not all IPOs and acquisitions will result in successful investments.  Investors must be able to afford the loss of their entire investment. Closing and availability is not guaranteed. Hyperlinks to sites outside of our domain do not constitute an approval or endorsement of the content on the visited site. This information is confidential in nature. Unauthorized use, distribution or reproduction is prohibited.\n\nThis email contains certain information pertaining to the business and operations of OpenAI and its subsidiaries (the “Company”). This email communication (“Email Communication”) has been prepared by EquityZen based on certain information provided by the Company and is being provided to selected parties that may be interested in a potential transaction involving the Company (the “Transaction”). The sole purpose of this Email Communication is to assist recipients in deciding whether they wish to proceed with a further investigation of a possible Transaction. It is not intended to form the basis of any investment decision or any decision to effect a Transaction. This Email Communication is provided solely for the benefit of the recipient and should not be relied upon, is not on behalf of, and shall not confer rights or remedies upon, any holder of securities of the recipient or any other person. By providing this Email Communication, none of EquityZen or its representatives has the responsibility or authority to provide or has provided investment advice in a fiduciary capacity or otherwise. This Email Communication does not constitute an offer or invitation for the sale or purchase of securities.\n\nThe information provided in this Email Communication is for general informational purposes only and should not be considered a recommendation or personal financial advice.This Email Communication is for distribution only to persons reasonably believed to be sufficiently capable to understand the risks involved. This Email Communication may include certain statements, estimates or projections with respect to the anticipated future performance of the Company. Such statements, estimates or projections are based on assumptions or judgments about future events and Company actions that may or may not be correct or necessarily take place and are by their nature subject to significant uncertainties and contingencies, many of which are outside the control of the Company. There can be no assurance, therefore, that any estimates or projections will be realized. The information contained herein has been provided by the Company, and EquityZen has not independently verified any such information.\n\nTo be sure our emails always make it to your inbox, please add us to your email whitelist. Learn how.\n\nEquityZen Securities LLC (“EquityZen Securities”) is a subsidiary of EquityZen Inc. EquityZen Securities is a broker/dealer registered with the Securities and Exchange Commission and is a FINRA/SIPC member firm.\n\nEquityZen, Inc. and its affiliates are subsidiaries of Morgan Stanley, Inc. (“Morgan Stanley”). Morgan Stanley maintains information barriers, which are systems (including rules, procedures and physical segregation and organizational arrangements) designed to prevent the flow of confidential information between different business units. These barriers manage conflicts of interest by preventing one client's confidential information from being used for the benefit of others and by ensuring that advice remains independent of Morgan Stanley’s broader interests. Consequently, employees behind one side of a barrier generally have no knowledge of confidential information or transactions taking place on the other side of the barrier. Each set of persons behind a barrier will, therefore, be wholly unaware of, and able properly to operate without regard to, a conflicting interest on the other side of the barrier. For example, these barriers permit EquityZen to offer funds and securities at its discretion, without being influenced by or having knowledge of conflicting interests within Morgan Stanley’s Investment Banking division.\n\nEquity securities are offered through EquityZen Securities. Check the background of this firm on FINRA’s BrokerCheck.\n\nHubspot: 98473\n\nEquityZen, 1 New York Plaza, 12th Floor, New York, New York 10004, United States\n\nYou are receiving this email as a subscriber to EquityZen. To manage your email preferences click here (https://m.equityzen.com/hs/preferences-center/en/direct?data=W2nXS-N30h-B2W41HLm93ZZJkQW4pt5W925jCbCW4fx2Sc349hQZW2nH7X02CSLPZW2nZ4CB4ptcqtW3VLK7K4p84DVW3KcfkC4kdJR4W3d8YKq3LSrMJW2CXYz44p7hxyW21rNRR2HznGXW34BkR44mk556W4pn79p1VfKNJW2MFXdN1Z493WW3QM67j41SVy-W2w5hY72-B8bGW3_-PSp3K6hR2W4kJbSc4hnlZXW3W3CS525m7dXW4hDKxh4tjVzJW3bm8Yq1_pmQLW327qkx2-nNG4W1Sdd6m1LdTRPW4tpQpk1Bd4cKW1-X9pr2sDB9mW3z3kbX3FcdpgW3XH7Ds1Qg7QJW2nQzY63yR4wJW3j0frM3CgNf0W3dzbH33SJMKGW3g9wrR30DqpPW3__dbj25lgh3W2-nmrj2YddGYW36gxkG4cGN4sW49jq0f49DwMMW30zX1b3z1GtRW1VyBsz30l-1rW3Fh36P2RTYxWW38t-JZ2PDr4tW3M7kcg4tt-pZW49tvNn3K3lGvW4twhx94rg9w3W2Twd7t2HVSb-W3GZL0n1Y_F2qW32jfXS2-pFn1W2PG6nC1NCgKcW3B-9PC3BZmgXW2zKPJm231pL1W3ZFhmh1SvrdNW2CGl5K38rz4lW1Qw16p3X-kSBW3jfvT_349nQtW218lN52Phy0SW1V24mH3S-0jBW2H-19z3648LLW4cBZLd2w2H8p0&ezeid=brian%40creatorland.com&_hsenc=p2ANqtz-_pmmgypadL2ktBcJb4vJuOroDy9A0qZRQhTgt0a9B4vHYPRchspHXBp5UePo-SqH-Yl_9U9wKAtAmNg5O4sksL5iyHFQ&_hsmi=408986293 ) or to unsubscribe from all marketing emails click here (https://m.equityzen.com/hs/preferences-center/en/page?data=W2nXS-N30h-B2W41HLm93ZZJkQW4pt5W925jCbCW4fx2Sc349hQZW2nH7X02CSLPZW2nZ4CB4ptcqtW3VLK7K4p84DVW3KcfkC4kdJR4W3d8YKq3LSrMJW2CXYz44p7hxyW21rNRR2HznGXW34BkR44mk556W4pn79p1VfKNJW2MFXdN1Z493WW3QM67j41SVy-W2w5hY72-B8bGW3_-PSp3K6hR2W4kJbSc4hnlZXW3W3CS525m7dXW4hDKxh4tjVzJW3bm8Yq1_pmQLW327qkx2-nNG4W1Sdd6m1LdTRPW4tpQpk1Bd4cKW1-X9pr2sDB9mW3z3kbX3FcdpgW3XH7Ds1Qg7QJW2nQzY63yR4wJW3j0frM3CgNf0W3dzbH33SJMKGW3g9wrR30DqpPW3__dbj25lgh3W2-nmrj2YddGYW36gxkG4cGN4sW49jq0f49DwMMW30zX1b3z1GtRW1VyBsz30l-1rW3Fh36P2RTYxWW38t-JZ2PDr4tW3M7kcg4tt-pZW49tvNn3K3lGvW4twhx94rg9w3W2Twd7t2HVSb-W3GZL0n1Y_F2qW32jfXS2-pFn1W2PG6nC1NCgKcW3B-9PC3BZmgXW2zKPJm231pL1W3ZFhmh1SvrdNW2CGl5K38rz4lW1Qw16p3X-kSBW3jfvT_349nQtW218lN52Phy0SW1V24mH3S-0jBW2H-19z3648LLW4cBZLd2w2H8p0&ezeid=brian%40creatorland.com&unsubscribeAll=true&_hsenc=p2ANqtz-_pmmgypadL2ktBcJb4vJuOroDy9A0qZRQhTgt0a9B4vHYPRchspHXBp5UePo-SqH-Yl_9U9wKAtAmNg5O4sksL5iyHFQ&_hsmi=408986293 ) ."
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-049",
+		description: "Investor/VC: Calendar acceptance for meeting between Plus 8 and Creatorland....",
+		emails: [
+			{
+				messageId: "gt-049-msg-1",
+				threadId: "gt-049",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "CR Celona <crcelona@gmail.com>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Accepted: Plus 8 <> Creatorland @ Tue Mar 17, 2026 10am - 10:30am (PDT) (brian@creatorland.com)"
+					},
+					{
+						name: "date",
+						value: "Mon, 16 Mar 2026 23:05:21 \\+0000"
+					}
+				],
+				body: "Plus 8 <> Creatorland\n\nTuesday Mar 17, 2026 ⋅ 10am – 10:30am\n\nPacific Time - Los Angeles\n\nJoin with Google Meet\n\nhttps://meet.google.com/drr-aupg-enh?hs=224\n\nJoin by phone\n\n(US) \\+1 540-835-0282\n\nPIN: 374485373\n\nMore phone numbers\n\nhttps://tel.meet/drr-aupg-enh?pin=6438278812703&hs=0\n\nHi,Your call has been scheduled as follows:Date: Tuesday, March 17Time:\n\n10:00 – 10:30am PT / 1:00 - 1:30 PM ETGoogle Meet joining infoVideo call\n\nlink: https://meet.google.com/drr-aupg-enhOr dial: ‪(US) \\+1 540-835-0282‬\n\nPIN: ‪374 485 373‬#More phone numbers:\n\nhttps://tel.meet/drr-aupg-enh?pin=6438278812703Please let me know if you\n\nneed anything else.Best,Trixia\n\nOrganizer\n\nbrian@creatorland.com\n\nbrian@creatorland.com\n\nGuests\n\nbrian@creatorland.com - organizer\n\nCR Celona\n\nrishi@plus8equity.com\n\nView all guest info\n\nhttps://calendar.google.com/calendar/event?action=VIEW&eid=NGM0cW8wdTdpb3ByMWFjZDlyNmFyaXBsNGwgYnJpYW5AY3JlYXRvcmxhbmQuY29t&tok=MjEjYnJpYW5AY3JlYXRvcmxhbmQuY29tMTUxZmI3OWYyZDA0YmE0NTJjODlmZmFmOTFkZjIwM2U1NDA3MzZlOA&ctz=America%2FLos_Angeles&hl=en&es=1\n\n~~//~~\n\nInvitation from Google Calendar: https://calendar.google.com/calendar/\n\nYou are receiving this email because you are subscribed to calendar\n\nnotifications. To stop receiving these emails, go to\n\nhttps://calendar.google.com/calendar/r/settings, select this calendar, and\n\nchange \"Other notifications\".\n\nForwarding this invitation could allow any recipient to send a response to\n\nthe organizer, be added to the guest list, invite others regardless of\n\ntheir own invitation status, or modify your RSVP.\n\nLearn more https://support.google.com/calendar/answer/37135#forwarding"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-050",
+		description: "Newsletter",
+		emails: [
+			{
+				messageId: "gt-050-msg-1",
+				threadId: "gt-050",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Creator Spotlight <creator-spotlight@mail.beehiiv.com>"
+					},
+					{
+						name: "to",
+						value: "\"brian@creatorland.com\" <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "🔴 Protect creators"
+					},
+					{
+						name: "date",
+						value: "Fri, 13 Mar 2026 16:12:34 \\+0000"
+					}
+				],
+				body: "View image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/1fb00cf4-5d66-4896-83ce-90f035e373aa/CS_Logo_Wide.gif?t=1705502632)\n\nFollow image link: (https://creatorspotlight.com/)\n\nCaption: Brought to you by beehiiv.\n\nThe creator workforce is among the fastest-growing in the U.S. — and among the least protected.\n\nAs the creator economy actualizes, the way creators, brands, and platforms conduct their business is becoming more standardized. And yet, labor laws are lagging behind. **A new bill aims to change that, focusing on seven distinct protections.**\n\n_— __[Natalia Pérez-González](https://www.linkedin.com/in/nmperez/)__, Assistant Editor_\n\n----------\n\n----------\n\n## A decentralized workforce\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/c5a201f4-9710-4e0d-b1f3-8f721ba73810/image__311_.png?t=1773408902)\n\nFollow image link: (https://www.creatorspotlight.com/p/creator-bill-of-rights)\n\nCaption:\n\n_**By **__**[Natalia Pérez-González](https://www.linkedin.com/in/nmperez/)**_\n\nHow do you protect what you cannot define?\n\nCreators, as a category of worker, do not enjoy the same bespoke labor protections as longstanding professions like nurses, police officers, or electricians.\n\nCreator is a label elastic enough to include a comedian in Atlanta posting short-form videos, a former executive running a newsletter, and a journalist who lost their staff job and launched their own media company.\n\n**A category that nobody can define is a category nobody has to protect,** and platforms benefit from the ambiguity. If lawmakers (and the public) can’t _identify_ creators as a category of worker, _protecting_ them is nearly impossible.\n\nRoughly [**1.5 million Americans**](https://www.iab.com/wp-content/uploads/2025/04/Measuring-the-Digital-Economy_April_29.pdf)** work full-time as creators**, people who’ve built livelihoods on platforms that both are and are not workplaces; each with its own algorithms, terms of service, and opaque appeals processes. When an account is suspended, or a monetization stream disappears, there isn’t a single decision-maker to point to, no clear explanation of what happened, and no reliable process to contest it.\n\n**If an algorithm change cuts a creator’s reach by 40%, ****is it a market adjustment or a labor issue****? **\n\n**[The Creator Bill of Rights](https://khanna.house.gov/sites/evo-subsites/khanna.house.gov/files/evo-media-document/creator-bill-of-rights-resolution-draft-2.0-clean-55.pdf)**, a resolution introduced by Congressman **[Ro Khanna](https://khanna.house.gov/)** — whose district covers the heart of Silicon Valley — and co-developed with creators **[Shira Lazar](https://www.creatorspotlight.com/p/shira-lazar-whats-trending)** and Lisandra Vasquez, seeks to redefine this relationship: creators are workers, and the systems that profit from their labor should be accountable for their well-being.\n\nThe bill presents a pathway to baseline protections for creators, including transparency in monetization, healthcare, and algorithmic accountability. **Nearly ****[5,000 creators have already ](https://www.change.org/p/support-creators-urge-congress-to-pass-the-creator-bill-of-rights?recruiter=91857559&recruited_by_id=cfcac330-d5ac-11e3-8807-79281a32bc6b&utm_source=share_petition&utm_campaign=starter_onboarding_share_personal&utm_medium=copylink)****[signed the petition](https://www.change.org/p/support-creators-urge-congress-to-pass-the-creator-bill-of-rights?recruiter=91857559&recruited_by_id=cfcac330-d5ac-11e3-8807-79281a32bc6b&utm_source=share_petition&utm_campaign=starter_onboarding_share_personal&utm_medium=copylink)** since it launched in January, and they’re actively seeking House and Senate co-sponsors.\n\n““Everyone's interested and obsessed with creators as mouthpieces and megaphones, but no one is actually thinking of us as a workforce. They need to see us as small businesses.”“ — Shira Lazar\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/9fb93899-568a-4e9c-9fce-36e276cd65a4/Content_Breaks__2_.png?t=1724435922)\n\nCaption:\n\n## The seven-point framework\n\nAs it stands, this resolution doesn’t mandate compliance or impose regulator penalties. Platforms are under no legal obligation to comply with its provisions, and the current political environment isn’t in a rush to impose new regulatory requirements on tech companies.\n\nThe bill's co-founders have no illusions about the timeline. \"I don't foresee anything happening with this until after midterms,\" Lisandra told me. She recognizes that **the bill is just the beginning, a stake in the ground, evidence that someone in Washington is, **_**at least, **_**listening. **\n\n**The bill proposes seven baseline protections for creators:**\n\n* **Monetization transparency.** Platforms decide what creators earn and reserve the right to change the formula without notice. A creator can build an entire business around a revenue-sharing arrangement that disappears in a policy update. The bill calls for clear, fair terms — so creators know what they're earning, how it's calculated, and what would change it.\n\n* **Customer service and appeals.** The bill calls for real response times and actual appeals processes — so that when an account gets suspended or a payout gets flagged, there's somewhere to turn that isn't a help center article written in 2019\\.\n\n* **Healthcare.** The most basic need, and the hardest to access. Creators working as independent contractors have no access to employer-sponsored benefits. Some go uninsured. The bill calls for affordable healthcare access, but it doesn't yet specify how.\n\n* **AI and intellectual property.** If a platform uses your content to train an AI model — they are, have been, and will continue doing so — the bill says you should get a cut. The [CLEAR Act in the Senate](https://www.schiff.senate.gov/wp-content/uploads/2026/02/CLEAR-Act-Text.pdf) runs parallel to this effort. This is the provision that will face the most resistance from the platforms, and probably the most legal complexity.\n\n* **Algorithmic transparency and data privacy.** The algorithm is the invisible boss. It decides what gets seen, what gets buried, what gets rewarded, and what gets suppressed — and it does all of this without explanation. The bill calls for transparency around how those decisions are made and for protections for the personal data that platforms collect in the process.\n\n* **Audience portability.** A creator's relationship with their audience currently lives on the platform's servers, under the platform's terms, deletable at any time. Shira points to decentralized platforms like Bluesky as early infrastructure for what real ownership could look like. The bill calls for creators to own their direct audience relationships — so that a deactivation doesn't also mean losing everything you built.\n\n* **Small business support and legal protections.** Creators are running businesses — paying quarterly taxes, negotiating contracts, managing intellectual property — largely without resources or protections built for people in their situation. The bill calls for support structures that acknowledge what the work actually is.\n\nHistorically, only about [3–7% of bills introduced in Congress ever become law](https://www.govtrack.us/congress/bills/statistics), and the majority of those that do are ceremonial. Most legislative proposals, even those with serious policy intentions, stall long before they reach a floor vote.\n\n“This is just a jumping-off point to begin the conversation at a higher level,” Shira said. **“I hope, ten years from now, we have some solid solutions, and celebrate that we were part of building that.”**\n\nTikTok Video: (https://www.tiktok.com/@reprokhanna/video/7595578463189273869?utm_campaign=the-case-for-a-creator-bill-of-rights&utm_medium=newsletter&utm_source=www.creatorspotlight.com)\n\nThese provisions each map to real, documented pain points. But each item represents a separate negotiation with a separate set of platform interests, legal frameworks, and political constituencies.\n\nA large-audience art creator fighting for AI compensation faces a different battle than a micro-audience lifestyle creator whose account has been deactivated. This is, in part, why a single-union model won’t work for creators:\n\n“\"A lot of these union associations have been representative of talent doing only one thing, whereas a lot of us do many things, and then we also have small businesses. The approach [for each group] needs to be different.\"“ — Shira Lazar\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/9fb93899-568a-4e9c-9fce-36e276cd65a4/Content_Breaks__2_.png?t=1724435922)\n\nCaption:\n\n## A global labor movement\n\nThe traditional media industry, with its hard-won protections, is contracting at a historic pace. Nobody is safe. Health insurance, legal support, editorial oversight, a predictable paycheck — these have, to the detriment of workers, become luxuries.\n\n**In 2025, ****legacy media companies cut ****[more than ](https://www.challengergray.com/blog/challenger-report-71321-job-cuts-on-restructurings-closings-economy/)****[17,000](https://www.challengergray.com/blog/challenger-report-71321-job-cuts-on-restructurings-closings-economy/)****[ media jobs](https://www.challengergray.com/blog/challenger-report-71321-job-cuts-on-restructurings-closings-economy/)**, up 18% from the prior year. From 2022 to 2024, employment in LA's motion picture and sound recording industries fell 27%.\n\nDuring the same stretch, employment in the creator economy grew by 5%, with full-time-equivalent creator jobs growing from **200,000 in 2020 to **[**1.5 million in 2024.**](https://www.axios.com/2025/04/29/digital-creator-job-growth) Many creators have become media workers ([55% of U.S. adults](https://www.pewresearch.org/journalism/fact-sheet/social-media-and-news-fact-sheet/) now get their news from social media), but they didn’t inherit any of the traditional protections.\n\nWhat they did inherit is the same structural problem that gig workers have been fighting for years: a business model that depends on their labor and accepts no responsibility for it.\n\n**On June 13, 2025, the International Labour Organization ****[voted to develop binding global standards for platform workers](https://www.hrw.org/news/2025/06/03/ilo-adopt-binding-treaty-protect-gig-workers)**** **— specifically, app-based drivers and digital freelancers — for the first time. A majority of member states backed the decision, but employer delegates voted against it, including government delegates from Switzerland, India, and the United States.\n\nThis is why Lisandra, a CalArts-trained photographer and comedian, feels passionately about combining the movements. She’s spent most of her career as a 1099 worker — freelancing, gigging, building her own work because the traditional employment pipeline never had a place for her.\n\nTikTok Video: (https://www.tiktok.com/@lisandravcomedy/video/7581970989467127070)\n\n**The \"creator\" framing, she argues, obscures the bill's actual scope.**\n\nThe people it would (and should) cover include digital creators, Uber and Lyft drivers, DoorDash couriers, and Etsy sellers.\n\n“\"I wanted the Creator Bill of Rights to be called the Digital Workforce Bill of Rights. I still do.”“ — Lisandra Vasquez\n\n**The fight is shared by ****_everybody_**** relying on digital platforms to make a living**, who currently have no structural protection when the platforms they rely on — who take a cut of workers’ on-platform earnings — change the rules.\n\n“ \"[Law makers] think we're all Logan Paul. They think we're all getting PR boxes, but there's a middle class. There are digital workers making a couple hundred extra dollars to feed their families. There are small businesses using Instagram because they can't afford foot traffic. They need to be a part of the conversation.”“ — Lisandra Vasquez\n\nView image: (https://media.beehiiv.com/cdn-cgi/image/fit=scale-down,format=auto,onerror=redirect,quality=80/uploads/asset/file/9fb93899-568a-4e9c-9fce-36e276cd65a4/Content_Breaks__2_.png?t=1724435922)\n\nCaption:\n\n**[_Read_](https://khanna.house.gov/sites/evo-subsites/khanna.house.gov/files/evo-media-document/creator-bill-of-rights-resolution-draft-2.0-clean-55.pdf)**[_ the Creator Bill of Rights_](https://khanna.house.gov/sites/evo-subsites/khanna.house.gov/files/evo-media-document/creator-bill-of-rights-resolution-draft-2.0-clean-55.pdf)_. _\n\n**[_Sign_](https://www.change.org/p/support-creators-urge-congress-to-pass-the-creator-bill-of-rights)**[_ the petition._](https://www.change.org/p/support-creators-urge-congress-to-pass-the-creator-bill-of-rights)\n\n----------\n\n———\n\nYou are reading a plain text version of this post. For the best experience, copy and paste this link in your browser to view the post online:\n\nhttps://www.creatorspotlight.com/p/creator-bill-of-rights"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-051",
+		description: "SaaS: GMass subscription cancellation notification. Email tool...",
+		emails: [
+			{
+				messageId: "gt-051-msg-1",
+				threadId: "gt-051",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "notification@wordzen.com"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "GMass Subscription Cancelled for brian@creatorland.com"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 15:22:00 \\+0000"
+					}
+				],
+				body: "Your paid subscription is still active, however, until 4/10/2026 9:36:46 PM. After that time, your account will be demoted to free status and will not be able to send any emails. If you change your mind, you can subscribe again at: https://www.gmass.co/pricing?email=brian@creatorland.com\n\nThis transactional email was sent via Google account notification@wordzen.com. It was relayed through smtp.gmass.co. It was ultimately sent via the SMTP server s1.smtpgm.net"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-052",
+		description: "SaaS: GMass support thread about account management. Customer service...",
+		emails: [
+			{
+				messageId: "gt-052-msg-1",
+				threadId: "gt-052",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Brian Freeman <brian@creatorland.com>"
+					},
+					{
+						name: "to",
+						value: "GMass <support+idP4NKDK-17GNL@gmass.zendesk.com>"
+					},
+					{
+						name: "subject",
+						value: "Re: [GMass] Re: [Simple] Account management like upgrading, transferring, and cancelling"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 09:54:14 -0700"
+					}
+				],
+				body: "The most recent charge was on 3/10, for the amount of $175. The cardholder\n\nname is Brian Freeman, and the billing ZIP is 90245\\.\n\nThank you for looking into this. I appreciate your help!\n\nBest regards,\n\nBrian\n\nOn Tue, Mar 17, 2026 at 8:51 AM Ryle Dsilva (GMass) <\n\nsupport@gmass.zendesk.com> wrote:\n\n> ##- Please type your reply above this line -##\n\n>\n\n> Your request (163619) has been updated. To add additional comments, reply\n\n> to this email.\n\n>\n\n> *Ryle Dsilva* (GMass)\n\n>\n\n> Mar 17, 2026, 11:51 EDT\n\n> Hey Brian,\n\n>\n\n> I am forwarding your request to our billing team. You will receive a\n\n> response from them shortly.\n\n>\n\n> Best,\n\n> Ryle\n\n>\n\n> *GMass AI* (GMass)\n\n>\n\n> Mar 17, 2026, 11:48 EDT\n\n>\n\n> 👋 Hi! I’m the GMass AI assistant. Here’s an initial answer based on your\n\n> message. A human support engineer will review and follow up shortly.\n\n>\n\n> Thanks, Brian — I can help get this sorted.\n\n>\n\n> Based on the $175/month amount, it’s very likely you have an active Team\n\n> 5‑Pack subscription on that VISA card (current Team 5‑Pack monthly price is\n\n> $175) [18]. Your $39.95/month on brian@creatorland.com is a separate\n\n> Premium plan and won’t be affected by resolving this other subscription\n\n> [18].\n\n>\n\n> Here’s what I’ll do and what I need from you:\n\n> - I’ll look up the subscription in our billing system using the last 4\n\n> digits (7382), card brand (VISA), and recent charge amounts you mentioned.\n\n> To complete the lookup quickly, please reply with:\n\n> - The exact date (or approximate date) and amount of the most recent GMass\n\n> charge\n\n> - Cardholder name and billing ZIP/postal code on the card\n\n> - Any possible candidate email addresses (e.g., team@…, billing@…,\n\n> founders’ or colleagues’ emails) that might have been used\n\n> - If you have access to multiple inboxes, try searching for receipts with:\n\n> subject:\"gmass billing\" (that search often reveals the subscribed address)\n\n> [1]\n\n> - As soon as I identify the subscribed email, I’ll reply with it and the\n\n> next bill date.\n\n>\n\n> How to cancel once we identify the subscribed email\n\n> - If you can log in to that Google account: Go to\n\n> https://gmass.co/dashboard > Settings > Account > Cancel. That stops\n\n> auto‑renew immediately; service remains active until the end of the current\n\n> paid period for card-based subscriptions [4][5].\n\n> - If you can’t log in to that Google account: From ANY Gmail account that\n\n> has GMass installed, compose to cancel@gmass.co, set the Subject to the\n\n> subscribed email we provide, and click the red GMass button (not Gmail’s\n\n> Send). That’s the cancellation command and will stop renewals right away;\n\n> service remains active until the period ends [4][5]. Note: Per our Terms,\n\n> we can’t process cancellations via email request — they must be done using\n\n> the documented methods above [2][3].\n\n>\n\n> About the charges and possible refunds\n\n> - You did the right thing providing the last 4 digits; that’s exactly what\n\n> we ask for when you can’t find the subscribed address yourself [1].\n\n> - If this turns out to be an unintended or mis-assigned subscription\n\n> (e.g., subscribed under the wrong email), we’ll review your case under our\n\n> refund policy. Refunds are uncommon but we do make exceptions in specific\n\n> scenarios (like wrong-email subscriptions) [1][12].\n\n>\n\n> Next step: Please send the verification details (recent charge\n\n> date/amount, cardholder name, billing ZIP). I’ll run the lookup and get\n\n> back to you with the exact email tied to the $175/month subscription so you\n\n> can cancel and prevent further charges.\n\n>\n\n> *Sources:*\n\n> [1][11] https://www.gmass.co/blog/pricing-faq/\n\n> [2] https://www.gmass.co/blog/gmass-terms-of-use/\n\n> [3] https://www.gmass.co/g/terms\n\n> [4]\n\n> https://www.gmass.co/blog/how-to-cancel-your-paid-gmail-mail-merge-subscription-to-gmass/\n\n> [5] https://www.gmass.co/blog/cancel-subscription/\n\n> [6] https://www.gmass.co/blog/how-to-get-support-from-the-gmass-team/\n\n> [7] https://www.gmass.co/blog/support\n\n> [8]\n\n> https://www.gmass.co/blog/how-to-get-the-best-support-from-the-gmass-team/\n\n> [9]\n\n> https://www.gmass.co/blog/how-to-change-or-update-the-credit-card-for-your-gmass-subscription/\n\n> [10] https://www.gmass.co/blog/update-credit-card/\n\n> [12] https://www.gmass.co/blog/request-a-refund/\n\n> [13] https://www.gmass.co/g/transfer\n\n> [14] https://www.gmass.co/blog/new-policies-subscription-transfers/\n\n> [15][20]\n\n> https://www.gmass.co/blog/you-can-now-transfer-your-subscription-to-another-account/\n\n> [16] https://www.gmass.co/pricing\n\n> [17] https://www.gmass.co/blog/transfer-subscription/\n\n> [18] https://www.gmass.co/paypal/\n\n> [19] https://www.gmass.co/support/form\n\n>\n\n> *Brian Freeman*\n\n>\n\n> Mar 17, 2026, 11:45 EDT\n\n>\n\n> Hi Gmass Support Team,\n\n>\n\n> I hope you’re doing well. My card (ending in 7382, VISA) has been charged\n\n> $145/month last year and is now being charged $175/month. I don’t know\n\n> which email address this account is linked to, so I am unable to access it\n\n> or cancel the subscription myself.\n\n>\n\n> For reference, my email brian@creatorland.com\n\n> is being billed $39.95/month, so this is not the account in question.\n\n>\n\n> For reference, my email brian@creatorland.com\n\n> is being billed $39.95/month, so this is not the account in question.\n\n>\n\n> Could you please help me identify the email address associated with the\n\n> $145–$175/month account so we can cancel it and prevent further charges?\n\n>\n\n> Thank you very much for your assistance.\n\n> Learn how we handle support <https://www.gmass.co/g/support>.\n\n> [P4NKDK-17GNL]\n\n>\n\n--\n\nBrian Freeman\n\nCEO - Creatorland.com"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-053",
+		description: "SaaS: GMass support thread about upgrading/transferring account. Customer...",
+		emails: [
+			{
+				messageId: "gt-053-msg-1",
+				threadId: "gt-053",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Ryle Dsilva (GMass)\" <support@gmass.zendesk.com>"
+					},
+					{
+						name: "to",
+						value: "Brian Freeman <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "[GMass] Re: [Simple] Account management like upgrading, transferring, and cancelling"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 15:51:35 \\+0000"
+					}
+				],
+				body: "Your request (163619) has been updated. To add additional comments, reply to this email.\n\n----------------------------------------------\n\nRyle Dsilva, Mar 17, 2026, 11:51 EDT\n\nHey Brian,\n\nI am forwarding your request to our billing team. You will receive a response from them shortly.\n\nBest,\n\nRyle\n\n----------------------------------------------\n\nGMass AI, Mar 17, 2026, 11:48 EDT\n\n👋 Hi! I’m the GMass AI assistant. Here’s an initial answer based on your message. A human support engineer will review and follow up shortly.\n\nThanks, Brian — I can help get this sorted.\n\nBased on the $175/month amount, it’s very likely you have an active Team 5‑Pack subscription on that VISA card (current Team 5‑Pack monthly price is $175) [18]. Your $39.95/month on brian@creatorland.com is a separate Premium plan and won’t be affected by resolving this other subscription [18].\n\nHere’s what I’ll do and what I need from you:\n\n- I’ll look up the subscription in our billing system using the last 4 digits (7382), card brand (VISA), and recent charge amounts you mentioned. To complete the lookup quickly, please reply with:\n\n- The exact date (or approximate date) and amount of the most recent GMass charge\n\n- Cardholder name and billing ZIP/postal code on the card\n\n- Any possible candidate email addresses (e.g., team@…, billing@…, founders’ or colleagues’ emails) that might have been used\n\n- If you have access to multiple inboxes, try searching for receipts with: subject:\"gmass billing\" (that search often reveals the subscribed address) [1]\n\n- As soon as I identify the subscribed email, I’ll reply with it and the next bill date.\n\nHow to cancel once we identify the subscribed email\n\n- If you can log in to that Google account: Go to https://gmass.co/dashboard > Settings > Account > Cancel. That stops auto‑renew immediately; service remains active until the end of the current paid period for card-based subscriptions [4][5].\n\n- If you can’t log in to that Google account: From ANY Gmail account that has GMass installed, compose to cancel@gmass.co, set the Subject to the subscribed email we provide, and click the red GMass button (not Gmail’s Send). That’s the cancellation command and will stop renewals right away; service remains active until the period ends [4][5]. Note: Per our Terms, we can’t process cancellations via email request — they must be done using the documented methods above [2][3].\n\nAbout the charges and possible refunds\n\n- You did the right thing providing the last 4 digits; that’s exactly what we ask for when you can’t find the subscribed address yourself [1].\n\n- If this turns out to be an unintended or mis-assigned subscription (e.g., subscribed under the wrong email), we’ll review your case under our refund policy. Refunds are uncommon but we do make exceptions in specific scenarios (like wrong-email subscriptions) [1][12].\n\nNext step: Please send the verification details (recent charge date/amount, cardholder name, billing ZIP). I’ll run the lookup and get back to you with the exact email tied to the $175/month subscription so you can cancel and prevent further charges.\n\n**Sources:**\n\n[1][11] https://www.gmass.co/blog/pricing-faq/\n\n[2] https://www.gmass.co/blog/gmass-terms-of-use/\n\n[3] https://www.gmass.co/g/terms\n\n[4] https://www.gmass.co/blog/how-to-cancel-your-paid-gmail-mail-merge-subscription-to-gmass/\n\n[5] https://www.gmass.co/blog/cancel-subscription/\n\n[6] https://www.gmass.co/blog/how-to-get-support-from-the-gmass-team/\n\n[7] https://www.gmass.co/blog/support\n\n[8] https://www.gmass.co/blog/how-to-get-the-best-support-from-the-gmass-team/\n\n[9] https://www.gmass.co/blog/how-to-change-or-update-the-credit-card-for-your-gmass-subscription/\n\n[10] https://www.gmass.co/blog/update-credit-card/\n\n[12] https://www.gmass.co/blog/request-a-refund/\n\n[13] https://www.gmass.co/g/transfer\n\n[14] https://www.gmass.co/blog/new-policies-subscription-transfers/\n\n[15][20] https://www.gmass.co/blog/you-can-now-transfer-your-subscription-to-another-account/\n\n[16] https://www.gmass.co/pricing\n\n[17] https://www.gmass.co/blog/transfer-subscription/\n\n[18] https://www.gmass.co/paypal/\n\n[19] https://www.gmass.co/support/form\n\n----------------------------------------------\n\nBrian Freeman, Mar 17, 2026, 11:45 EDT\n\nHi Gmass Support Team,\n\nI hope you’re doing well. My card (ending in 7382, VISA) has been charged $145/month last year and is now being charged $175/month. I don’t know which email address this account is linked to, so I am unable to access it or cancel the subscription myself.\n\nFor reference, my email brian@creatorland.com\n\nis being billed $39.95/month, so this is not the account in question.\n\nFor reference, my email brian@creatorland.com\n\nis being billed $39.95/month, so this is not the account in question.\n\nCould you please help me identify the email address associated with the $145–$175/month account so we can cancel it and prevent further charges?\n\nThank you very much for your assistance.\n\nWe don't respond to all inquries. Learn how we handle support: www.gmass.co/g/support\n\n[P4NKDK-17GNL]"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-054",
+		description: "Newsletter/article about AI and spreadsheets. Industry content marketing,...",
+		emails: [
+			{
+				messageId: "gt-054-msg-1",
+				threadId: "gt-054",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "a16z speedrun <speedrun@substack.com>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Will AI Kill Spreadsheets?"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 14:36:43 \\+0000"
+					}
+				],
+				body: "What will happen to spreadsheets in the age of AI?\n\nAlready, a transition is underway. The big AI labs are building their own integrations for agents in Excel and Google sheets. Startups are getting in on the action too, with teams like Fundamental Research Labs (SR002) earning traction [ https://substack.com/redirect/8b6d3e51-b0da-4567-b107-82913d50f07b?j=eyJ1IjoiMXhrcHUxIn0.Z7i0Krh_n4ltddDQ0tXlEiWV3b8qQ_sCeXqiT_wiTtI ] by reimagining the spreadsheet experience to be AI native.\n\nLast week, a16z speedrun General Partner Andrew Chen [ https://substack.com/redirect/c7ca4c72-f508-4052-b262-2ecbb5a93903?j=eyJ1IjoiMXhrcHUxIn0.Z7i0Krh_n4ltddDQ0tXlEiWV3b8qQ_sCeXqiT_wiTtI ] kicked a hornet’s nest on X with a post arguing that “anything that is currently modeled as a spreadsheet is better modeled in code.”\n\nHere’s the full post, to save you a clickthrough:\n\nAI code gen means that anything that is currently modeled as a spreadsheet is better modeled in code. You get all the advantages of software—libraries, open source, AI, all the complexity and expressiveness.\n\nThink about what spreadsheets actually are: they’re business logic that’s trapped in a grid. Pricing models, financial forecasts, inventory trackers, marketing attribution—these are all fundamentally *programs* that we’ve been writing in the worst possible IDE. No version control, no testing, no modularity. Just a fragile web of cell references that breaks when someone inserts a row.\n\nThe only reason spreadsheets won is that the barrier to writing real software was too high. A finance analyst could learn \\=VLOOKUP in an afternoon but couldn’t learn Python in a month. AI code gen flips that equation completely. Now the same analyst describes what they want in plain English, and gets a real application—with a database, a UI, error handling, the works. The marginal effort to go from “spreadsheet” to “software” just collapsed to near zero.\n\nThis is a massive unlock. There are ~1 billion spreadsheet users worldwide. Most of them are building janky software without realizing it. When even 10% of those use cases migrate to actual code, you get an explosion of new micro-applications that look nothing like traditional software. Internal tools that used to live in a shared Google Sheet now become real products. The “shadow IT” spreadsheet that runs half the company’s operations finally gets proper infrastructure.\n\nThe interesting second-order effect: the spreadsheet was the great equalizer that let non-technical people build things. AI code gen is the *next* great equalizer, but the ceiling is 100x higher. We’re about to see what happens when a billion knowledge workers can build real software.\n\nThe post racked up over a million views and hundreds of replies, with not everyone in agreement.\n\nRichard Pham argued that much of the value of spreadsheets is in the grid-based visualization itself:\n\nAllie Harris came at this question from a different angle:\n\nTom Robbins was skeptical as well, pointing to the continued ubiquity of PDF files:\n\nThis was a a comparison Andrew was happy to run with:\n\nThe question is whether spreadsheets will follow the same trajectory—still around, but no longer the default way a billion people interact with data and business logic.\n\nAn interesting framing in the thread came from Dan Hockenmaier [ https://substack.com/redirect/7dcc399b-7288-456c-b580-52f7727814cb?j=eyJ1IjoiMXhrcHUxIn0.Z7i0Krh_n4ltddDQ0tXlEiWV3b8qQ_sCeXqiT_wiTtI ], who pointed out that there are really two kinds of spreadsheet use. The “mini software” kind—dashboards, trackers, attribution models—is almost certainly getting replaced. But the other kind where you develop a financial model you build to hone your own understanding of a business is stickier.\n\nOne top reply came from Robert L. Peters [ https://substack.com/redirect/7a38cb46-f64b-46f5-b5b6-feb025e260b3?j=eyJ1IjoiMXhrcHUxIn0.Z7i0Krh_n4ltddDQ0tXlEiWV3b8qQ_sCeXqiT_wiTtI ], who offered a full-throated defense of the spreadsheet:\n\nWould bet my net worth with 100x leverage that front office finance jobs will still use spreadsheets 10 years from now\n\nCan you run an LBO model with python, audit each cell (F2), make micro adjustments to formulas with instant feedback, toggling an assumption back and forth to see how it impacts a sensitivity table that is 1000 calculations later in the chain? And do this with someone who just got out of college a couple months ago?\n\nThe act of making the spreadsheet in many cases forces the user to think about assumptions, and reason about the drivers. You may not always have it fully formed in your head in advance as a prompt until you see the data, create an operating build, etc.\n\nIf an MD draws on their iPad “make a box here, increase spacing in these three areas, change the calculation for this one year of EBITDA to xyz, and make an italics EBITDAR line underneath, break out product lines in revenue build, shift to monthly, etc” they can give to an analyst and can get back exactly what they want to see in an hour. They don’t need to wait 12 months for a SaaS platform to maybe add the feature. Or prompt an LLM that may asymptote on what you want but isn’t perfect.\n\nThere are also so many edge cases for bad data from private companies where you really need to manually look at the data points to understand the gaps. Python doesn’t allow you to do that and prompting doesn’t provide a visual surface.\n\nI’m sure you will be able to prompt a lot of this stuff but for many use cases the form factor will continue to be a spreadsheet - the analyst will be able to make tweaks to the spreadsheet output the LLM makes, check the logic easily, make edits where it’s faster to make it the way you want vs type out prompts, etc\n\nIn front office finance jobs (maybe other than VC which is less precise with modeling), one single calculation error can dramatically change the answer and cost you $1 million or $1 billion. 95% right is 0% useful. Python and prompting do not allow for full verification of the calcs and data through to the primary sources.\n\nTech ppl perennially have a fundamentally flawed mental model of Excel (“why not use Python????”) because they have never had exposure to how it’s used in the real world, and it’s why so many companies with the business model “move your OUTDATED spreadsheets to my MODERN B2B SaaS in your browser!” that for the past decade have spammed PE firm inboxes have crashed and burned\n\nSpreadsheets are a better form factor than python for business users and LLMs won’t kill spreadsheets\n\nPeters’ reply gets at something the original take arguably doesn’t address: The act of building the model is how you develop conviction about the inputs. You can’t just skip to the output.\n\nChen pushed back [ https://substack.com/redirect/95c4e6fe-450b-4c7c-a218-830abb00fe5b?j=eyJ1IjoiMXhrcHUxIn0.Z7i0Krh_n4ltddDQ0tXlEiWV3b8qQ_sCeXqiT_wiTtI ]:\n\nWhat you’re talking about is the “IDE” user experience of spreadsheets -- being able to inspect the logic, checking out values/cells/etc, debugging, etc. I both agree that you’ll need to do that BUT also that this is all possible, and frankly, better, in software as well\n\nIn software you also get unit/integration tests, version control, coding harnesses, AI everything, and much more. You could even ask the LLM to describe the code in a grid if you want to try to be quasi-backwards compatible.\n\nChen is saying those workflows migrate to a better substrate.\n\nBut you can’t win ‘em all. Joel Grus came off the top rope with this zinger:\n\nSo, after a day of fighting in the reply guy trenches, Chen posted a followup (full text below):\n\nReading the replies -- a lotta folks hate this prediction!\n\nA lot of folks can’t imagine programming the logic/variables/inputs without the spreadsheet grid paradigm\n\nMy primary counterpoint:\n\nMuch complaining is from people trained on keyboard shortcuts in Windows Excel on Thinkpads during their glorious banking days, swearing that they’ll never switch to anything else. Late adopter normie finance bros. Soon to be disrupted\n\nMy actual counterpoints:\n\nProgramming itself has changed its UX many many times. Punchcards, typing into files, IDEs, and now LLM coding harnesses. Spreadsheets are not the only way to encode business logic -- there are better ways, while gaining all the power of software\n\nThe grid UX might remain in some form, but might be more of a display. Just as you code in Codex/Claude but then still pull up a webpage. Or maybe you’ll have a grid as a DB but then build apps on top, but still want a querying UI for the data\n\nLLMs will make going between logic in code and logic in spreadsheets interchangeable. So maybe you’ll edit in a grid but then hit “deploy” and it’ll build a webapp in the cloud. And just as we have VLOOKUP() they’ll be LLM() that can encode AI logic\n\nAnyone who works with software knows its infinitely better and more expressive and more powerful. AI code gen is a blessing for all the non-technical excel wizards who can now take their work to the next level\n\nThe history of computing really is a story of interfaces evolving beyond what the previous generation thought was possible. Punchcards felt essential until they didn’t. Command lines felt essential until GUIs arrived.\n\nThe spreadsheet grid might be next.\n\nWhat do you think about the spreadsheets debate? Let us know in the comments. And for more weekly dives into the world of early stage startups, subscribe below.\n\nGet the a16z speedrun newsletter weekly 👇\n\nYou are receiving this newsletter since you opted in earlier; if you would like to opt out of future newsletters, you can unsubscribe immediately.\n\nThis newsletter is provided for informational purposes only, and should not be relied upon as legal, business, investment, or tax advice. You should consult your own advisers as to those matters. This newsletter may link to other websites and certain information contained herein has been obtained from third-party sources. While taken from sources believed to be reliable, a16z has not independently verified such information and makes no representations about the enduring accuracy of the information or its appropriateness for a given situation.\n\nReferences to any companies, securities, or digital assets are for illustrative purposes only and do not constitute an investment recommendation or offer to provide investment advisory services. Any references to companies are for illustrative purposes only; please see a16z.com/investments [ https://substack.com/redirect/6e3166d0-1020-4e95-a0ca-25d97d341c4a?j=eyJ1IjoiMXhrcHUxIn0.Z7i0Krh_n4ltddDQ0tXlEiWV3b8qQ_sCeXqiT_wiTtI ]. Furthermore, this content is not directed at nor intended for use by any investors or prospective investors, and may not under any circumstances be relied upon when making a decision to invest in any fund managed by a16z. (An offering to invest in an a16z fund will be made only by the private placement memorandum, subscription agreement, and other relevant documentation of any such fund which should be read in their entirety.) Past performance is not indicative of future results.\n\nCharts and graphs provided within are for informational purposes solely and should not be relied upon when making any investment decision. Content in this newsletter speaks only as of the date indicated. Any projections, estimates, forecasts, targets, prospects and/or opinions expressed in these materials are subject to change without notice and may differ or be contrary to opinions expressed by others. Please see a16z.com/disclosures [ https://substack.com/redirect/645e41c0-a3cf-4864-acd2-ed2c051be9b6?j=eyJ1IjoiMXhrcHUxIn0.Z7i0Krh_n4ltddDQ0tXlEiWV3b8qQ_sCeXqiT_wiTtI ] for additional important details.\n\nUnsubscribe https://substack.com/redirect/2/eyJlIjoiaHR0cHM6Ly9zcGVlZHJ1bi5zdWJzdGFjay5jb20vYWN0aW9uL2Rpc2FibGVfZW1haWw_dG9rZW49ZXlKMWMyVnlYMmxrSWpveE1UWTROakF4TURVc0luQnZjM1JmYVdRaU9qRTVNVEExTWpFek1pd2lhV0YwSWpveE56Y3pOelU0TWpJeExDSmxlSEFpT2pFNE1EVXlPVFF5TWpFc0ltbHpjeUk2SW5CMVlpMHhPREV3TnpFMElpd2ljM1ZpSWpvaVpHbHpZV0pzWlY5bGJXRnBiQ0o5Lnh3RlY4WnFEQk5YRnBFa3dBUVc4c0RuMFBGWTNrX2ZwcHdIR1dod2I5QTQiLCJwIjoxOTEwNTIxMzIsInMiOjE4MTA3MTQsImYiOnRydWUsInUiOjExNjg2MDEwNSwiaWF0IjoxNzczNzU4MjIxLCJleHAiOjIwODkzMzQyMjEsImlzcyI6InB1Yi0wIiwic3ViIjoibGluay1yZWRpcmVjdCJ9.UQ1_mw1wvJiMW1ghF6hI9jasZN1SAbNt9PGkFtjUSI4?"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-055",
+		description: "Personal/misc: Supabase security vulnerability notification. Platform...",
+		emails: [
+			{
+				messageId: "gt-055-msg-1",
+				threadId: "gt-055",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Supabase <noreply@supabase.com>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Security vulnerabilities detected in your Supabase projects"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 14:41:27 \\+0000"
+					}
+				],
+				body: "We detected security vulnerabilities in 2 of your projects that could expose your data to unauthorized access. Review and fix them before your data is compromised.\n\nReport created 15 Mar 2026\\.\n\n----------------------------------------\n\nProject: ColdProfileDb https://supabase.com/dashboard/project/isezajgzctwmintmbxey/database/security-advisor\n\nID: isezajgzctwmintmbxey\n\n1 error(s)\n\nView Security Advisor https://supabase.com/dashboard/project/isezajgzctwmintmbxey/database/security-advisor\n\n----------------------------------------\n\nProject: Freebird Dashboard 2.0 https://supabase.com/dashboard/project/bplxpeljstogzvfxsczy/database/security-advisor\n\nID: bplxpeljstogzvfxsczy\n\n3 error(s)\n\nView Security Advisor https://supabase.com/dashboard/project/bplxpeljstogzvfxsczy/database/security-advisor\n\n----------------------------------------\n\nIf these are not intentional, they could result in unauthorized access to your database. We have a robust set of security checks which you can read about in our docs https://supabase.com/docs/guides/database/database-linter.\n\nReach out to our support team https://supabase.help if you have any questions.\n\nBest,\n\nSupabase\n\nSupabase Inc, 3500 S. DuPont Highway, Kent 19901, Dover, Delaware, USA\n\n----------------------------------------\n\nUnsubscribe https://subscriptions.pstmrk.it/unsubscribe?m=1.pLV27ONuu8kP2j2Fa094qQ.L_1GMldmChK4vKDzbzcQ2bkDln5J6NWaYBQ4c_OIDXlPfVBdJkQKSLVivzpRlB8YL1ftdfjbAI02anlO3FKhRjRH-q-s3DU88ePUFlXwg2NtvCAekng1mY71KjwTflcL8D0haXSy6XEsDERTYmMtg9zVkIz8GKor9JNKJ0UzRISHq_VuuVmiw_D9AD427PSafnbVCPtWhqcE0329Qwdqn06whg_TbE6zDJD3_uHz4DjHveIan1IhIykqiBG9KQN5N2SRha6Hls7629ckuErTXf_3Es4TOejpYVB76FE5yl-qjTXkHuAgY4dxgJWddfQnYQqZ-Z4g5rO0ETITIGxvkmJGCuuQMYfunN54oIs885XMtaxPUG-ChLcss4Q1YFU2gAq3hTgFRQFOeimJlgEaG607HXgidc-H8HfLI04ASuw6rExuymglJ8rHfrsOHy2SqEy9fZWqZbOMqfj0ICvtWQ from weekly security advisor warning notifications"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-056",
+		description: "Personal/misc: Support request acknowledgment. Automated system response,...",
+		emails: [
+			{
+				messageId: "gt-056-msg-1",
+				threadId: "gt-056",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Trend Outlet Brands <support@trendoutletbrands.com>"
+					},
+					{
+						name: "to",
+						value: "Brian Freeman <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "[Request received]"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 15:46:38 \\+0000"
+					}
+				],
+				body: "To add additional comments, reply to this email.\n\n--------------------------------\n\nThis email is a service from Trend Outlet Brands.\n\n[Z7WKM4-KV34W]"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-057",
+		description: "Cold outreach for survey participation, not a brand deal",
+		emails: [
+			{
+				messageId: "gt-057-msg-1",
+				threadId: "gt-057",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Eltion Meka <eltion@bwg-research.com>"
+					},
+					{
+						name: "to",
+						value: "Brian Freeman <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "Survey invitation: Point of Sale systems"
+					},
+					{
+						name: "date",
+						value: "Thu, 12 Mar 2026 13:20:21 -0600 (MDT)"
+					}
+				],
+				body: "We’re currently conducting a new survey focused on Point of Sale (POS) systems\n\n, and we’d value your perspective. The survey takes approximately 15 minutes to\n\ncomplete, and as a thank-you for your time, you’ll receive a$50 gift card of\n\nyour choice upon full completion.\n\nAll responses are completely anonymous and will not be attributed to you or\n\nyour organization. If you’re interested in participating, please use the link\n\nbelow to access the survey:\n\nTake the Survey\n\n<https://surveys.bwgglobal.com/jfe/form/SV_7V5LLj7PuZJCmhw?Q_DL=Xb8axShLUFurmd1_7V5LLj7PuZJCmhw_CGC_qKVsrmSAT8GrND9&Q_CHL=email>\n\nWe understand the importance of trust when it comes to email communication.\n\nIf you’d like to verify our credibility, feel free to:\n\n* Check out our LinkedIn page.\n\n* Check out our glowing Google reviews.\n\n------------------------------------------------------------------------------------------------------------------------------------------------\n\nBWG Global LLC\n\n25 Commerce Drive, Cranford, NJ 07016, United States\n\nIf you want to unsubscribe from this list or all emails, use the links below:\n\nUnsubscribe from this list\n\n<https://surveys.bwgglobal.com/subscription/manage/confirmation?recipientId=CGC_qKVsrmSAT8GrND9&libraryId=GR_5cL3ZK48hnol9Sm&distributionId=EMD_Xb8axShLUFurmd1&BT=Yndnc3RyYXRlZ3k>\n\nUnsubscribe from all emails\n\n<https://surveys.bwgglobal.com/subscription/manage/confirmation?recipientId=CGC_qKVsrmSAT8GrND9&libraryId=GR_5cL3ZK48hnol9Sm&distributionId=EMD_Xb8axShLUFurmd1&BT=Yndnc3RyYXRlZ3k&OptOut=dir>"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-058",
+		description: "Personal/misc: Non-deal email from MBOX. Not a brand partnership.",
+		emails: [
+			{
+				messageId: "gt-058-msg-1",
+				threadId: "gt-058",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Patricia [Startup CPG]\" <community@startupcpg.com>"
+					},
+					{
+						name: "to",
+						value: "Brian Freeman <brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "Female Founders: Let's meet up?"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 17:03:13 \\+0000 (UTC)"
+					}
+				],
+				body: "Special message from Patricia Menegoto, our Head of Marketing and Community:\n\nHi Brian,\n\nNot sure if you've heard about our Further initiative before. Further is our female founder initiative inside Startup CPG, built to bring opportunities, visibility, and real support to female-founded CPG product brands. I’m talking food, bev, beauty, wellness, and everything in between. If you make a physical product, this is for you.\n\nWe've got big plans for Further and some exciting programming coming up, starting with a Further Fireside Chat & Mixer\n\nOn April 9, we’re hosting Further - Your Secret Sauce on Social: Growing a Loyal Community.\n\nI’m sitting down with Ashley Nickelsen, Founder & CEO of B.T.R. NATION, to talk about something I think about constantly: building a community on social that actually means something.\n\nAshley turned a kitchen project into a multi-million dollar better-for-you snack brand with clean ingredients, no refined sugar, now carried by major national retailers.\n\nAnd she did it in large part because she built an online community of people who genuinely connected with her story and kept coming back. She threw out the social media playbook and did what worked for her.\n\nWe’ll cover:\n\n- How she found her voice on social and stopped looking over her shoulder at what everyone else was doing\n\n- What “building community” actually looks like day to day (hint: it’s not obsessing over metrics)\n\n- How those online relationships translated into real retail growth\n\nAnd we’ll leave plenty of time for Q&A so bring your burning questions.\n\nAfter the conversation, we'll break into smaller groups so you can connect with other female founders in the community and dig deeper into what resonated with you.\n\nWhether you’re just getting started or feel like something isn’t clicking, I think this one’s going to give you something real to work with.\n\n👉 [RSVP for the Further Virtual Mixer](https://www.eventbrite.com/e/further-your-secret-sauce-on-social-growing-a-loyal-community-tickets-1984932111378?aff=klaviyobutton)\n\nxo, Patricia\n\nHead of Marketing and Community\n\nOne more thing before you go - I want to hear from you\n\nOur last Further event was back in June at the Summer Fancy Food Show in NYC. That’s too long, and I know it. Women in CPG go further, faster when we’re in it together — and I’m committed to making sure that’s not just something we say.\n\nI have a lot of ideas for what Further could look like going forward, and I want to make sure I’m building something that actually serves this community. So before I dive in: what do you want?\n\nMore virtual content? Panels? Workshops? Topics you’re dying to dig into? If there’s a format or a subject you keep wishing existed for female founders in CPG, hit reply. I’m reading everything.\n\nMy goal is a Further online event at minimum every other month. So let me know what you want to hear or engage with!\n\n[Panelists speaking onstage]\n\nNo longer want to receive these emails? [Unsubscribe](https://manage.kmail-lists.com/subscriptions/unsubscribe?a=WdUZt6&c=01KAEYMA2CY3REXJCGGV7X3MY0&k=f7a595b488c6961b6803cc959d0b0a79&m=01KKKWSBQ3DNGYAEWBP8C5N4P1&r=01KKYAZ4BHG52X9ASJYS86DYXH).\n\nStartup CPG 13157 Mindanao Way #3150 Marina del Rey, CA 90292\n\nCan't see this email? [Open in your browser](https://manage.kmail-lists.com/subscriptions/web-view?a=WdUZt6&c=01KAEYMA2CY3REXJCGGV7X3MY0&k=f7a595b488c6961b6803cc959d0b0a79&m=01KKKWSBQ3DNGYAEWBP8C5N4P1&r=01KKYAZ4BHG52X9ASJYS86DYXH).\n\nNo longer want to receive these emails? [Unsubscribe](https://manage.kmail-lists.com/subscriptions/unsubscribe?a=WdUZt6&c=01KAEYMA2CY3REXJCGGV7X3MY0&k=f7a595b488c6961b6803cc959d0b0a79&m=01KKKWSBQ3DNGYAEWBP8C5N4P1&r=01KKYAZ4BHG52X9ASJYS86DYXH). Startup CPG 13157 Mindanao Way #3150 Marina del Rey, CA 90292 Can't see this email? [Open in your browser](https://manage.kmail-lists.com/subscriptions/web-view?a=WdUZt6&c=01KAEYMA2CY3REXJCGGV7X3MY0&k=f7a595b488c6961b6803cc959d0b0a79&m=01KKKWSBQ3DNGYAEWBP8C5N4P1&r=01KKYAZ4BHG52X9ASJYS86DYXH)."
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-059",
+		description: "Personal/misc: Non-deal email from MBOX. Not a brand partnership.",
+		emails: [
+			{
+				messageId: "gt-059-msg-1",
+				threadId: "gt-059",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "Jasmin Maiwald <jasmin@velocitieapp.com>"
+					},
+					{
+						name: "to",
+						value: "brian@creatorland.com"
+					},
+					{
+						name: "subject",
+						value: "Re: Brian quick question"
+					},
+					{
+						name: "date",
+						value: "Fri, 13 Mar 2026 16:43:38 \\+0000"
+					}
+				],
+				body: "What if instead we knock out your first week of content together in a speed-onboarding session?\n\nWe’ll record your first 5-minute AI-led interview in Velocitie, so you leave the call with video clips, captions, and long-form posts ready to post on LinkedIn.\n\nWorth setting it up?\n\nBest,\n\nJasmin | Co-Founder\n\nOn Fri, February 13, 2026 3:05 PM, Jasmin Maiwald <jasmin@velocitieapp.com>\n\n[jasmin@velocitieapp.com]> wrote:\n\n> Hi Brian,\n\n>\n\n> If you’d rather take a look first, I can send a short (1–2 min) product video showing how Velocitie turns a 10-min AI-led interview into ready-to-post clips and long-form posts for LinkedIn.\n\n>\n\n> Want me to send it over?\n\n>\n\n> Best,\n\n> Jasmin | Co-Founder\n\n> On Tue, February 10, 2026 3:23 PM, Jasmin Maiwald <jasmin@velocitieapp.com>\n\n> [jasmin@velocitieapp.com]> wrote:\n\n>\n\n> > Hi Brian,\n\n> >\n\n> > Caught your recent post on LinkedIn - are you doing the writing/editing yourself?\n\n> >\n\n> > I've built Velocitie to help founders save 5–10 hours a week creating content on LinkedIn by turning a 10-minute AI-led interview into ready to post talking head video and long-form text posts.\n\n> >\n\n> > We’re inviting founders who already post on LinkedIn into a free beta and i think you'd be a great fit - open to a quick 20-min intro?\n\n> >\n\n> > Best,\n\n> > Jasmin | Co-Founder\n\n> >"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	},
+	{
+		id: "gt-060",
+		description: "Personal/misc: Non-deal email from MBOX. Not a brand partnership.",
+		emails: [
+			{
+				messageId: "gt-060-msg-1",
+				threadId: "gt-060",
+				topLevelHeaders: [
+					{
+						name: "from",
+						value: "\"Thomas Brooks\" <thomas.brooks@emails.bayclubs.com>"
+					},
+					{
+						name: "to",
+						value: "<brian@creatorland.com>"
+					},
+					{
+						name: "subject",
+						value: "It’s Your Lucky Day! Up to 50% Off"
+					},
+					{
+						name: "date",
+						value: "Tue, 17 Mar 2026 09:01:29 -0600"
+					}
+				],
+				body: "To view this email as a web page, go to the link below, or copy and paste it into your browser's address window.\n\nhttps://click.emails.bayclubs.com/?qs=eyJkZWtJZCI6IjNhYjhjMGE4LWU4YTgtNDY2OS1iYTk4LTJkZDc2NWU1N2RjZSIsImRla1ZlcnNpb24iOjEsIml2IjoiTThadFhjWW5TN2FqeEQrQmFrQmNMdz09IiwiY2lwaGVyVGV4dCI6IkVWVEY2UGNiR1BzcWdIeGlNc2s0ZXhKS3RIK3Y5d1oyeXFkN3FvMzlVQU9YR1hVaUgxK3EweURRb1RWYUNPMUR6aWx6UlB2ay93Rk1PamVDM0x1OWtrQVJXdmpDZnVJenhtMWR4aWRMdHFQRVA0RnFRRnd2IiwiYXV0aFRhZyI6IkFVdzZONExjdTcyU1FCRmErTUorNGc9PSJ9\n\nHi Brian,\n\nAround St. Patrick’s Day, I’m always reminded how much the Club is really about people. New members come in for a class or workout and quickly start recognizing familiar faces each week.\n\nAlong with a variety of social events, there’s always something to step into—take a yoga class, head to the courts, or recharge in recovery spaces.\n\nIf you’ve been thinking about joining, today is your lucky day. With up to 50% off your initiation fee through tonight, it’s a great time to jump in.* Plus, join with Shared Membership and add up to 9 of your friends and family.*\n\nHave questions or want to take a look around? Simply\n\nhttps://click.emails.bayclubs.com/?qs=eyJkZWtJZCI6ImQ0YWMxMWZiLTU2OTItNDYyOC1iZTgwLWQ5OTU2M2NiOTFjMyIsImRla1ZlcnNpb24iOjEsIml2IjoiWmFWeklOb25uWU5HZ1MvbmhjNFNyZz09IiwiY2lwaGVyVGV4dCI6Imw1RVRhVkRSN1NFRTBKeWkxdzh5cStadnZiWTJVc2E5dmF1SUtIbFl4SkxpSkpqb09MeVJEcDhhZzZxeDQ3OE1MeGR4ckw3R3RjNHg5YURRaUJ2SXMxUU54cHlReS9obHBYTWcyaWVkZzBhQkwrZUZ6aEt1IiwiYXV0aFRhZyI6InpqSDFvTkNJRzhpelZBM0duSkRMK0E9PSJ9\n\nclick here or reply. I&rsquo;m happy to help!\n\nWarmly,\n\nThomas BrooksSenior Vice President, Membership\n\nthomas.brooks@bayclubs.com\n\n310.625.8546\n\nhttps://calendly.com/bay-club-los-angeles/club-tour-bces?sfid=00QUg00000RAakDMAT&name=Brian Freeman&phone=3109234733&a1=3109234733&email=brian@creatorland.com&a2=I’m interested in learning more about membership\n\nSchedule a Tour  |\n\nhttps://click.emails.bayclubs.com/?qs=eyJkZWtJZCI6IjUxYzA3MjkyLTljN2MtNGJmNS04OWNhLTA5ZGIxMzIwOTI4MyIsImRla1ZlcnNpb24iOjEsIml2IjoieVkyMU0xOHJ3eHkwbDA3akQ4NndPdz09IiwiY2lwaGVyVGV4dCI6ImkxZG9aOXZta28wUmJET0xQTlZpZTVaYW5ocVlyVkY1bkN2cDhFbnJtWFU0alJmYWZXWkh0T24yS0taQVpRV0d1WE52bzVNMUkwaTBYM1MrT3BKZWxKUGE4dDNVUlJmSmpiVXpYeXZESExTWFR1TVB6ckE3IiwiYXV0aFRhZyI6IlNMUmZkTDQ2a2w2VWs5cnkzZFJGRnc9PSJ9\n\nBayclubs.com |\n\nhttps://click.emails.bayclubs.com/?qs=eyJkZWtJZCI6IjA1YjljNjQzLWFjOGUtNDg4MC1iNDQ0LTA2NzAyNTk3ZDhmMiIsImRla1ZlcnNpb24iOjEsIml2IjoiZllFZGZTQlB2THdJVnZ1VklwK2JIUT09IiwiY2lwaGVyVGV4dCI6IjJSbHNpTjRaQkpmQk9CUVdrQ2tBK1lmdWlscmxSeHFrblBXMHFWUEI1K0MvU1hEMDJjTWFFaHZsTUU1anF2NFhjcTYyb25HV0Iwb2xNL3RLcGJGcG1LcHgvN2FuKzloOWdSMTlJRSs4dkFoVys1VWluNXNkIiwiYXV0aFRhZyI6IlNpVXorMHFsc1dtWXFuSC90cWY3MkE9PSJ9\n\nFacebook |\n\nhttps://click.emails.bayclubs.com/?qs=eyJkZWtJZCI6IjEwM2NlZmE3LWU3NTUtNGI1MS04NmMxLTdlNDQ4OWE2ZTIzOCIsImRla1ZlcnNpb24iOjEsIml2IjoiNU82WTF2ZWZJSy95K3Jnb2NSdU5yZz09IiwiY2lwaGVyVGV4dCI6Ijc0Q0pzSGtCYTJFK0RUcEF4WGhUbVlxak5URitwVnFBdHdNL3R3YTZUSUpIMjdGUjZUcXNlQ243MUdLLzBUdU9BVGFuOUROMWtsMUNjZjJTMmx2YVFvelMyR1JJWFI3azdwalc5NThnci9MNnVDaHhHNDJ1IiwiYXV0aFRhZyI6IlhVSngvWkxhVzlwQ2pOTFlaRWhkSGc9PSJ9\n\nInstagram\n\n*Membership Offer: Offer valid on new memberships through March 17, 2026\\. Initiation fee varies based on membership level at joining. Dues vary by membership type. Not valid at not valid at Manhattan Country Club, Griffin Club, or for PRO Club Tennis, Club West Gold, Platinum, Diamond, and Sapphire memberships. Not all membership types and amenities are available at all club locations. Cannot be combined with any other offer; other restrictions may apply. The Bay Club Company reserves the right to amend, suspend or change the offer at any time without notice.\n\n*Shared Membership: The Bay Club Company reserves the right to amend, suspend, or change Shared Membership at any time without notice. Not valid for all membership types. Not available at all clubs. Excludes Manhattan Country Club, Griffin Club, Club West Diamond, Platinum, and Sapphire memberships. Not all membership types and amenities are available at all club locations. Other restrictions may apply.\n\nThis email was sent to brian@creatorland.com.\n\nIf you no longer wish to receive these emails you may\n\nhttps://click.emails.bayclubs.com/unsub_center.aspx?qs=eyJkZWtJZCI6IjAzMzNlN2ZhLTdlOTgtNDgzMy04ZmE5LWM4Mjg5ZDAxMTA1NCIsImRla1ZlcnNpb24iOjEsIml2IjoiT0VROXJKMDIvdUltZWo4Q0dGQy9pZz09IiwiY2lwaGVyVGV4dCI6IjVpL28rVkthYzhzRHBtK2JHQ0pibklKR0l2S2RheGpNUTBuT0pzUzRjTmpDbWlWODFNTFNNZVNXUXlONzI2L2RYWGsrTlRPa0l2M2tWWXRDSzVqVlNDRHI3Z1E4VDFReDZjUjBQeE5QN0hRamFnMkdPRVE5ckowMi91SW1lajhDR0ZDL2lnPT0iLCJhdXRoVGFnIjoiUEU5VU1lbkVkRDhUVCt4MEkyb05oZz09In0%3D\n\nUnsubscribe or\n\nhttps://click.emails.bayclubs.com/profile_center.aspx?qs=eyJkZWtJZCI6IjA5YTNkYjZhLTA5ZjEtNGYxMi1iMWQzLTAzODU3MWQxMjA3OSIsImRla1ZlcnNpb24iOjEsIml2Ijoibk53TEQ2SHNTWTVnK3dFblRFRXpKQT09IiwiY2lwaGVyVGV4dCI6IjczbHc5eFNERktoK3RlQjVaTFFFMUlPK0orTXBnL25aeEM3aWNxc3ZqTk1pMUtONGRzLy9Nalh5WThDbFFZeHF3MGRoQmRnNjU5QzhoVk1kNTZhSUd4MFhPUkd2WXVUUEdmSlRxYTBMME9VbHBaemNDdytoN0VtT1lQc0JKMHhCTXlRPSIsImF1dGhUYWciOiJPUkd2WXVUUEdmSlRxYTBMME9VbHBRPT0ifQ%3D%3D\n\nUpdate Profile at any time.\n\nNeed to contact Bay Club? You can\n\nmailto:bayclubconnect@bayclubs.com?subject=\n\nemail us.\n\nThe Bay Club\n\n1620 Montgomery St. Unit 250, San Francisco, CA, 94111 US\n\n(c) The Bay Club Company. All rights reserved.\n\nBay Club and the Bay Club logo are trademarks of Bay Club Holdings, III.\n\n----------------------------------------\n\nThis email was sent by:\n\nThe Bay Club\n\n1620 Montgomery St. Unit 250\n\nSan Francisco, CA, 94111, US\n\nWe respect your right to privacy - visit the following URL to view our policy.\n\n( https://click.emails.bayclubs.com/?qs=eyJkZWtJZCI6ImZjYzUxMTI1LTViMTEtNDJiOS1hY2IxLWU5MmQxZDA5MjkxNyIsImRla1ZlcnNpb24iOjEsIml2IjoiVzcxNWlrZm9NTm1lOHdiVmtMallxZz09IiwiY2lwaGVyVGV4dCI6Ill1RFIrZ1VHcEtiOVpIRGVtUUFUZzVHOGRxTS8reCtXOUU4WTBvM3RkWjh3bU5MblVmeHVRWml5ZDJINDNTYzNITXByQ1hsb05NRHZWQS9qdGFWdDZ2dUttYlBLMitoYnZYbUtSK2d3Mlo3ekJ0V1F1TmlxIiwiYXV0aFRhZyI6IndPOVVEK08xcFczcSs0cVpzOHJiNkE9PSJ9 )\n\n----------------------------------------\n\nVisit the following URL to manage your subscriptions.\n\n( https://click.emails.bayclubs.com/subscription_center.aspx?qs=eyJkZWtJZCI6ImE3NTJmZDBhLTYxMzktNDMxZS04NzEwLTQ2ZDUzM2Q2NzY1NyIsImRla1ZlcnNpb24iOjEsIml2IjoiaytTWTdrQUxQVXlKNzZmRWJJNUZ5dz09IiwiY2lwaGVyVGV4dCI6IkgxclY1M3k1U2orMDgwcmVxZHhlVXFxKzBYT2ozVm8yejJiUm04SWE4dDhtTlBSc0ozVzZRbFpOZU5vQ1RSQ1NqanZZZlM5NXRXODZ1WStZK25zdUJxbnIxTkpuWFdkVDVsSU9JRHcybHJBejBKUGttTzVBQ3oxTWllK254R3lPUmNzPSIsImF1dGhUYWciOiIxTkpuWFdkVDVsSU9JRHcybHJBejBBPT0ifQ%3D%3D )\n\nVisit the following URL to update your profile.\n\n( https://click.emails.bayclubs.com/profile_center.aspx?qs=eyJkZWtJZCI6ImE4ZmY3OTg0LTJhMjgtNDEyNS1hMzYzLWUwZWUyMWRjNGFhMCIsImRla1ZlcnNpb24iOjEsIml2IjoiTXNLSEJmRmMvVWU1SDRDelkvVXcxdz09IiwiY2lwaGVyVGV4dCI6IjVaaTBReVM0SVpqVGJObTNzaVRUSTJuL2RaQUtmbHpBOUFYTU9zbFhCZVpFNGNncFBOR1pzZzZseHhrL0VlMS9Ba1BUL0hGL1lnbG9JakpJaklMMC82TVgwcHR3ZFNMV3dmVWpzempWUG5aRW5ETENod1h4WFAxSHVSK0FzMlAxTU5jPSIsImF1dGhUYWciOiIwcHR3ZFNMV3dmVWpzempWUG5aRW5BPT0ifQ%3D%3D )\n\nVisit the following URL to unsubscribe.\n\n( https://click.emails.bayclubs.com/unsub_center.aspx?qs=eyJkZWtJZCI6ImFkNGJmMmU3LTdmZjEtNGUzYi04MzdhLTcwYjIzYWQ1ODAzZiIsImRla1ZlcnNpb24iOjEsIml2IjoiSXV6ZllwUmRDT3pVRTFDUFkwM2IxUT09IiwiY2lwaGVyVGV4dCI6IkMzK1NFajMyY0lLRjFnekNBNVVKNitCenBmdDVSMGpVa3BwU1VUdmMvR1F4VVl1OWdKVHlxaGVRS3RXNld2K0xNekFCVmtkSDlNT2ExNmNFQXptbU5aK1RZb2MzRzJGZjZiVCt3UlNRWFp4aGcvOVFJdXpmWXBSZENPelVFMUNQWTAzYjFRPT0iLCJhdXRoVGFnIjoiTnh0aFgrbTAvc0VVa0YyY1lZUC9VQT09In0%3D )"
+			}
+		],
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		}
+	}
+];
+
+async function runEval() {
+  const hyperbolicKey = coreExports.getInput('hyperbolic-key');
+  const model = coreExports.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
+  const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
+  const numRuns = parseInt(coreExports.getInput('runs') || '10', 10);
+  const temperature = parseFloat(coreExports.getInput('temperature') || '0');
+
+  if (!hyperbolicKey) throw new Error('hyperbolic-key is required for eval')
+
+  // Filter out entries with empty bodies — AI can't classify without content
+  const usableEntries = groundTruth.filter((gt) =>
+    gt.emails.some((e) => e.body && e.body.trim() !== ''),
+  );
+  console.log(`[eval] model=${model} runs=${numRuns} threads=${usableEntries.length} (${groundTruth.length - usableEntries.length} skipped: empty body)`);
+
+  const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey };
+  const allRuns = [];
+  const jsonHealthPerRun = [];
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+
+  for (let run = 1; run <= numRuns; run++) {
+    console.log(`[eval] --- run ${run}/${numRuns} ---`);
+
+    // Build prompt from ground truth emails (same path as production)
+    const allEmails = usableEntries.flatMap((gt) => gt.emails);
+    const { systemPrompt, userPrompt } = buildPrompt(allEmails);
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ];
+
+    const health = { clean: false, repaired: false, corrective_retry: false, failed: false };
+    let threads = null;
+
+    // Layer 0: Primary model call
+    let rawContent = null;
+    let usage = {};
+    try {
+      const result = await callModel(model, messages, { temperature, ...aiOpts });
+      rawContent = result.content;
+      usage = result.usage || {};
+    } catch (apiErr) {
+      console.log(`[eval] run ${run} API failed: ${apiErr.message}`);
+    }
+
+    if (rawContent) {
+      // Layer 1: Local JSON repair
+      try {
+        threads = parseAndValidate(rawContent);
+        health.clean = true;
+        console.log(`[eval] run ${run}: clean parse, ${threads.length} threads`);
+      } catch (parseErr) {
+        console.log(`[eval] run ${run}: parse failed (${parseErr.message}), attempting repair`);
+        health.repaired = true;
+
+        // Layer 2: Corrective retry
+        try {
+          const correctiveMessages = [
+            ...messages,
+            { role: 'assistant', content: rawContent },
+            {
+              role: 'user',
+              content: `Your previous response could not be parsed as valid JSON.\n\nParse error:\n${parseErr.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting. Return ONLY the JSON array.`,
+            },
+          ];
+          const corrected = await callModel(model, correctiveMessages, { temperature: 0, ...aiOpts });
+          threads = parseAndValidate(corrected.content);
+          health.corrective_retry = true;
+          health.repaired = false;
+          console.log(`[eval] run ${run}: corrective retry succeeded`);
+        } catch (correctiveErr) {
+          console.log(`[eval] run ${run}: corrective retry failed: ${correctiveErr.message}`);
+          health.failed = true;
+          health.repaired = false;
+        }
+      }
+    } else {
+      health.failed = true;
+    }
+
+    totalInputTokens += usage.prompt_tokens || 0;
+    totalOutputTokens += usage.completion_tokens || 0;
+
+    if (threads) {
+      allRuns.push(threads);
+    }
+    jsonHealthPerRun.push(health);
+  }
+
+  if (allRuns.length === 0) {
+    throw new Error(`All ${numRuns} runs failed — no valid results to compute metrics`)
+  }
+
+  // Compute metrics
+  const detection = computeDetectionMetrics(allRuns, usableEntries);
+  const categorization = computeCategoryAccuracy(allRuns, usableEntries);
+  const urgencyScoring = computeScoreInRange(allRuns, usableEntries);
+  const scamDetection = computeScamDetection(allRuns, usableEntries);
+  const perThread = computePerThread(allRuns, usableEntries);
+  const jsonHealth = computeJsonHealth(jsonHealthPerRun);
+
+  const result = {
+    model,
+    temperature,
+    runs: numRuns,
+    successful_runs: allRuns.length,
+    ground_truth_count: usableEntries.length,
+    detection,
+    categorization,
+    urgency_scoring: urgencyScoring,
+    scam_detection: scamDetection,
+    json_health: jsonHealth,
+    cost: {
+      total_input_tokens: totalInputTokens,
+      total_output_tokens: totalOutputTokens,
+      avg_cost_per_thread: usableEntries.length > 0
+        ? +((totalInputTokens * 0.000001 + totalOutputTokens * 0.000002) / usableEntries.length).toFixed(6)
+        : 0,
+    },
+    per_thread: perThread,
+  };
+
+  console.log(`[eval] complete: recall=${detection.recall.mean} precision=${detection.precision.mean} f2=${detection.f2.mean} json_failures=${jsonHealth.total_failures}`);
+  return result
+}
+
+const THRESHOLDS = {
+  recall: 0.95,
+  precision: 0.40,
+  consistency: 0.03,
+};
+
+function compareMetric(valA, valB) {
+  const delta = +(valB - valA).toFixed(4);
+  const winner = delta > 0.001 ? 'b' : delta < -1e-3 ? 'a' : 'tie';
+  return { a: +valA.toFixed(4), b: +valB.toFixed(4), delta, winner }
+}
+
+async function runEvalCompare() {
+  const resultAStr = coreExports.getInput('result-a');
+  const resultBStr = coreExports.getInput('result-b');
+
+  if (!resultAStr || !resultBStr) throw new Error('result-a and result-b are required')
+
+  const a = JSON.parse(resultAStr);
+  const b = JSON.parse(resultBStr);
+
+  // Side-by-side metric comparison
+  const comparison = {
+    recall: compareMetric(a.detection.recall.mean, b.detection.recall.mean),
+    precision: compareMetric(a.detection.precision.mean, b.detection.precision.mean),
+    f2: compareMetric(a.detection.f2.mean, b.detection.f2.mean),
+    category_accuracy: compareMetric(a.categorization.accuracy.mean, b.categorization.accuracy.mean),
+    score_in_range: compareMetric(a.urgency_scoring.in_range_rate.mean, b.urgency_scoring.in_range_rate.mean),
+    scam_detection: compareMetric(a.scam_detection.accuracy.mean, b.scam_detection.accuracy.mean),
+  };
+
+  // JSON health comparison
+  const jsonComparison = {
+    clean_parse_rate: compareMetric(a.json_health.clean_parse_rate.mean, b.json_health.clean_parse_rate.mean),
+    corrective_retry_rate: compareMetric(a.json_health.corrective_retry_rate.mean, b.json_health.corrective_retry_rate.mean),
+    total_failures: { a: a.json_health.total_failures, b: b.json_health.total_failures },
+  };
+
+  // Cost comparison
+  const costComparison = compareMetric(a.cost.avg_cost_per_thread, b.cost.avg_cost_per_thread);
+
+  // Find regressions: threads A caught but B missed
+  const aPerThread = new Map(a.per_thread.map((t) => [t.id, t]));
+  const bPerThread = new Map(b.per_thread.map((t) => [t.id, t]));
+  const newMissedDeals = [];
+  const newMissedScams = [];
+  const categoryRegressions = [];
+
+  for (const [id, at] of aPerThread) {
+    const bt = bPerThread.get(id);
+    if (!bt) continue
+    // A always caught it, B missed it at least once
+    if (at.detection_correct === at.total_runs && bt.detection_correct < bt.total_runs) {
+      if (at.expected.is_deal) newMissedDeals.push(id);
+    }
+    if (at.scam_correct === at.total_runs && bt.scam_correct < bt.total_runs) {
+      newMissedScams.push(id);
+    }
+    if (at.category_correct > bt.category_correct) {
+      categoryRegressions.push(id);
+    }
+  }
+
+  // Pass/fail verdict
+  const passFail = {
+    b_recall_above_95: b.detection.recall.mean >= THRESHOLDS.recall,
+    b_precision_above_40: b.detection.precision.mean >= THRESHOLDS.precision,
+    b_f2_above_baseline: b.detection.f2.mean >= a.detection.f2.mean,
+    b_consistency_within_3pct: b.detection.recall.stddev <= THRESHOLDS.consistency,
+    no_new_missed_deals: newMissedDeals.length === 0,
+    b_scam_no_regression: newMissedScams.length === 0,
+    b_category_no_regression: b.categorization.accuracy.mean >= a.categorization.accuracy.mean,
+  };
+  passFail.verdict = Object.entries(passFail)
+    .filter(([k]) => k !== 'verdict')
+    .every(([, v]) => v === true)
+    ? 'PASS'
+    : 'FAIL';
+
+  const result = {
+    variant_a: { model: a.model, runs: a.runs, successful_runs: a.successful_runs },
+    variant_b: { model: b.model, runs: b.runs, successful_runs: b.successful_runs },
+    comparison,
+    json_health: jsonComparison,
+    cost: costComparison,
+    consistency: {
+      a_recall_stddev: a.detection.recall.stddev,
+      b_recall_stddev: b.detection.recall.stddev,
+    },
+    regressions: {
+      new_missed_deals: newMissedDeals,
+      new_missed_scams: newMissedScams,
+      category_regressions: categoryRegressions,
+    },
+    pass_fail: passFail,
+  };
+
+  console.log(`[eval-compare] verdict: ${passFail.verdict}`);
+  console.log(`[eval-compare] recall: ${comparison.recall.a} → ${comparison.recall.b} (${comparison.recall.delta > 0 ? '+' : ''}${comparison.recall.delta})`);
+  console.log(`[eval-compare] precision: ${comparison.precision.a} → ${comparison.precision.b} (${comparison.precision.delta > 0 ? '+' : ''}${comparison.precision.delta})`);
+  console.log(`[eval-compare] f2: ${comparison.f2.a} → ${comparison.f2.b} (${comparison.f2.delta > 0 ? '+' : ''}${comparison.f2.delta})`);
+  if (newMissedDeals.length > 0) console.log(`[eval-compare] NEW MISSED DEALS: ${newMissedDeals.join(', ')}`);
+
+  return result
+}
+
 const COMMANDS = {
   dispatch: runDispatch,
   'sxt-execute': runSxtQuery,
@@ -35503,6 +38232,8 @@ const COMMANDS = {
   'update-deal-states': runUpdateDealStates,
   'sync-deal-states': runSyncDealStates,
   'dispatch-deal-state-sync': runDispatchDealStateSync,
+  'eval': runEval,
+  'eval-compare': runEvalCompare,
 };
 
 async function run() {

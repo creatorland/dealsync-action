@@ -51,6 +51,14 @@ jest.unstable_mockModule('../src/commands/update-deal-states.js', () => ({
   runUpdateDealStates: jest.fn().mockResolvedValue({ deal: 0, not_deal: 0 }),
 }))
 
+jest.unstable_mockModule('../src/commands/eval.js', () => ({
+  runEval: jest.fn().mockResolvedValue({ detection: {}, runs: 1 }),
+}))
+
+jest.unstable_mockModule('../src/commands/eval-compare.js', () => ({
+  runEvalCompare: jest.fn().mockResolvedValue({ verdict: 'PASS' }),
+}))
+
 const core = await import('@actions/core')
 const { run } = await import('../src/main.js')
 

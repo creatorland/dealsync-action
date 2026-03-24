@@ -70,6 +70,16 @@ inputs:
   limit:
     description: 'Limit for paginated queries (sync-deal-states)'
     default: '500'
+  runs:
+    description: 'Number of evaluation runs (eval)'
+    default: '10'
+  temperature:
+    description: 'AI temperature (eval)'
+    default: '0'
+  result-a:
+    description: 'JSON result from eval variant A (eval-compare)'
+  result-b:
+    description: 'JSON result from eval variant B (eval-compare)'
 
 outputs:
   success:
