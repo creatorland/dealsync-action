@@ -141,7 +141,7 @@ export async function runFetchAndFilter() {
       const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, syncStateId, messageIds: chunk }),
+        body: JSON.stringify({ userId, ...(syncStateId ? { syncStateId } : {}), messageIds: chunk }),
         signal,
       })
       clear()
