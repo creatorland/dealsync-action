@@ -79,6 +79,10 @@ export async function runFetchAndFilter() {
     }
   }
 
+  if (allEmails.length === 0 && metadataRows.length > 0) {
+    throw new Error(`all content fetches failed — 0/${metadataRows.length} emails retrieved`)
+  }
+
   console.log(`[fetch-and-filter] fetched ${allEmails.length} emails, applying filter rules`)
 
   // 4. Apply filter rules
