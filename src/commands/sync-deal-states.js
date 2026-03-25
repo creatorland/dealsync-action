@@ -1,4 +1,4 @@
-import { uuidv7 } from 'uuidv7'
+import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { sanitizeSchema, sanitizeId } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'

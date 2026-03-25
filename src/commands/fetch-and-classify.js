@@ -1,4 +1,4 @@
-import { uuidv7 } from 'uuidv7'
+import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { buildPrompt } from '../lib/build-prompt.js'
 import { callModel, parseAndValidate, VALID_CATEGORIES, VALID_DEAL_TYPES } from '../lib/ai-client.js'
