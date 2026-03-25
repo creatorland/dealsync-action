@@ -29,13 +29,13 @@ export async function runUpdateDealStates() {
   const audits = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId))
   if (audits.length === 0 || !audits[0].AI_EVALUATION) {
     console.log('[update-states] no audit found — skipping')
-    return { updated: 0 }
+    return { deal: 0, not_deal: 0 }
   }
 
   const aiOutput = JSON.parse(audits[0].AI_EVALUATION)
   const threads = aiOutput.threads || []
 
-  // Get metadata to map thread → email_metadata_ids
+  // Get metadata to map thread → email_metadata_ids (by batch_id)
   const metadataRows = await executeSql(apiUrl, jwt, biscuit,
     `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`)
 

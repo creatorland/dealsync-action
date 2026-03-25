@@ -27258,6 +27258,105 @@ function requireCore () {
 
 var coreExports = requireCore();
 
+const byteToHex = [];
+for (let i = 0; i < 256; ++i) {
+    byteToHex.push((i + 0x100).toString(16).slice(1));
+}
+function unsafeStringify(arr, offset = 0) {
+    return (byteToHex[arr[offset + 0]] +
+        byteToHex[arr[offset + 1]] +
+        byteToHex[arr[offset + 2]] +
+        byteToHex[arr[offset + 3]] +
+        '-' +
+        byteToHex[arr[offset + 4]] +
+        byteToHex[arr[offset + 5]] +
+        '-' +
+        byteToHex[arr[offset + 6]] +
+        byteToHex[arr[offset + 7]] +
+        '-' +
+        byteToHex[arr[offset + 8]] +
+        byteToHex[arr[offset + 9]] +
+        '-' +
+        byteToHex[arr[offset + 10]] +
+        byteToHex[arr[offset + 11]] +
+        byteToHex[arr[offset + 12]] +
+        byteToHex[arr[offset + 13]] +
+        byteToHex[arr[offset + 14]] +
+        byteToHex[arr[offset + 15]]).toLowerCase();
+}
+
+let getRandomValues;
+const rnds8 = new Uint8Array(16);
+function rng() {
+    if (!getRandomValues) {
+        if (typeof crypto === 'undefined' || !crypto.getRandomValues) {
+            throw new Error('crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported');
+        }
+        getRandomValues = crypto.getRandomValues.bind(crypto);
+    }
+    return getRandomValues(rnds8);
+}
+
+const _state = {};
+function v7(options, buf, offset) {
+    let bytes;
+    {
+        const now = Date.now();
+        const rnds = rng();
+        updateV7State(_state, now, rnds);
+        bytes = v7Bytes(rnds, _state.msecs, _state.seq, buf, offset);
+    }
+    return unsafeStringify(bytes);
+}
+function updateV7State(state, now, rnds) {
+    state.msecs ??= -Infinity;
+    state.seq ??= 0;
+    if (now > state.msecs) {
+        state.seq = (rnds[6] << 23) | (rnds[7] << 16) | (rnds[8] << 8) | rnds[9];
+        state.msecs = now;
+    }
+    else {
+        state.seq = (state.seq + 1) | 0;
+        if (state.seq === 0) {
+            state.msecs++;
+        }
+    }
+    return state;
+}
+function v7Bytes(rnds, msecs, seq, buf, offset = 0) {
+    if (rnds.length < 16) {
+        throw new Error('Random bytes length must be >= 16');
+    }
+    if (!buf) {
+        buf = new Uint8Array(16);
+        offset = 0;
+    }
+    else {
+        if (offset < 0 || offset + 16 > buf.length) {
+            throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
+        }
+    }
+    msecs ??= Date.now();
+    seq ??= ((rnds[6] * 0x7f) << 24) | (rnds[7] << 16) | (rnds[8] << 8) | rnds[9];
+    buf[offset++] = (msecs / 0x10000000000) & 0xff;
+    buf[offset++] = (msecs / 0x100000000) & 0xff;
+    buf[offset++] = (msecs / 0x1000000) & 0xff;
+    buf[offset++] = (msecs / 0x10000) & 0xff;
+    buf[offset++] = (msecs / 0x100) & 0xff;
+    buf[offset++] = msecs & 0xff;
+    buf[offset++] = 0x70 | ((seq >>> 28) & 0x0f);
+    buf[offset++] = (seq >>> 20) & 0xff;
+    buf[offset++] = 0x80 | ((seq >>> 14) & 0x3f);
+    buf[offset++] = (seq >>> 6) & 0xff;
+    buf[offset++] = ((seq << 2) & 0xff) | (rnds[10] & 0x03);
+    buf[offset++] = rnds[11];
+    buf[offset++] = rnds[12];
+    buf[offset++] = rnds[13];
+    buf[offset++] = rnds[14];
+    buf[offset++] = rnds[15];
+    return buf;
+}
+
 /**
  * Shared SQL queries for Dealsync W3 workflow actions.
  *
@@ -27269,7 +27368,6 @@ var coreExports = requireCore();
  * Status-based state machine:
  *   pending → filtering → pending_classification → classifying → deal | not_deal
  *   filtering → filter_rejected (terminal)
- *   filtering/classifying → retry via attempts increment
  */
 
 // ============================================================
@@ -27277,80 +27375,8 @@ var coreExports = requireCore();
 // ============================================================
 
 const STATUS = {
-  PENDING: 'pending',
-  FILTERING: 'filtering',
-  PENDING_CLASSIFICATION: 'pending_classification',
-  CLASSIFYING: 'classifying',
   DEAL: 'deal',
   NOT_DEAL: 'not_deal'};
-
-// ============================================================
-// ORCHESTRATOR QUERIES
-// ============================================================
-
-const orchestrator = {
-  /** Find stuck batches that can be retried.
-   *  - Batch must be stuck > staleMinutes
-   *  - Retrigger count < maxRetriggers (dead letter if exceeded)
-   *  - Last event must be > cooldownMinutes ago (prevents spam retriggers) */
-  findStuckBatches: (schema, staleMinutes = 10, maxRetriggers = 3, cooldownMinutes = 5) =>
-    `SELECT ds.BATCH_ID,
-      CASE WHEN ds.STATUS = '${STATUS.FILTERING}' THEN 'filter' ELSE 'classify' END AS BATCH_TYPE
-    FROM ${schema}.DEAL_STATES ds
-    LEFT JOIN ${schema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID AND be.EVENT_TYPE = 'retrigger'
-    WHERE ds.STATUS IN ('${STATUS.FILTERING}', '${STATUS.CLASSIFYING}')
-    AND ds.BATCH_ID IS NOT NULL
-    AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${staleMinutes}' MINUTE
-    AND NOT EXISTS (
-      SELECT 1 FROM ${schema}.BATCH_EVENTS recent
-      WHERE recent.BATCH_ID = ds.BATCH_ID
-      AND recent.CREATED_AT > CURRENT_TIMESTAMP - INTERVAL '${cooldownMinutes}' MINUTE
-    )
-    GROUP BY ds.BATCH_ID, ds.STATUS
-    HAVING COUNT(be.TRIGGER_HASH) < ${maxRetriggers}`,
-};
-
-// ============================================================
-// DISPATCH QUERIES
-// ============================================================
-
-const dispatch = {
-  /** Atomically claim pending deal_states into filtering with a trigger hash */
-  claimFilterBatch: (schema, batchId, batchSize) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTERING}', BATCH_ID = '${batchId}'
-    WHERE EMAIL_METADATA_ID IN (
-      SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}' LIMIT ${batchSize}
-    )`,
-
-  /** Atomically claim pending_classification deal_states into classifying (sync-level + thread-level guard) */
-  /** Claim by thread — batchSize = max threads, claims ALL emails in those threads.
-   *  Thread is eligible only if ALL its emails in the same sync are done filtering. */
-  claimClassifyBatch: (schema, batchId, batchSize) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.CLASSIFYING}', BATCH_ID = '${batchId}'
-    WHERE THREAD_ID IN (
-      SELECT DISTINCT ds.THREAD_ID FROM ${schema}.DEAL_STATES ds
-      WHERE ds.STATUS = '${STATUS.PENDING_CLASSIFICATION}'
-        AND NOT EXISTS (
-          SELECT 1 FROM ${schema}.DEAL_STATES ds2
-          WHERE ds2.THREAD_ID = ds.THREAD_ID
-            AND ds2.SYNC_STATE_ID = ds.SYNC_STATE_ID
-            AND ds2.STATUS IN ('${STATUS.PENDING}', '${STATUS.FILTERING}')
-        )
-      LIMIT ${batchSize}
-    ) AND STATUS = '${STATUS.PENDING_CLASSIFICATION}'`,
-
-  /** Count deal_states claimed by a trigger hash (verify claim) */
-  countClaimed: (schema, batchId) =>
-    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
-
-  /** Count total in-flight deal_states at a given status */
-  countInFlight: (schema, status) =>
-    `SELECT COUNT(*) AS CNT FROM ${schema}.DEAL_STATES WHERE STATUS = '${status}'`,
-
-  /** Reset claimed deal_states back to original status on trigger failure */
-  resetClaimed: (schema, batchId, resetStatus) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${resetStatus}', BATCH_ID = NULL WHERE BATCH_ID = '${batchId}'`,
-};
 
 // ============================================================
 // DETECTION PROCESSOR QUERIES
@@ -27384,68 +27410,6 @@ const saveResults = {
       (ID, BATCH_ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT)
     VALUES
       ('${id}', '${batchId}', ${threadCount}, ${emailCount}, ${cost}, ${inputTokens}, ${outputTokens}, '${model}', '${evaluation}', CURRENT_TIMESTAMP)`,
-
-  /** Upsert thread evaluation — ON CONFLICT updates existing */
-  upsertThreadEvaluation: (
-    schema,
-    { id, threadId, auditId, category, summary, isDeal, likelyScam, score },
-  ) =>
-    `INSERT INTO ${schema}.EMAIL_THREAD_EVALUATIONS
-      (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT)
-    VALUES
-      ('${id}', '${threadId}', '${auditId}', '${category}', '${summary}', ${isDeal}, ${likelyScam}, ${score}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    ON CONFLICT (THREAD_ID) DO UPDATE SET
-      AI_EVALUATION_AUDIT_ID = EXCLUDED.AI_EVALUATION_AUDIT_ID,
-      AI_INSIGHT = EXCLUDED.AI_INSIGHT,
-      AI_SUMMARY = EXCLUDED.AI_SUMMARY,
-      IS_DEAL = EXCLUDED.IS_DEAL,
-      LIKELY_SCAM = EXCLUDED.LIKELY_SCAM,
-      AI_SCORE = EXCLUDED.AI_SCORE,
-      UPDATED_AT = CURRENT_TIMESTAMP`,
-
-  /** Upsert deal — one deal per thread, ON CONFLICT updates existing */
-  upsertDeal: (
-    schema,
-    { id, userId, threadId, evalId, dealName, dealType, category, value, currency, brand },
-  ) =>
-    `INSERT INTO ${schema}.DEALS
-      (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT)
-    VALUES
-      ('${id}', '${userId}', '${threadId}', '${evalId}', '${dealName}', '${dealType}', '${category}', ${value}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-    ON CONFLICT (THREAD_ID) DO UPDATE SET
-      EMAIL_THREAD_EVALUATION_ID = EXCLUDED.EMAIL_THREAD_EVALUATION_ID,
-      DEAL_NAME = EXCLUDED.DEAL_NAME,
-      DEAL_TYPE = EXCLUDED.DEAL_TYPE,
-      CATEGORY = EXCLUDED.CATEGORY,
-      VALUE = EXCLUDED.VALUE,
-      CURRENCY = EXCLUDED.CURRENCY,
-      BRAND = EXCLUDED.BRAND,
-      UPDATED_AT = CURRENT_TIMESTAMP`,
-
-  /** Delete deal by thread_id (for removing deals when reclassified as not_deal) */
-  deleteDeal: (schema, threadId) =>
-    `DELETE FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}'`,
-
-  /** Delete deal contacts by thread_id (via deals table) — correct for re-classification */
-  deleteDealContactByThread: (schema, threadId) =>
-    `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}')`,
-
-  /** Insert deal contact — stores email in CONTACT_ID field */
-  insertDealContact: (schema, { id, dealId, contactEmail }) =>
-    `INSERT INTO ${schema}.DEAL_CONTACTS
-      (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, CREATED_AT, UPDATED_AT)
-    VALUES
-      ('${id}', '${dealId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-};
-
-// ============================================================
-// BATCH EVENTS (append-only audit log)
-// ============================================================
-
-const batchEvents = {
-  /** Insert one or more batch events. Values is a pre-built VALUES string. */
-  insert: (schema, valuesStr) =>
-    `INSERT INTO ${schema}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ${valuesStr}`,
 };
 
 // ============================================================
@@ -27618,370 +27582,6 @@ async function executeSql(apiUrl, jwt, biscuit, sql) {
   } finally {
     clear();
   }
-}
-
-function sleep$1(ms) {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
-function parseNonNegativeInt$1(value, name) {
-  const n = parseInt(value, 10);
-  if (isNaN(n) || n < 0) throw new Error(`${name} must be non-negative integer, got: ${value}`)
-  return n
-}
-
-function generateBatchId() {
-  const now = Date.now();
-  const hex = (n, len) => n.toString(16).padStart(len, '0');
-  const rand = () => Math.floor(Math.random() * 0x10000).toString(16).padStart(4, '0');
-  const ts = hex(now, 12);
-  const ver = '7' + rand().slice(1);
-  const variant = (0x8 | (Math.random() * 4) | 0).toString(16) + rand().slice(1);
-  return `${ts.slice(0, 8)}-${ts.slice(8, 12)}-${ver}-${variant}-${rand()}${rand()}${rand()}`
-}
-
-async function claimFilter(apiUrl, jwt, biscuit, schema, batchSize, maxInFlight) {
-  const batchId = generateBatchId();
-  await executeSql(apiUrl, jwt, biscuit, dispatch.claimFilterBatch(schema, batchId, batchSize));
-  const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, batchId));
-  const claimed = rows[0]?.CNT ?? 0;
-  if (claimed === 0) return null
-
-  const inflight = await executeSql(apiUrl, jwt, biscuit, dispatch.countInFlight(schema, STATUS.FILTERING));
-  if ((inflight[0]?.CNT ?? 0) > maxInFlight) {
-    await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING));
-    return null
-  }
-
-  return { batchId, claimed }
-}
-
-async function claimClassify(apiUrl, jwt, biscuit, schema, batchSize, maxInFlight) {
-  const batchId = generateBatchId();
-  await executeSql(apiUrl, jwt, biscuit, dispatch.claimClassifyBatch(schema, batchId, batchSize));
-  const rows = await executeSql(apiUrl, jwt, biscuit, dispatch.countClaimed(schema, batchId));
-  const claimed = rows[0]?.CNT ?? 0;
-  if (claimed === 0) return null
-
-  const inflight = await executeSql(apiUrl, jwt, biscuit, dispatch.countInFlight(schema, STATUS.CLASSIFYING));
-  if ((inflight[0]?.CNT ?? 0) > maxInFlight) {
-    await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, batchId, STATUS.PENDING_CLASSIFICATION));
-    return null
-  }
-
-  return { batchId, claimed }
-}
-
-/**
- * Dispatch new batches only. Stuck batch retriggering is handled by retrigger-stuck command.
- */
-async function runDispatch() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const w3RpcUrl = coreExports.getInput('w3-rpc-url');
-  const processorName = coreExports.getInput('processor-name') || 'Dealsync Processor';
-
-  const maxFilter = parseNonNegativeInt$1(coreExports.getInput('max-filter') || '30000', 'max-filter');
-  const maxClassify = parseNonNegativeInt$1(coreExports.getInput('max-classify') || '750', 'max-classify');
-  const filterBatchSize = parseNonNegativeInt$1(coreExports.getInput('filter-batch-size') || '200', 'filter-batch-size');
-  const classifyBatchSize = parseNonNegativeInt$1(coreExports.getInput('classify-batch-size') || '5', 'classify-batch-size');
-
-  console.log('[dispatch] Authenticating...');
-  const jwt = await authenticate(authUrl, authSecret);
-
-  let dispatchedFilter = 0;
-  let dispatchedClassify = 0;
-  let filterExhausted = false;
-  let classifyExhausted = false;
-
-  while (!filterExhausted || !classifyExhausted) {
-    let filterBatch = null;
-    let classifyBatch = null;
-
-    if (!filterExhausted) {
-      filterBatch = await claimFilter(apiUrl, jwt, biscuit, schema, filterBatchSize, maxFilter);
-      if (!filterBatch) filterExhausted = true;
-    }
-
-    if (!classifyExhausted) {
-      classifyBatch = await claimClassify(apiUrl, jwt, biscuit, schema, classifyBatchSize, maxClassify);
-      if (!classifyBatch) classifyExhausted = true;
-    }
-
-    if (!filterBatch && !classifyBatch) break
-
-    const inputs = {};
-    if (filterBatch) inputs.filter_batch_id = filterBatch.batchId;
-    if (classifyBatch) inputs.classify_batch_id = classifyBatch.batchId;
-
-    try {
-      const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
-      const resp = await fetch(triggerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputs }),
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      const triggerResult = await resp.json();
-      const triggerHash = triggerResult.triggerHash || '';
-
-      // Log batch events
-      const eventValues = [];
-      if (filterBatch) {
-        eventValues.push(`('${triggerHash}', '${filterBatch.batchId}', 'filter', 'new', CURRENT_TIMESTAMP)`);
-        dispatchedFilter++;
-        console.log(`[dispatch] Filter: ${filterBatch.batchId} (${filterBatch.claimed} emails) trigger=${triggerHash.substring(0, 16)}`);
-      }
-      if (classifyBatch) {
-        eventValues.push(`('${triggerHash}', '${classifyBatch.batchId}', 'classify', 'new', CURRENT_TIMESTAMP)`);
-        dispatchedClassify++;
-        console.log(`[dispatch] Classify: ${classifyBatch.batchId} (${classifyBatch.claimed} emails) trigger=${triggerHash.substring(0, 16)}`);
-      }
-      if (eventValues.length > 0) {
-        try {
-          await executeSql(apiUrl, jwt, biscuit, batchEvents.insert(schema, eventValues.join(', ')));
-        } catch (e) {
-          console.log(`[dispatch] batch_events insert failed: ${e.message.substring(0, 80)}`);
-        }
-      }
-    } catch (err) {
-      console.log(`[dispatch] Trigger failed: ${err.message}`);
-      if (filterBatch) {
-        await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, filterBatch.batchId, STATUS.PENDING));
-      }
-      if (classifyBatch) {
-        await executeSql(apiUrl, jwt, biscuit, dispatch.resetClaimed(schema, classifyBatch.batchId, STATUS.PENDING_CLASSIFICATION));
-      }
-      break
-    }
-
-    await sleep$1(100);
-  }
-
-  console.log(`[dispatch] Done: ${dispatchedFilter} filter, ${dispatchedClassify} classify`);
-  return { dispatched_filter_count: dispatchedFilter, dispatched_classify_count: dispatchedClassify }
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
-function parseNonNegativeInt(value, name) {
-  const n = parseInt(value, 10);
-  if (isNaN(n) || n < 0) throw new Error(`${name} must be non-negative integer, got: ${value}`)
-  return n
-}
-
-/**
- * Dispatch deal-state worker workflows.
- *
- * Counts emails in EMAIL_METADATA that have no corresponding DEAL_STATES row,
- * calculates how many worker batches are needed, and triggers each via W3 JSON-RPC.
- */
-async function runDispatchDealStateSync() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const emailCoreSchema = sanitizeSchema(coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING');
-  const w3RpcUrl = coreExports.getInput('w3-rpc-url');
-  const syncWorkflowName = coreExports.getInput('sync-workflow-name');
-  const batchSize = parseNonNegativeInt(
-    coreExports.getInput('deal-state-batch-size') || '500',
-    'deal-state-batch-size',
-  );
-  const maxEmails = parseNonNegativeInt(
-    coreExports.getInput('deal-state-max-emails') || '5000',
-    'deal-state-max-emails',
-  );
-
-  console.log('[dispatch-deal-state-sync] Authenticating...');
-  const jwt = await authenticate(authUrl, authSecret);
-
-  // Count emails without deal_states
-  const countSql = `SELECT COUNT(*) AS CNT FROM ${emailCoreSchema}.EMAIL_METADATA em WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID)`;
-  const rows = await executeSql(apiUrl, jwt, biscuit, countSql);
-  const diffCount = rows[0]?.CNT ?? 0;
-
-  console.log(`[dispatch-deal-state-sync] ${diffCount} emails without deal_states`);
-
-  if (diffCount === 0) {
-    console.log('[dispatch-deal-state-sync] Nothing to dispatch');
-    return { workers_triggered: 0, total_emails: 0 }
-  }
-
-  const emailsToProcess = Math.min(diffCount, maxEmails);
-  const numWorkers = Math.ceil(emailsToProcess / batchSize);
-
-  console.log(
-    `[dispatch-deal-state-sync] Dispatching ${numWorkers} worker(s) for ${emailsToProcess} emails (batch=${batchSize})`,
-  );
-
-  let workersTriggered = 0;
-  for (let i = 0; i < numWorkers; i++) {
-    const offset = i * batchSize;
-    const limit = batchSize;
-
-    const inputs = { offset: String(offset), limit: String(limit) };
-    const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(syncWorkflowName)}/trigger`;
-    const MAX_TRIGGER_RETRIES = 3;
-
-    let triggered = false;
-    for (let attempt = 0; attempt <= MAX_TRIGGER_RETRIES; attempt++) {
-      try {
-        const resp = await fetch(triggerUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ inputs }),
-        });
-        if (!resp.ok) {
-          const body = await resp.text();
-          if (attempt < MAX_TRIGGER_RETRIES) {
-            const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
-            console.warn(
-              `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers} HTTP ${resp.status} (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}), retrying in ${delay}ms`,
-            );
-            await sleep(delay);
-            continue
-          }
-          throw new Error(`HTTP ${resp.status}: ${body}`)
-        }
-        const result = await resp.json();
-        const triggerHash = result.triggerHash || '';
-
-        workersTriggered++;
-        triggered = true;
-        console.log(
-          `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers}: offset=${offset} limit=${limit} trigger=${triggerHash.substring(0, 16)}`,
-        );
-        break
-      } catch (err) {
-        if (attempt < MAX_TRIGGER_RETRIES) {
-          const delay = Math.min(1000 * Math.pow(2, attempt), 30000);
-          console.warn(
-            `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers} error (attempt ${attempt + 1}/${MAX_TRIGGER_RETRIES + 1}): ${err.message}, retrying in ${delay}ms`,
-          );
-          await sleep(delay);
-        } else {
-          console.warn(
-            `[dispatch-deal-state-sync] Worker ${i + 1}/${numWorkers} failed after ${MAX_TRIGGER_RETRIES + 1} attempts: ${err.message}`,
-          );
-        }
-      }
-    }
-
-    if (triggered && i < numWorkers - 1) {
-      await sleep(100);
-    }
-  }
-
-  console.log(
-    `[dispatch-deal-state-sync] Done: ${workersTriggered}/${numWorkers} workers triggered for ${emailsToProcess} emails`,
-  );
-  return { workers_triggered: workersTriggered, total_emails: emailsToProcess }
-}
-
-const byteToHex = [];
-for (let i = 0; i < 256; ++i) {
-    byteToHex.push((i + 0x100).toString(16).slice(1));
-}
-function unsafeStringify(arr, offset = 0) {
-    return (byteToHex[arr[offset + 0]] +
-        byteToHex[arr[offset + 1]] +
-        byteToHex[arr[offset + 2]] +
-        byteToHex[arr[offset + 3]] +
-        '-' +
-        byteToHex[arr[offset + 4]] +
-        byteToHex[arr[offset + 5]] +
-        '-' +
-        byteToHex[arr[offset + 6]] +
-        byteToHex[arr[offset + 7]] +
-        '-' +
-        byteToHex[arr[offset + 8]] +
-        byteToHex[arr[offset + 9]] +
-        '-' +
-        byteToHex[arr[offset + 10]] +
-        byteToHex[arr[offset + 11]] +
-        byteToHex[arr[offset + 12]] +
-        byteToHex[arr[offset + 13]] +
-        byteToHex[arr[offset + 14]] +
-        byteToHex[arr[offset + 15]]).toLowerCase();
-}
-
-let getRandomValues;
-const rnds8 = new Uint8Array(16);
-function rng() {
-    if (!getRandomValues) {
-        if (typeof crypto === 'undefined' || !crypto.getRandomValues) {
-            throw new Error('crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported');
-        }
-        getRandomValues = crypto.getRandomValues.bind(crypto);
-    }
-    return getRandomValues(rnds8);
-}
-
-const _state = {};
-function v7(options, buf, offset) {
-    let bytes;
-    {
-        const now = Date.now();
-        const rnds = rng();
-        updateV7State(_state, now, rnds);
-        bytes = v7Bytes(rnds, _state.msecs, _state.seq, buf, offset);
-    }
-    return unsafeStringify(bytes);
-}
-function updateV7State(state, now, rnds) {
-    state.msecs ??= -Infinity;
-    state.seq ??= 0;
-    if (now > state.msecs) {
-        state.seq = (rnds[6] << 23) | (rnds[7] << 16) | (rnds[8] << 8) | rnds[9];
-        state.msecs = now;
-    }
-    else {
-        state.seq = (state.seq + 1) | 0;
-        if (state.seq === 0) {
-            state.msecs++;
-        }
-    }
-    return state;
-}
-function v7Bytes(rnds, msecs, seq, buf, offset = 0) {
-    if (rnds.length < 16) {
-        throw new Error('Random bytes length must be >= 16');
-    }
-    if (!buf) {
-        buf = new Uint8Array(16);
-        offset = 0;
-    }
-    else {
-        if (offset < 0 || offset + 16 > buf.length) {
-            throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
-        }
-    }
-    msecs ??= Date.now();
-    seq ??= ((rnds[6] * 0x7f) << 24) | (rnds[7] << 16) | (rnds[8] << 8) | rnds[9];
-    buf[offset++] = (msecs / 0x10000000000) & 0xff;
-    buf[offset++] = (msecs / 0x100000000) & 0xff;
-    buf[offset++] = (msecs / 0x1000000) & 0xff;
-    buf[offset++] = (msecs / 0x10000) & 0xff;
-    buf[offset++] = (msecs / 0x100) & 0xff;
-    buf[offset++] = msecs & 0xff;
-    buf[offset++] = 0x70 | ((seq >>> 28) & 0x0f);
-    buf[offset++] = (seq >>> 20) & 0xff;
-    buf[offset++] = 0x80 | ((seq >>> 14) & 0x3f);
-    buf[offset++] = (seq >>> 6) & 0xff;
-    buf[offset++] = ((seq << 2) & 0xff) | (rnds[10] & 0x03);
-    buf[offset++] = rnds[11];
-    buf[offset++] = rnds[12];
-    buf[offset++] = rnds[13];
-    buf[offset++] = rnds[14];
-    buf[offset++] = rnds[15];
-    return buf;
 }
 
 /**
@@ -35351,70 +34951,6 @@ async function runFetchAndFilter() {
 }
 
 /**
- * Find stuck batches (>10min, attempts<3) and retrigger them.
- * The processor resumes from audit checkpoint — no status reset needed.
- */
-async function runRetriggerStuck() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const w3RpcUrl = coreExports.getInput('w3-rpc-url');
-  const processorName = coreExports.getInput('processor-name') || 'Dealsync Processor';
-
-  console.log('[retrigger] checking for stuck batches...');
-  const jwt = await authenticate(authUrl, authSecret);
-
-  const stuckBatches = await executeSql(apiUrl, jwt, biscuit, orchestrator.findStuckBatches(schema));
-
-  if (stuckBatches.length === 0) {
-    console.log('[retrigger] no stuck batches');
-    return { retriggered: 0 }
-  }
-
-  console.log(`[retrigger] found ${stuckBatches.length} stuck batch(es)`);
-
-  let retriggered = 0;
-  for (const stuck of stuckBatches) {
-    const inputs = {};
-    if (stuck.BATCH_TYPE === 'filter') {
-      inputs.filter_batch_id = stuck.BATCH_ID;
-    } else {
-      inputs.classify_batch_id = stuck.BATCH_ID;
-    }
-
-    try {
-      const triggerUrl = `${w3RpcUrl}/workflow/${encodeURIComponent(processorName)}/trigger`;
-      const resp = await fetch(triggerUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputs }),
-      });
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      const triggerResult = await resp.json();
-      const triggerHash = triggerResult.triggerHash || '';
-
-      // Log retrigger event
-      try {
-        await executeSql(apiUrl, jwt, biscuit,
-          batchEvents.insert(schema, `('${triggerHash}', '${stuck.BATCH_ID}', '${stuck.BATCH_TYPE}', 'retrigger', CURRENT_TIMESTAMP)`));
-      } catch (e) {
-        console.log(`[retrigger] batch_events insert failed: ${e.message.substring(0, 80)}`);
-      }
-
-      retriggered++;
-      console.log(`[retrigger] ${stuck.BATCH_TYPE}: ${stuck.BATCH_ID} trigger=${triggerHash.substring(0, 16)}`);
-    } catch (err) {
-      console.log(`[retrigger] failed ${stuck.BATCH_ID}: ${err.message}`);
-    }
-  }
-
-  console.log(`[retrigger] done: ${retriggered}/${stuckBatches.length}`);
-  return { retriggered, total: stuckBatches.length }
-}
-
-/**
  * Save deal contacts with enrichment data from AI evaluation.
  * Reads audit by batch_id, looks up deals by thread_id,
  * then inserts deal_contacts with enrichment from main_contact.
@@ -35696,13 +35232,13 @@ async function runUpdateDealStates() {
   const audits = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId));
   if (audits.length === 0 || !audits[0].AI_EVALUATION) {
     console.log('[update-states] no audit found — skipping');
-    return { updated: 0 }
+    return { deal: 0, not_deal: 0 }
   }
 
   const aiOutput = JSON.parse(audits[0].AI_EVALUATION);
   const threads = aiOutput.threads || [];
 
-  // Get metadata to map thread → email_metadata_ids
+  // Get metadata to map thread → email_metadata_ids (by batch_id)
   const metadataRows = await executeSql(apiUrl, jwt, biscuit,
     `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`);
 
@@ -38602,17 +38138,14 @@ async function runEvalCompare() {
 }
 
 const COMMANDS = {
-  dispatch: runDispatch,
   'sxt-execute': runSxtQuery,
   'fetch-and-filter': runFetchAndFilter,
-  'retrigger-stuck': runRetriggerStuck,
   'fetch-and-classify': runFetchAndClassify,
   'save-evals': runSaveEvals,
   'save-deal-contacts': runSaveDealContacts,
   'save-deals': runSaveDeals,
   'update-deal-states': runUpdateDealStates,
   'sync-deal-states': runSyncDealStates,
-  'dispatch-deal-state-sync': runDispatchDealStateSync,
   'eval': runEval,
   'eval-compare': runEvalCompare,
 };
