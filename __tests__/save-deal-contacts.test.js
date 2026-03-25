@@ -55,6 +55,10 @@ function makeAudit(threads) {
   return [{ AI_EVALUATION: JSON.stringify({ threads }) }]
 }
 
+function makeDeals(threadDealPairs) {
+  return threadDealPairs.map(([threadId, dealId]) => ({ THREAD_ID: threadId, ID: dealId }))
+}
+
 describe('save-deal-contacts command', () => {
   let fetchSpy
 
@@ -89,17 +93,18 @@ describe('save-deal-contacts command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // 1. auth
       .mockResolvedValueOnce(sxtResponse(makeAudit(threads))) // 2. getAuditByBatchId
-      .mockResolvedValueOnce(sxtResponse()) // 3. DELETE contacts
-      .mockResolvedValueOnce(sxtResponse()) // 4. INSERT contacts
+      .mockResolvedValueOnce(sxtResponse(makeDeals([['thread-abc', 'deal-001']]))) // 3. SELECT deals
+      .mockResolvedValueOnce(sxtResponse()) // 4. DELETE contacts
+      .mockResolvedValueOnce(sxtResponse()) // 5. INSERT contacts
 
     const result = await runSaveDealContacts()
 
     expect(result.contacts_created).toBe(1)
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    expect(sqlCalls).toHaveLength(3) // audit read + delete + insert
+    expect(sqlCalls).toHaveLength(4) // audit + deals lookup + delete + insert
 
-    const insertSql = getSqlText(sqlCalls[2])
+    const insertSql = getSqlText(sqlCalls[3])
     expect(insertSql).toContain('INSERT INTO')
     expect(insertSql).toContain('DEAL_CONTACTS')
     expect(insertSql).toContain('NAME')
@@ -112,6 +117,9 @@ describe('save-deal-contacts command', () => {
     expect(insertSql).toContain('Beauty Brand X')
     expect(insertSql).toContain('Partnerships Manager')
     expect(insertSql).toContain('+1-555-0100')
+    // Uses literal deal ID, no subquery
+    expect(insertSql).toContain('deal-001')
+    expect(insertSql).not.toContain('SELECT ID FROM')
   })
 
   it('should skip contacts without email', async () => {
@@ -135,15 +143,14 @@ describe('save-deal-contacts command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // 1. auth
       .mockResolvedValueOnce(sxtResponse(makeAudit(threads))) // 2. getAuditByBatchId
-      .mockResolvedValueOnce(sxtResponse()) // 3. DELETE contacts
+      .mockResolvedValueOnce(sxtResponse(makeDeals([['thread-no-email', 'deal-a'], ['thread-no-contact', 'deal-b']]))) // 3. SELECT deals
+      .mockResolvedValueOnce(sxtResponse()) // 4. DELETE contacts
 
     const result = await runSaveDealContacts()
 
     expect(result.contacts_created).toBe(0)
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    // Should only have audit read + delete, no INSERT
-    expect(sqlCalls).toHaveLength(2)
     const contactInserts = sqlCalls.filter((c) => getSqlText(c).includes('INSERT') && getSqlText(c).includes('DEAL_CONTACTS'))
     expect(contactInserts).toHaveLength(0)
   })
@@ -169,8 +176,9 @@ describe('save-deal-contacts command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // 1. auth
       .mockResolvedValueOnce(sxtResponse(makeAudit(threads))) // 2. getAuditByBatchId
-      .mockResolvedValueOnce(sxtResponse()) // 3. DELETE contacts
-      .mockResolvedValueOnce(sxtResponse()) // 4. INSERT contacts
+      .mockResolvedValueOnce(sxtResponse(makeDeals([['thread-xyz', 'deal-xyz']]))) // 3. SELECT deals
+      .mockResolvedValueOnce(sxtResponse()) // 4. DELETE contacts
+      .mockResolvedValueOnce(sxtResponse()) // 5. INSERT contacts
 
     await runSaveDealContacts()
 
@@ -179,6 +187,11 @@ describe('save-deal-contacts command', () => {
     const insertIdx = sqlCalls.findIndex((c) => getSqlText(c).includes('INSERT') && getSqlText(c).includes('DEAL_CONTACTS'))
     expect(deleteIdx).toBeGreaterThanOrEqual(0)
     expect(insertIdx).toBeGreaterThan(deleteIdx)
+
+    // DELETE uses literal deal IDs, not subquery
+    const deleteSql = getSqlText(sqlCalls[deleteIdx])
+    expect(deleteSql).toContain('deal-xyz')
+    expect(deleteSql).not.toContain('SELECT ID FROM')
   })
 
   it('should return 0 when no audit found', async () => {
@@ -236,17 +249,49 @@ describe('save-deal-contacts command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // 1. auth
       .mockResolvedValueOnce(sxtResponse(makeAudit(threads))) // 2. getAuditByBatchId
-      .mockResolvedValueOnce(sxtResponse()) // 3. DELETE contacts
-      .mockResolvedValueOnce(sxtResponse()) // 4. INSERT contacts
+      .mockResolvedValueOnce(sxtResponse(makeDeals([['thread-001', 'deal-a'], ['thread-002', 'deal-b']]))) // 3. SELECT deals
+      .mockResolvedValueOnce(sxtResponse()) // 4. DELETE contacts
+      .mockResolvedValueOnce(sxtResponse()) // 5. INSERT contacts
 
     const result = await runSaveDealContacts()
 
     expect(result.contacts_created).toBe(2)
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    const insertSql = getSqlText(sqlCalls[2])
+    const insertSql = getSqlText(sqlCalls[3])
     expect(insertSql).toContain('alice@a.com')
     expect(insertSql).toContain('bob@b.com')
+  })
+
+  it('should skip contacts when deal not found for thread', async () => {
+    mockInputs()
+
+    const threads = [
+      {
+        thread_id: 'thread-has-deal',
+        is_deal: true,
+        deal_name: 'Deal OK',
+        main_contact: { name: 'Alice', email: 'alice@a.com', company: 'A Inc', title: 'VP', phone_number: null },
+      },
+      {
+        thread_id: 'thread-no-deal',
+        is_deal: true,
+        deal_name: 'Deal Missing',
+        main_contact: { name: 'Bob', email: 'bob@b.com', company: 'B Corp', title: 'CEO', phone_number: null },
+      },
+    ]
+
+    fetchSpy
+      .mockResolvedValueOnce(authResponse()) // 1. auth
+      .mockResolvedValueOnce(sxtResponse(makeAudit(threads))) // 2. getAuditByBatchId
+      .mockResolvedValueOnce(sxtResponse(makeDeals([['thread-has-deal', 'deal-ok']]))) // 3. SELECT deals (only one found)
+      .mockResolvedValueOnce(sxtResponse()) // 4. DELETE contacts
+      .mockResolvedValueOnce(sxtResponse()) // 5. INSERT contacts
+
+    const result = await runSaveDealContacts()
+
+    // Only 1 contact saved — the one with a deal
+    expect(result.contacts_created).toBe(1)
   })
 
   it('should throw on missing batch-id', async () => {
@@ -275,15 +320,16 @@ describe('save-deal-contacts command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // 1. auth
       .mockResolvedValueOnce(sxtResponse(makeAudit(threads))) // 2. getAuditByBatchId
-      .mockResolvedValueOnce(sxtResponse()) // 3. DELETE contacts
-      .mockResolvedValueOnce(sxtResponse()) // 4. INSERT contacts
+      .mockResolvedValueOnce(sxtResponse(makeDeals([['thread-quote', 'deal-quote']]))) // 3. SELECT deals
+      .mockResolvedValueOnce(sxtResponse()) // 4. DELETE contacts
+      .mockResolvedValueOnce(sxtResponse()) // 5. INSERT contacts
 
     const result = await runSaveDealContacts()
 
     expect(result.contacts_created).toBe(1)
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    const insertSql = getSqlText(sqlCalls[2])
+    const insertSql = getSqlText(sqlCalls[3])
     // Single quotes should be escaped as double single quotes
     expect(insertSql).toContain("O''Brien")
     expect(insertSql).toContain("Mc''Donald''s Inc")

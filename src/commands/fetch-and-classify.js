@@ -1,4 +1,4 @@
-import * as crypto from 'crypto'
+import { uuidv7 } from 'uuidv7'
 import * as core from '@actions/core'
 import { buildPrompt } from '../lib/build-prompt.js'
 import { callModel, parseAndValidate, VALID_CATEGORIES, VALID_DEAL_TYPES } from '../lib/ai-client.js'
@@ -195,7 +195,7 @@ export async function runFetchAndClassify() {
   const aiOutput = { threads }
 
   // Save audit checkpoint
-  const auditId = crypto.randomUUID()
+  const auditId = uuidv7()
   const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400))
   try {
     await executeSql(

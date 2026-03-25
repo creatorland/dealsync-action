@@ -1,4 +1,4 @@
-import * as crypto from 'crypto'
+import { uuidv7 } from 'uuidv7'
 import * as core from '@actions/core'
 import {
   sanitizeId,
@@ -71,7 +71,7 @@ export async function runSaveDeals() {
   const dealValues = dealThreads.map((thread) => {
     const threadId = sanitizeId(thread.thread_id)
     const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
-    const dealId = crypto.randomUUID()
+    const dealId = uuidv7()
     const dealName = sanitizeString(thread.deal_name || '')
     const dealType = sanitizeString(thread.deal_type || '')
     const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0

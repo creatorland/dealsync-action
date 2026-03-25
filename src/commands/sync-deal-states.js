@@ -1,4 +1,4 @@
-import * as crypto from 'crypto'
+import { uuidv7 } from 'uuidv7'
 import * as core from '@actions/core'
 import { sanitizeSchema, sanitizeId } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
@@ -40,7 +40,7 @@ LIMIT ${limit} OFFSET ${offset}`
 
   const values = rows
     .map((em) => {
-      const id = crypto.randomUUID()
+      const id = uuidv7()
       const emId = sanitizeId(em.ID)
       const userId = sanitizeId(em.USER_ID)
       const threadId = em.THREAD_ID ? sanitizeId(em.THREAD_ID) : ''

@@ -1,4 +1,4 @@
-import * as crypto from 'crypto'
+import { uuidv7 } from 'uuidv7'
 import * as core from '@actions/core'
 import {
   saveResults,
@@ -42,7 +42,7 @@ export async function runSaveEvals() {
   // Build batched VALUES for all threads
   const values = threads.map((thread) => {
     const threadId = sanitizeId(thread.thread_id)
-    const evalId = crypto.randomUUID()
+    const evalId = uuidv7()
     const category = sanitizeString(thread.category || '')
     const aiSummary = sanitizeString(thread.ai_summary || '')
     const isDeal = thread.is_deal ? 'true' : 'false'

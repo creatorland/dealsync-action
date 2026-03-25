@@ -1,12 +1,12 @@
-import * as crypto from 'crypto'
+import { uuidv7 } from 'uuidv7'
 import * as core from '@actions/core'
 import { sanitizeId, sanitizeString, sanitizeSchema, saveResults } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
 
 /**
  * Save deal contacts with enrichment data from AI evaluation.
- * Reads audit by batch_id, extracts main_contact per deal thread,
- * and upserts into deal_contacts with name, email, company, title, phone.
+ * Reads audit by batch_id, looks up deals by thread_id,
+ * then inserts deal_contacts with enrichment from main_contact.
  */
 export async function runSaveDealContacts() {
   const authUrl = core.getInput('auth-url')
@@ -36,12 +36,25 @@ export async function runSaveDealContacts() {
     return { contacts_created: 0 }
   }
 
-  // Delete existing contacts for these deal threads
+  // Look up deal IDs by thread_id (single SELECT — avoids subqueries in INSERT)
   const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id))
   const quotedIds = dealThreadIds.map((id) => `'${id}'`).join(',')
 
-  await executeSql(apiUrl, jwt, biscuit,
-    `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds}))`)
+  const deals = await executeSql(apiUrl, jwt, biscuit,
+    `SELECT ID, THREAD_ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`)
+
+  const dealByThread = {}
+  for (const row of deals) {
+    dealByThread[row.THREAD_ID] = row.ID
+  }
+
+  // Delete existing contacts for these deals
+  const dealIds = Object.values(dealByThread)
+  if (dealIds.length > 0) {
+    const quotedDealIds = dealIds.map((id) => `'${sanitizeId(id)}'`).join(',')
+    await executeSql(apiUrl, jwt, biscuit,
+      `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (${quotedDealIds})`)
+  }
 
   // Build contact rows with enrichment data from main_contact
   const contactValues = []
@@ -50,6 +63,12 @@ export async function runSaveDealContacts() {
     if (!mc || !mc.email) continue
 
     const threadId = sanitizeId(thread.thread_id)
+    const dealId = dealByThread[threadId]
+    if (!dealId) {
+      console.log(`[save-deal-contacts] no deal found for thread ${threadId} — skipping`)
+      continue
+    }
+
     const contactEmail = sanitizeString(mc.email)
     const name = sanitizeString(mc.name || '')
     const company = sanitizeString(mc.company || '')
@@ -57,7 +76,7 @@ export async function runSaveDealContacts() {
     const phone = sanitizeString(mc.phone_number || '')
 
     contactValues.push(
-      `('${crypto.randomUUID()}', (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}'), '${contactEmail}', 'primary', '${name}', '${contactEmail}', '${company}', '${title}', '${phone}', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      `('${uuidv7()}', '${sanitizeId(dealId)}', '${contactEmail}', 'primary', '${name}', '${contactEmail}', '${company}', '${title}', '${phone}', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
     )
   }
 
