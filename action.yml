@@ -1,10 +1,10 @@
 name: 'Dealsync'
-description: 'Dealsync pipeline action — dispatch, fetch-and-filter, fetch-and-classify, save-evals, save-deals, update-deal-states, retrigger-stuck, sxt-execute, sync-deal-states, dispatch-deal-state-sync'
+description: 'Dealsync pipeline action — dispatch, fetch-and-filter, fetch-and-classify, save-evals, save-deals, save-deal-contacts, update-deal-states, retrigger-stuck, sxt-execute, sync-deal-states, dispatch-deal-state-sync'
 author: 'creatorland'
 
 inputs:
   command:
-    description: 'Operation: dispatch, fetch-and-filter, fetch-and-classify, save-evals, save-deals, update-deal-states, retrigger-stuck, sxt-execute, sync-deal-states, dispatch-deal-state-sync'
+    description: 'Operation: dispatch, fetch-and-filter, fetch-and-classify, save-evals, save-deals, save-deal-contacts, update-deal-states, retrigger-stuck, sxt-execute, sync-deal-states, dispatch-deal-state-sync'
     required: true
   auth-url:
     description: 'SxT auth proxy URL'

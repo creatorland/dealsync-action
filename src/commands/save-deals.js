@@ -5,13 +5,12 @@ import {
   sanitizeString,
   sanitizeSchema,
   saveResults,
-  toSqlIdList,
 } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
 
 /**
- * Step 3: Read audit by batch_id → upsert deals + deal_contacts.
- * Batched: single multi-row INSERT for deals, single DELETE + INSERT for contacts.
+ * Step 3: Read audit by batch_id → upsert deals.
+ * Batched: single multi-row INSERT for deals.
  */
 export async function runSaveDeals() {
   const authUrl = core.getInput('auth-url')
@@ -96,30 +95,6 @@ export async function runSaveDeals() {
       BRAND = EXCLUDED.BRAND,
       UPDATED_AT = CURRENT_TIMESTAMP`)
 
-  // Batch deal contacts: delete all existing contacts for these threads, then insert new ones
-  const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id))
-  const quotedDealThreadIds = dealThreadIds.map((id) => `'${id}'`).join(',')
-
-  await executeSql(apiUrl, jwt, biscuit,
-    `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedDealThreadIds}))`)
-
-  const contactValues = []
-  for (const thread of dealThreads) {
-    const contactEmail = thread.main_contact ? sanitizeString(thread.main_contact.email || '') : ''
-    if (!contactEmail) continue
-    const threadId = sanitizeId(thread.thread_id)
-    contactValues.push(
-      `('${crypto.randomUUID()}', (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}'), '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    )
-  }
-
-  if (contactValues.length > 0) {
-    await executeSql(apiUrl, jwt, biscuit,
-      `INSERT INTO ${schema}.DEAL_CONTACTS
-        (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, CREATED_AT, UPDATED_AT)
-      VALUES ${contactValues.join(', ')}`)
-  }
-
-  console.log(`[save-deals] ${dealThreads.length} deals upserted, ${contactValues.length} contacts saved (3 queries)`)
+  console.log(`[save-deals] ${dealThreads.length} deals upserted`)
   return { deals_created: dealThreads.length }
 }

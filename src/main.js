@@ -5,6 +5,7 @@ import { runSyncDealStates } from './commands/sync-deal-states.js'
 import { runFetchAndClassify } from './commands/fetch-and-classify.js'
 import { runFetchAndFilter } from './commands/fetch-and-filter.js'
 import { runRetriggerStuck } from './commands/retrigger-stuck.js'
+import { runSaveDealContacts } from './commands/save-deal-contacts.js'
 import { runSaveDeals } from './commands/save-deals.js'
 import { runSaveEvals } from './commands/save-evals.js'
 import { runSxtQuery } from './commands/sxt-execute.js'
@@ -19,6 +20,7 @@ const COMMANDS = {
   'retrigger-stuck': runRetriggerStuck,
   'fetch-and-classify': runFetchAndClassify,
   'save-evals': runSaveEvals,
+  'save-deal-contacts': runSaveDealContacts,
   'save-deals': runSaveDeals,
   'update-deal-states': runUpdateDealStates,
   'sync-deal-states': runSyncDealStates,

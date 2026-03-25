@@ -35194,6 +35194,10 @@ async function runFetchAndFilter() {
     }
   }
 
+  if (allEmails.length === 0 && metadataRows.length > 0) {
+    throw new Error(`all content fetches failed — 0/${metadataRows.length} emails retrieved`)
+  }
+
   console.log(`[fetch-and-filter] fetched ${allEmails.length} emails, applying filter rules`);
 
   // 4. Apply filter rules
@@ -35284,8 +35288,77 @@ async function runRetriggerStuck() {
 }
 
 /**
- * Step 3: Read audit by batch_id → upsert deals + deal_contacts.
- * Batched: single multi-row INSERT for deals, single DELETE + INSERT for contacts.
+ * Save deal contacts with enrichment data from AI evaluation.
+ * Reads audit by batch_id, extracts main_contact per deal thread,
+ * and upserts into deal_contacts with name, email, company, title, phone.
+ */
+async function runSaveDealContacts() {
+  const authUrl = coreExports.getInput('auth-url');
+  const authSecret = coreExports.getInput('auth-secret');
+  const apiUrl = coreExports.getInput('api-url');
+  const biscuit = coreExports.getInput('biscuit');
+  const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const batchId = sanitizeId(coreExports.getInput('batch-id'));
+
+  if (!batchId) throw new Error('batch-id is required')
+
+  const jwt = await authenticate(authUrl, authSecret);
+
+  // Read audit
+  const audits = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId));
+  if (audits.length === 0 || !audits[0].AI_EVALUATION) {
+    console.log('[save-deal-contacts] no audit found — skipping');
+    return { contacts_created: 0 }
+  }
+
+  const aiOutput = JSON.parse(audits[0].AI_EVALUATION);
+  const threads = aiOutput.threads || [];
+  const dealThreads = threads.filter((t) => t.is_deal);
+
+  if (dealThreads.length === 0) {
+    console.log('[save-deal-contacts] no deal threads — skipping');
+    return { contacts_created: 0 }
+  }
+
+  // Delete existing contacts for these deal threads
+  const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id));
+  const quotedIds = dealThreadIds.map((id) => `'${id}'`).join(',');
+
+  await executeSql(apiUrl, jwt, biscuit,
+    `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds}))`);
+
+  // Build contact rows with enrichment data from main_contact
+  const contactValues = [];
+  for (const thread of dealThreads) {
+    const mc = thread.main_contact;
+    if (!mc || !mc.email) continue
+
+    const threadId = sanitizeId(thread.thread_id);
+    const contactEmail = sanitizeString(mc.email);
+    const name = sanitizeString(mc.name || '');
+    const company = sanitizeString(mc.company || '');
+    const title = sanitizeString(mc.title || '');
+    const phone = sanitizeString(mc.phone_number || '');
+
+    contactValues.push(
+      `('${crypto.randomUUID()}', (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}'), '${contactEmail}', 'primary', '${name}', '${contactEmail}', '${company}', '${title}', '${phone}', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    );
+  }
+
+  if (contactValues.length > 0) {
+    await executeSql(apiUrl, jwt, biscuit,
+      `INSERT INTO ${schema}.DEAL_CONTACTS
+        (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, NAME, EMAIL, COMPANY, TITLE, PHONE_NUMBER, IS_FAVORITE, CREATED_AT, UPDATED_AT)
+      VALUES ${contactValues.join(', ')}`);
+  }
+
+  console.log(`[save-deal-contacts] ${contactValues.length} contacts saved`);
+  return { contacts_created: contactValues.length }
+}
+
+/**
+ * Step 3: Read audit by batch_id → upsert deals.
+ * Batched: single multi-row INSERT for deals.
  */
 async function runSaveDeals() {
   const authUrl = coreExports.getInput('auth-url');
@@ -35370,31 +35443,7 @@ async function runSaveDeals() {
       BRAND = EXCLUDED.BRAND,
       UPDATED_AT = CURRENT_TIMESTAMP`);
 
-  // Batch deal contacts: delete all existing contacts for these threads, then insert new ones
-  const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id));
-  const quotedDealThreadIds = dealThreadIds.map((id) => `'${id}'`).join(',');
-
-  await executeSql(apiUrl, jwt, biscuit,
-    `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedDealThreadIds}))`);
-
-  const contactValues = [];
-  for (const thread of dealThreads) {
-    const contactEmail = thread.main_contact ? sanitizeString(thread.main_contact.email || '') : '';
-    if (!contactEmail) continue
-    const threadId = sanitizeId(thread.thread_id);
-    contactValues.push(
-      `('${crypto.randomUUID()}', (SELECT ID FROM ${schema}.DEALS WHERE THREAD_ID = '${threadId}'), '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    );
-  }
-
-  if (contactValues.length > 0) {
-    await executeSql(apiUrl, jwt, biscuit,
-      `INSERT INTO ${schema}.DEAL_CONTACTS
-        (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, CREATED_AT, UPDATED_AT)
-      VALUES ${contactValues.join(', ')}`);
-  }
-
-  console.log(`[save-deals] ${dealThreads.length} deals upserted, ${contactValues.length} contacts saved (3 queries)`);
+  console.log(`[save-deals] ${dealThreads.length} deals upserted`);
   return { deals_created: dealThreads.length }
 }
 
@@ -38413,6 +38462,7 @@ const COMMANDS = {
   'retrigger-stuck': runRetriggerStuck,
   'fetch-and-classify': runFetchAndClassify,
   'save-evals': runSaveEvals,
+  'save-deal-contacts': runSaveDealContacts,
   'save-deals': runSaveDeals,
   'update-deal-states': runUpdateDealStates,
   'sync-deal-states': runSyncDealStates,
