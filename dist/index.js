@@ -27492,12 +27492,14 @@ function withTimeout(ms = DEFAULT_TIMEOUT_MS) {
   return { signal: controller.signal, clear: () => clearTimeout(timeout) }
 }
 
-async function authenticate(authUrl, authSecret) {
+async function authenticate(authUrl, authSecret, badToken) {
   const { signal, clear } = withTimeout();
   try {
+    const headers = { 'x-shared-secret': authSecret };
+    if (badToken) headers['x-bad-token'] = badToken;
     const resp = await fetch(authUrl, {
       method: 'GET',
-      headers: { 'x-shared-secret': authSecret },
+      headers,
       signal,
     });
     if (!resp.ok) throw new Error(`Auth failed: ${resp.status}`)
@@ -27585,6 +27587,33 @@ async function executeSql(apiUrl, jwt, biscuit, sql) {
       body: JSON.stringify({ sqlText: sql, biscuits: [biscuit] }),
       signal,
     });
+
+    // On 401, re-authenticate with X-Bad-Token and retry once
+    if (resp.status === 401) {
+      console.log('[sxt-client] 401 received, re-authenticating with X-Bad-Token');
+      const authUrl = coreExports.getInput('auth-url');
+      const authSecret = coreExports.getInput('auth-secret');
+      const newJwt = await authenticate(authUrl, authSecret, jwt);
+
+      await acquireRateLimitToken();
+      const { signal: retrySignal, clear: retryClear } = withTimeout();
+      try {
+        const retryResp = await fetch(`${apiUrl}/v1/sql`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${newJwt}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ sqlText: sql, biscuits: [biscuit] }),
+          signal: retrySignal,
+        });
+        if (!retryResp.ok) throw new Error(`SxT ${retryResp.status}: ${await retryResp.text()}`)
+        return retryResp.json()
+      } finally {
+        retryClear();
+      }
+    }
+
     if (!resp.ok) throw new Error(`SxT ${resp.status}: ${await resp.text()}`)
     return resp.json()
   } finally {
