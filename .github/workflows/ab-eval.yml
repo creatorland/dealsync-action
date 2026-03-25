@@ -10,15 +10,21 @@
 #   openai/gpt-oss-20b                   131K ctx  $0.10/M
 #   meta-llama/Llama-3.3-70B-Instruct    131K ctx  $0.40/M
 #   Qwen/Qwen3-Coder-480B-A35B-Instruct 262K ctx  $0.40/M
+#   Qwen/Qwen3-Next-80B-A3B-Instruct    262K ctx  $0.30/M
 #
 # Prompt hashes:
 #   4274af0  Rust baseline prompt (production v1)
 #   57e99ad  v2 prompt with prefix caching + examples
+#
+# Baseline reuse: set baseline_a to skip running eval-a (paste JSON from previous run)
 
 name: A/B Eval
 on:
   workflow_dispatch:
     inputs:
+      baseline_a:
+        type: string
+        description: Paste previous A result JSON to skip re-running A (leave empty to run fresh)
       hash_a:
         type: string
         description: Prompt commit hash for variant A (baseline)
@@ -38,7 +44,7 @@ on:
       runs:
         type: string
         description: Number of eval runs per variant
-        default: '1'
+        default: '10'
       temperature:
         type: string
         description: AI temperature
@@ -51,11 +57,11 @@ on:
 jobs:
   eval-a:
     name: Evaluate variant A
+    if: ${{ inputs.baseline_a == '' }}
     runs-on: ubuntu-latest
     environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
     outputs:
       result: ${{ steps.run-eval.outputs.result }}
-      success: ${{ steps.run-eval.outputs.success }}
     steps:
       - id: run-eval
         name: Run eval A
@@ -75,7 +81,6 @@ jobs:
     environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
     outputs:
       result: ${{ steps.run-eval.outputs.result }}
-      success: ${{ steps.run-eval.outputs.success }}
     steps:
       - id: run-eval
         name: Run eval B
@@ -92,7 +97,7 @@ jobs:
   compare:
     name: Compare A vs B
     needs: [eval-a, eval-b]
-    if: always() && needs.eval-a.result == 'success' && needs.eval-b.result == 'success'
+    if: always() && needs.eval-b.result == 'success' && (needs.eval-a.result == 'success' || needs.eval-a.result == 'skipped')
     runs-on: ubuntu-latest
     environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
     steps:
@@ -101,5 +106,5 @@ jobs:
         uses: creatorland/dealsync-action@13986e94f200fc1b57ee6555b810788234027144
         with:
           command: eval-compare
-          result-a: ${{ needs.eval-a.outputs.result }}
+          result-a: ${{ inputs.baseline_a != '' && inputs.baseline_a || needs.eval-a.outputs.result }}
           result-b: ${{ needs.eval-b.outputs.result }}
