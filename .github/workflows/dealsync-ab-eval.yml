@@ -1,0 +1,99 @@
+# A/B Eval Workflow — compare two prompt/model variants against ground truth
+#
+# Available models (Hyperbolic API):
+#   Qwen/Qwen3-235B-A22B-Instruct-2507  262K ctx  $0.25/M  (default, current production)
+#   moonshotai/Kimi-K2-Instruct          131K ctx  $2.00/M  (current fallback)
+#   deepseek-ai/DeepSeek-V3-0324         131K ctx  $1.25/M
+#   deepseek-ai/DeepSeek-V3              131K ctx  $0.25/M
+#   deepseek-ai/DeepSeek-R1-0528         164K ctx  $3.00/M  (reasoning)
+#   deepseek-ai/DeepSeek-R1              131K ctx  $2.00/M  (reasoning)
+#   openai/gpt-oss-120b                  131K ctx  $0.30/M
+#   openai/gpt-oss-20b                   131K ctx  $0.10/M  (cheapest)
+#   meta-llama/Llama-3.3-70B-Instruct    131K ctx  $0.40/M
+#   meta-llama/Meta-Llama-3.1-405B-Instruct  131K ctx  $4.00/M
+#   Qwen/Qwen3-Coder-480B-A35B-Instruct 262K ctx  $0.40/M
+#   Qwen/Qwen3-Next-80B-A3B-Instruct    262K ctx  $0.30/M
+#   Qwen/QwQ-32B                         131K ctx  $0.25/M  (no tools)
+#
+# Prompt hashes:
+#   4274af0  Rust baseline prompt (production v1)
+#   57e99ad  v2 prompt with prefix caching + examples
+
+name: dealsync-ab-eval-3f784f8
+on:
+  workflow_dispatch:
+    inputs:
+      hash_a:
+        type: string
+        description: Prompt commit hash for variant A (baseline)
+        default: '4274af0'
+      hash_b:
+        type: string
+        description: Prompt commit hash for variant B (candidate)
+        default: '57e99ad'
+      model_a:
+        type: string
+        description: Model for variant A
+        default: 'Qwen/Qwen3-235B-A22B-Instruct-2507'
+      model_b:
+        type: string
+        description: Model for variant B
+        default: 'Qwen/Qwen3-235B-A22B-Instruct-2507'
+      runs:
+        type: string
+        description: Number of eval runs per variant
+        default: '1'
+      temperature:
+        type: string
+        description: AI temperature
+        default: '0'
+      batch_size:
+        type: string
+        description: Threads per AI call
+        default: '1'
+
+jobs:
+  eval-a:
+    runs-on: ubuntu-latest
+    environment: 0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665
+    steps:
+      - id: run-eval
+        name: Evaluate variant A
+        uses: creatorland/dealsync-action@main
+        with:
+          command: eval
+          hyperbolic-key: ${{ secrets.HYPERBOLIC_KEY }}
+          primary-model: ${{ inputs.model_a }}
+          prompt-hash: ${{ inputs.hash_a }}
+          runs: ${{ inputs.runs }}
+          temperature: ${{ inputs.temperature }}
+          batch-size: ${{ inputs.batch_size }}
+
+  eval-b:
+    runs-on: ubuntu-latest
+    environment: 0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665
+    steps:
+      - id: run-eval
+        name: Evaluate variant B
+        uses: creatorland/dealsync-action@main
+        with:
+          command: eval
+          hyperbolic-key: ${{ secrets.HYPERBOLIC_KEY }}
+          primary-model: ${{ inputs.model_b }}
+          prompt-hash: ${{ inputs.hash_b }}
+          runs: ${{ inputs.runs }}
+          temperature: ${{ inputs.temperature }}
+          batch-size: ${{ inputs.batch_size }}
+
+  compare:
+    needs: [eval-a, eval-b]
+    runs-on: ubuntu-latest
+    environment: 0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665
+    steps:
+      - id: compare
+        name: Compare A vs B
+        uses: creatorland/dealsync-action@main
+        with:
+          command: eval-compare
+          result-a: ${{ needs.eval-a.outputs.result }}
+          result-b: ${{ needs.eval-b.outputs.result }}

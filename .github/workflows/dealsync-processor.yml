@@ -1,0 +1,142 @@
+name: dealsync-processor-84cbb71
+on:
+  workflow_dispatch:
+    inputs:
+      filter_batch_id:
+        type: string
+      classify_batch_id:
+        type: string
+
+jobs:
+  filter:
+    if: ${{ inputs.filter_batch_id != '' }}
+    runs-on: ubuntu-latest
+    environment: 0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665
+    steps:
+      - id: run-filter
+        name: Fetch headers and apply filter rules
+        uses: creatorland/dealsync-action@main
+        with:
+          command: fetch-and-filter
+          batch-id: ${{ inputs.filter_batch_id }}
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+          content-fetcher-url: ${{ secrets.CONTENT_FETCHER_URL }}
+
+      - id: save-passed
+        name: Save passed emails
+        if: ${{ steps.run-filter.outputs.success == 'true' && fromJSON(steps.run-filter.outputs.result).filtered_ids != '' }}
+        uses: creatorland/dealsync-action@main
+        with:
+          command: sxt-execute
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+          sql: "UPDATE ${{ secrets.SXT_SCHEMA }}.DEAL_STATES SET STATUS = 'pending_classification' WHERE EMAIL_METADATA_ID IN (${{ fromJSON(steps.run-filter.outputs.result).filtered_ids }})"
+
+      - id: save-rejected
+        name: Save rejected emails
+        if: ${{ steps.run-filter.outputs.success == 'true' && fromJSON(steps.run-filter.outputs.result).rejected_ids != '' }}
+        uses: creatorland/dealsync-action@main
+        with:
+          command: sxt-execute
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+          sql: "UPDATE ${{ secrets.SXT_SCHEMA }}.DEAL_STATES SET STATUS = 'filter_rejected' WHERE EMAIL_METADATA_ID IN (${{ fromJSON(steps.run-filter.outputs.result).rejected_ids }})"
+
+  classify:
+    if: ${{ inputs.classify_batch_id != '' }}
+    runs-on: ubuntu-latest
+    environment: 0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665
+    steps:
+      - id: run-classify
+        name: Fetch content, classify with AI, save audit
+        uses: creatorland/dealsync-action@main
+        with:
+          command: fetch-and-classify
+          batch-id: ${{ inputs.classify_batch_id }}
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+          content-fetcher-url: ${{ secrets.CONTENT_FETCHER_URL }}
+          hyperbolic-key: ${{ secrets.HYPERBOLIC_KEY }}
+          primary-model: ${{ secrets.AI_PRIMARY_MODEL }}
+          fallback-model: ${{ secrets.AI_FALLBACK_MODEL }}
+
+      - id: save-evals
+        name: Save thread evaluations
+        if: ${{ steps.run-classify.outputs.success == 'true' }}
+        uses: creatorland/dealsync-action@main
+        with:
+          command: save-evals
+          batch-id: ${{ inputs.classify_batch_id }}
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+
+      - id: save-deals
+        name: Save deals
+        if: ${{ steps.save-evals.outputs.success == 'true' }}
+        uses: creatorland/dealsync-action@main
+        with:
+          command: save-deals
+          batch-id: ${{ inputs.classify_batch_id }}
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+
+      - id: save-deal-contacts
+        name: Save deal contacts with enrichment
+        if: ${{ steps.save-deals.outputs.success == 'true' }}
+        uses: creatorland/dealsync-action@main
+        with:
+          command: save-deal-contacts
+          batch-id: ${{ inputs.classify_batch_id }}
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+
+      - id: update-states
+        name: Update deal states
+        if: ${{ steps.save-deal-contacts.outputs.success == 'true' }}
+        uses: creatorland/dealsync-action@main
+        with:
+          command: update-deal-states
+          batch-id: ${{ inputs.classify_batch_id }}
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
