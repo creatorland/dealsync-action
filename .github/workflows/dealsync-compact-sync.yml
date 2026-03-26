@@ -16,7 +16,7 @@ jobs:
     steps:
       - id: sync
         name: Sync deal states from email metadata
-        uses: creatorland/dealsync-action@main
+        uses: creatorland/dealsync-action@e9060a8745b64cf99bbe23f721e568e3f4026182
         with:
           command: sync-deal-states
           offset: ${{ inputs.offset }}

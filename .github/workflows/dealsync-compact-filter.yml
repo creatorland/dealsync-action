@@ -25,7 +25,7 @@ jobs:
     steps:
       - id: filter
         name: Run filter pipeline
-        uses: creatorland/dealsync-action@main
+        uses: creatorland/dealsync-action@e9060a8745b64cf99bbe23f721e568e3f4026182
         with:
           command: run-filter-pipeline
           max-concurrent: ${{ inputs.max_concurrent }}
