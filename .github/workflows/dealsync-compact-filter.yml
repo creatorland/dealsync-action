@@ -24,6 +24,7 @@ concurrency:
 
 jobs:
   filter:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
     environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
     steps:
