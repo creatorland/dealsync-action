@@ -31,10 +31,12 @@ export async function runFetchAndClassify() {
   const primaryModel = core.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507'
   const fallbackModel = core.getInput('fallback-model') || 'moonshotai/Kimi-K2-Instruct'
   const aiApiUrl = core.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions'
+  const chunkSize = parseInt(core.getInput('chunk-size') || '10', 10)
+  const fetchTimeoutMs = parseInt(core.getInput('fetch-timeout-ms') || '120000', 10)
 
   if (!batchId) throw new Error('batch-id is required')
 
-  console.log(`[classify] starting batch ${batchId}`)
+  console.log(`[classify] starting batch ${batchId} (chunk=${chunkSize}, timeout=${fetchTimeoutMs}ms)`)
 
   const jwt = await authenticate(authUrl, authSecret)
 
@@ -72,16 +74,15 @@ export async function runFetchAndClassify() {
   const syncStateId = metadataRows[0].SYNC_STATE_ID
   const messageIds = metadataRows.map((r) => r.MESSAGE_ID)
 
-  const MAX_PER_CHUNK = 10
   const CONTENT_FETCH_MAX_RETRIES = 3
   const allEmails = []
   const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]))
-  for (let i = 0; i < messageIds.length; i += MAX_PER_CHUNK) {
-    const chunk = messageIds.slice(i, i + MAX_PER_CHUNK)
+  for (let i = 0; i < messageIds.length; i += chunkSize) {
+    const chunk = messageIds.slice(i, i + chunkSize)
     let fetched = false
     for (let attempt = 0; attempt < CONTENT_FETCH_MAX_RETRIES && !fetched; attempt++) {
       try {
-        const { signal, clear } = withTimeout()
+        const { signal, clear } = withTimeout(fetchTimeoutMs)
         const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
