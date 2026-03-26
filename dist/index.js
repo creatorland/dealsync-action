@@ -27364,6 +27364,7 @@ const AUTH_TIMEOUT_MS = 30000;
 const MAX_RETRIES = 6;
 
 let cachedJwt = null;
+let reauthPromise = null;
 
 function sleep$1(ms) {
   return new Promise((r) => setTimeout(r, ms))
@@ -27477,6 +27478,22 @@ async function acquireRateLimitToken() {
 }
 
 /**
+ * Deduplicated re-authentication. Only one worker calls authenticate() at a time.
+ * Others wait for the same promise and get the refreshed JWT.
+ */
+async function reauthenticate(badToken) {
+  if (reauthPromise) {
+    return reauthPromise
+  }
+  const authUrl = coreExports.getInput('auth-url');
+  const authSecret = coreExports.getInput('auth-secret');
+  reauthPromise = authenticate(authUrl, authSecret, badToken).finally(() => {
+    reauthPromise = null;
+  });
+  return reauthPromise
+}
+
+/**
  * Execute SQL against SxT. Every path retries with backoff.
  *
  * 1. Acquire rate limit token (waits, fail-open)
@@ -27507,9 +27524,7 @@ async function executeSql(apiUrl, jwt, biscuit, sql) {
         clear();
         const delay = backoff(attempt);
         console.log(`[sxt-client] 401 received (attempt ${attempt + 1}/${MAX_RETRIES}), re-authenticating, backoff ${delay}ms`);
-        const authUrl = coreExports.getInput('auth-url');
-        const authSecret = coreExports.getInput('auth-secret');
-        currentJwt = await authenticate(authUrl, authSecret, currentJwt);
+        currentJwt = await reauthenticate(currentJwt);
         await sleep$1(delay);
         continue
       }
