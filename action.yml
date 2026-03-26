@@ -4,7 +4,7 @@ author: 'creatorland'
 
 inputs:
   command:
-    description: 'Operation: fetch-and-filter, fetch-and-classify, save-evals, save-deals, save-deal-contacts, update-deal-states, sxt-execute, sync-deal-states'
+    description: 'Operation: fetch-and-filter, fetch-and-classify, save-evals, save-deals, save-deal-contacts, update-deal-states, sxt-execute, sync-deal-states, claim-filter-batch, claim-classify-batch, run-filter-pipeline, run-classify-pipeline'
     required: true
   auth-url:
     description: 'SxT auth proxy URL'
@@ -72,6 +72,18 @@ inputs:
     description: 'JSON result from eval variant A (eval-compare)'
   result-b:
     description: 'JSON result from eval variant B (eval-compare)'
+  max-concurrent:
+    description: 'Max parallel batch workers (run-filter-pipeline, run-classify-pipeline)'
+    default: '5'
+  filter-batch-size:
+    description: 'Items per filter batch (run-filter-pipeline, claim-filter-batch)'
+    default: '200'
+  classify-batch-size:
+    description: 'Threads per classify batch (run-classify-pipeline, claim-classify-batch)'
+    default: '5'
+  max-retries:
+    description: 'Max attempts per batch before dead letter (run-filter-pipeline, run-classify-pipeline)'
+    default: '3'
 
 outputs:
   success:

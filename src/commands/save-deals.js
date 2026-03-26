@@ -1,11 +1,6 @@
 import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
-import {
-  sanitizeId,
-  sanitizeString,
-  sanitizeSchema,
-  saveResults,
-} from '../lib/queries.js'
+import { sanitizeId, sanitizeString, sanitizeSchema, saveResults } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
 
 /**
@@ -25,7 +20,12 @@ export async function runSaveDeals() {
   const jwt = await authenticate(authUrl, authSecret)
 
   // Read audit
-  const audits = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId))
+  const audits = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    saveResults.getAuditByBatchId(schema, batchId),
+  )
   if (audits.length === 0 || !audits[0].AI_EVALUATION) {
     console.log('[save-deals] no audit found — skipping')
     return { deals_created: 0 }
@@ -35,8 +35,12 @@ export async function runSaveDeals() {
   const threads = aiOutput.threads || []
 
   // Need metadata to get userId per thread
-  const metadataRows = await executeSql(apiUrl, jwt, biscuit,
-    `SELECT DISTINCT THREAD_ID, USER_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`)
+  const metadataRows = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    `SELECT DISTINCT THREAD_ID, USER_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+  )
   const userByThread = {}
   for (const row of metadataRows) {
     userByThread[row.THREAD_ID] = row.USER_ID
@@ -57,8 +61,12 @@ export async function runSaveDeals() {
   // Batch DELETE non-deal threads (single query)
   if (notDealThreadIds.length > 0) {
     const quotedIds = notDealThreadIds.map((id) => `'${id}'`).join(',')
-    await executeSql(apiUrl, jwt, biscuit,
-      `DELETE FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`)
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      `DELETE FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`,
+    )
     console.log(`[save-deals] deleted ${notDealThreadIds.length} non-deal threads (1 query)`)
   }
 
@@ -68,20 +76,26 @@ export async function runSaveDeals() {
   }
 
   // Batch upsert deals (single multi-row INSERT)
-  const dealValues = dealThreads.map((thread) => {
-    const threadId = sanitizeId(thread.thread_id)
-    const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
-    const dealId = uuidv7()
-    const dealName = sanitizeString(thread.deal_name || '')
-    const dealType = sanitizeString(thread.deal_type || '')
-    const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0
-    const currency = sanitizeString(thread.currency || 'USD')
-    const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : ''
-    const category = sanitizeString(thread.category || '')
-    return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-  }).join(', ')
+  const dealValues = dealThreads
+    .map((thread) => {
+      const threadId = sanitizeId(thread.thread_id)
+      const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
+      const dealId = uuidv7()
+      const dealName = sanitizeString(thread.deal_name || '')
+      const dealType = sanitizeString(thread.deal_type || '')
+      const dealValue =
+        typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0
+      const currency = sanitizeString(thread.currency || 'USD')
+      const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : ''
+      const category = sanitizeString(thread.category || '')
+      return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    })
+    .join(', ')
 
-  await executeSql(apiUrl, jwt, biscuit,
+  await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
     `INSERT INTO ${schema}.DEALS
       (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT)
     VALUES ${dealValues}
@@ -93,7 +107,8 @@ export async function runSaveDeals() {
       VALUE = EXCLUDED.VALUE,
       CURRENCY = EXCLUDED.CURRENCY,
       BRAND = EXCLUDED.BRAND,
-      UPDATED_AT = CURRENT_TIMESTAMP`)
+      UPDATED_AT = CURRENT_TIMESTAMP`,
+  )
 
   console.log(`[save-deals] ${dealThreads.length} deals upserted`)
   return { deals_created: dealThreads.length }

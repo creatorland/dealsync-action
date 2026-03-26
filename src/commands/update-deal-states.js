@@ -26,7 +26,12 @@ export async function runUpdateDealStates() {
   const jwt = await authenticate(authUrl, authSecret)
 
   // Read audit
-  const audits = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId))
+  const audits = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    saveResults.getAuditByBatchId(schema, batchId),
+  )
   if (audits.length === 0 || !audits[0].AI_EVALUATION) {
     console.log('[update-states] no audit found — skipping')
     return { deal: 0, not_deal: 0 }
@@ -36,8 +41,12 @@ export async function runUpdateDealStates() {
   const threads = aiOutput.threads || []
 
   // Get metadata to map thread → email_metadata_ids (by batch_id)
-  const metadataRows = await executeSql(apiUrl, jwt, biscuit,
-    `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`)
+  const metadataRows = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+  )
 
   const metadataByThread = {}
   for (const row of metadataRows) {
@@ -67,10 +76,17 @@ export async function runUpdateDealStates() {
     await executeSql(apiUrl, jwt, biscuit, detection.updateDeals(schema, toSqlIdList(dealEmailIds)))
   }
   if (notDealEmailIds.length > 0) {
-    await executeSql(apiUrl, jwt, biscuit, detection.updateNotDeal(schema, toSqlIdList(notDealEmailIds)))
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      detection.updateNotDeal(schema, toSqlIdList(notDealEmailIds)),
+    )
   }
 
   const queries = (dealEmailIds.length > 0 ? 1 : 0) + (notDealEmailIds.length > 0 ? 1 : 0)
-  console.log(`[update-states] ${dealEmailIds.length} → deal, ${notDealEmailIds.length} → not_deal (${queries} queries)`)
+  console.log(
+    `[update-states] ${dealEmailIds.length} → deal, ${notDealEmailIds.length} → not_deal (${queries} queries)`,
+  )
   return { deal: dealEmailIds.length, not_deal: notDealEmailIds.length }
 }

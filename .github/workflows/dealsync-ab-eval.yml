@@ -55,7 +55,7 @@ on:
 jobs:
   eval-a:
     runs-on: ubuntu-latest
-    environment: "0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665"
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
     steps:
       - id: run-eval
         name: Evaluate variant A
@@ -71,7 +71,7 @@ jobs:
 
   eval-b:
     runs-on: ubuntu-latest
-    environment: "0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665"
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
     steps:
       - id: run-eval
         name: Evaluate variant B
@@ -88,7 +88,7 @@ jobs:
   compare:
     needs: [eval-a, eval-b]
     runs-on: ubuntu-latest
-    environment: "0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665"
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
     steps:
       - id: compare
         name: Compare A vs B

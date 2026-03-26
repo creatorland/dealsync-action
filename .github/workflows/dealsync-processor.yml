@@ -11,7 +11,7 @@ jobs:
   filter:
     if: ${{ inputs.filter_batch_id != '' }}
     runs-on: ubuntu-latest
-    environment: "0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665"
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
     steps:
       - id: run-filter
         name: Fetch headers and apply filter rules
@@ -63,7 +63,7 @@ jobs:
   classify:
     if: ${{ inputs.classify_batch_id != '' }}
     runs-on: ubuntu-latest
-    environment: "0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665"
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
     steps:
       - id: run-classify
         name: Fetch content, classify with AI, save audit

@@ -13,7 +13,12 @@ function extractEmailAddress(from) {
 
 function extractDisplayName(from) {
   const match = from.match(/^(.+?)\s*</)
-  return match ? match[1].trim().replace(/^["']|["']$/g, '').toLowerCase() : ''
+  return match
+    ? match[1]
+        .trim()
+        .replace(/^["']|["']$/g, '')
+        .toLowerCase()
+    : ''
 }
 
 export function isRejected(email) {

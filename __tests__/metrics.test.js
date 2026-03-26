@@ -31,13 +31,28 @@ describe('aggregateStats', () => {
 })
 
 const GT_DEALS = [
-  { id: 'gt-001', expected: { is_deal: true, category: 'new', likely_scam: false, score_range: [5, 7] } },
-  { id: 'gt-002', expected: { is_deal: true, category: 'in_progress', likely_scam: false, score_range: [7, 9] } },
-  { id: 'gt-003', expected: { is_deal: true, category: 'likely_scam', likely_scam: true, score_range: [1, 2] } },
+  {
+    id: 'gt-001',
+    expected: { is_deal: true, category: 'new', likely_scam: false, score_range: [5, 7] },
+  },
+  {
+    id: 'gt-002',
+    expected: { is_deal: true, category: 'in_progress', likely_scam: false, score_range: [7, 9] },
+  },
+  {
+    id: 'gt-003',
+    expected: { is_deal: true, category: 'likely_scam', likely_scam: true, score_range: [1, 2] },
+  },
 ]
 const GT_NON_DEALS = [
-  { id: 'gt-004', expected: { is_deal: false, category: null, likely_scam: false, score_range: [1, 2] } },
-  { id: 'gt-005', expected: { is_deal: false, category: null, likely_scam: false, score_range: [1, 2] } },
+  {
+    id: 'gt-004',
+    expected: { is_deal: false, category: null, likely_scam: false, score_range: [1, 2] },
+  },
+  {
+    id: 'gt-005',
+    expected: { is_deal: false, category: null, likely_scam: false, score_range: [1, 2] },
+  },
 ]
 const GT = [...GT_DEALS, ...GT_NON_DEALS]
 

@@ -1,0 +1,43 @@
+name: dealsync-compact-filter
+on:
+  workflow_dispatch:
+    inputs:
+      max_concurrent:
+        type: string
+        default: '5'
+      filter_batch_size:
+        type: string
+        default: '200'
+      max_retries:
+        type: string
+        default: '3'
+      chunk_size:
+        type: string
+        default: '50'
+      fetch_timeout_ms:
+        type: string
+        default: '30000'
+
+jobs:
+  filter:
+    runs-on: ubuntu-latest
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
+    steps:
+      - id: filter
+        name: Run filter pipeline
+        uses: creatorland/dealsync-action@main
+        with:
+          command: run-filter-pipeline
+          max-concurrent: ${{ inputs.max_concurrent }}
+          filter-batch-size: ${{ inputs.filter_batch_size }}
+          max-retries: ${{ inputs.max_retries }}
+          chunk-size: ${{ inputs.chunk_size }}
+          fetch-timeout-ms: ${{ inputs.fetch_timeout_ms }}
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+          content-fetcher-url: ${{ secrets.CONTENT_FETCHER_URL }}

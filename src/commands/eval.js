@@ -19,7 +19,8 @@ async function fetchPromptsByHash(hash) {
     fetch(`${PROMPT_BASE_URL}/${hash}/prompts/system.md`),
     fetch(`${PROMPT_BASE_URL}/${hash}/prompts/user.md`),
   ])
-  if (!systemResp.ok) throw new Error(`Failed to fetch system.md at ${hash}: HTTP ${systemResp.status}`)
+  if (!systemResp.ok)
+    throw new Error(`Failed to fetch system.md at ${hash}: HTTP ${systemResp.status}`)
   if (!userResp.ok) throw new Error(`Failed to fetch user.md at ${hash}: HTTP ${userResp.status}`)
   return {
     systemOverride: await systemResp.text(),
@@ -47,9 +48,7 @@ export async function runEval() {
   }
 
   // Filter out entries with empty bodies — AI can't classify without content
-  const withBody = groundTruth.filter((gt) =>
-    gt.emails.some((e) => e.body && e.body.trim() !== ''),
-  )
+  const withBody = groundTruth.filter((gt) => gt.emails.some((e) => e.body && e.body.trim() !== ''))
 
   // Apply static filter rules (same as production pipeline)
   const filtered = []
@@ -63,8 +62,12 @@ export async function runEval() {
   }
 
   const usableEntries = passedFilter
-  console.log(`[eval] model=${model} runs=${numRuns} threads=${usableEntries.length} batch_size=${batchSize} concurrency=${concurrency} prompt=${promptHash || 'bundled'}`)
-  console.log(`[eval] ground truth: ${groundTruth.length} total, ${groundTruth.length - withBody.length} empty body, ${filtered.length} static-filtered, ${usableEntries.length} to AI`)
+  console.log(
+    `[eval] model=${model} runs=${numRuns} threads=${usableEntries.length} batch_size=${batchSize} concurrency=${concurrency} prompt=${promptHash || 'bundled'}`,
+  )
+  console.log(
+    `[eval] ground truth: ${groundTruth.length} total, ${groundTruth.length - withBody.length} empty body, ${filtered.length} static-filtered, ${usableEntries.length} to AI`,
+  )
 
   const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey }
   const allRuns = []
@@ -85,7 +88,13 @@ export async function runEval() {
       batches.push(usableEntries)
     }
 
-    const runHealth = { clean: 0, repaired: 0, corrective_retry: 0, failed: 0, total_batches: batches.length }
+    const runHealth = {
+      clean: 0,
+      repaired: 0,
+      corrective_retry: 0,
+      failed: 0,
+      total_batches: batches.length,
+    }
 
     // Process batches with concurrency pool
     async function processBatch(batch, batchIdx) {
@@ -122,11 +131,16 @@ export async function runEval() {
               content: `Your previous response could not be parsed as valid JSON.\n\nParse error:\n${parseErr.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting. Return ONLY the JSON array.`,
             },
           ]
-          const corrected = await callModel(model, correctiveMessages, { temperature: 0, ...aiOpts })
+          const corrected = await callModel(model, correctiveMessages, {
+            temperature: 0,
+            ...aiOpts,
+          })
           const parsed = parseAndValidate(corrected.content)
           return { threads: parsed, health: 'corrective_retry', usage }
         } catch (correctiveErr) {
-          console.log(`[eval] run ${run} batch ${batchIdx + 1}: corrective retry failed: ${correctiveErr.message}`)
+          console.log(
+            `[eval] run ${run} batch ${batchIdx + 1}: corrective retry failed: ${correctiveErr.message}`,
+          )
           return { threads: [], health: 'failed', usage }
         }
       }
@@ -162,7 +176,9 @@ export async function runEval() {
     }
     await Promise.all(pending)
 
-    console.log(`[eval] run ${run}: ${runThreads.length} threads (clean=${runHealth.clean} retry=${runHealth.corrective_retry} failed=${runHealth.failed})`)
+    console.log(
+      `[eval] run ${run}: ${runThreads.length} threads (clean=${runHealth.clean} retry=${runHealth.corrective_retry} failed=${runHealth.failed})`,
+    )
 
     if (runThreads.length > 0) {
       allRuns.push(runThreads)
@@ -207,13 +223,19 @@ export async function runEval() {
     cost: {
       total_input_tokens: totalInputTokens,
       total_output_tokens: totalOutputTokens,
-      avg_cost_per_thread: usableEntries.length > 0
-        ? +((totalInputTokens * 0.000001 + totalOutputTokens * 0.000002) / usableEntries.length).toFixed(6)
-        : 0,
+      avg_cost_per_thread:
+        usableEntries.length > 0
+          ? +(
+              (totalInputTokens * 0.000001 + totalOutputTokens * 0.000002) /
+              usableEntries.length
+            ).toFixed(6)
+          : 0,
     },
     per_thread: perThread,
   }
 
-  console.log(`[eval] complete: recall=${detection.recall.mean} precision=${detection.precision.mean} f2=${detection.f2.mean} json_failures=${jsonHealth.total_failures}`)
+  console.log(
+    `[eval] complete: recall=${detection.recall.mean} precision=${detection.precision.mean} f2=${detection.f2.mean} json_failures=${jsonHealth.total_failures}`,
+  )
   return result
 }

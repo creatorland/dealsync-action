@@ -1,0 +1,46 @@
+name: dealsync-compact-classify
+on:
+  workflow_dispatch:
+    inputs:
+      max_concurrent:
+        type: string
+        default: '3'
+      classify_batch_size:
+        type: string
+        default: '5'
+      max_retries:
+        type: string
+        default: '3'
+      chunk_size:
+        type: string
+        default: '10'
+      fetch_timeout_ms:
+        type: string
+        default: '120000'
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
+    steps:
+      - id: classify
+        name: Run classify pipeline
+        uses: creatorland/dealsync-action@main
+        with:
+          command: run-classify-pipeline
+          max-concurrent: ${{ inputs.max_concurrent }}
+          classify-batch-size: ${{ inputs.classify_batch_size }}
+          max-retries: ${{ inputs.max_retries }}
+          chunk-size: ${{ inputs.chunk_size }}
+          fetch-timeout-ms: ${{ inputs.fetch_timeout_ms }}
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
+          content-fetcher-url: ${{ secrets.CONTENT_FETCHER_URL }}
+          hyperbolic-key: ${{ secrets.HYPERBOLIC_KEY }}
+          primary-model: ${{ secrets.AI_PRIMARY_MODEL }}
+          fallback-model: ${{ secrets.AI_FALLBACK_MODEL }}

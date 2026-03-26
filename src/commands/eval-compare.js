@@ -2,7 +2,7 @@ import * as core from '@actions/core'
 
 const THRESHOLDS = {
   recall: 0.95,
-  precision: 0.40,
+  precision: 0.4,
   consistency: 0.03,
 }
 
@@ -26,8 +26,14 @@ export async function runEvalCompare() {
     recall: compareMetric(a.detection.recall.mean, b.detection.recall.mean),
     precision: compareMetric(a.detection.precision.mean, b.detection.precision.mean),
     f2: compareMetric(a.detection.f2.mean, b.detection.f2.mean),
-    category_accuracy: compareMetric(a.categorization.accuracy.mean, b.categorization.accuracy.mean),
-    score_in_range: compareMetric(a.urgency_scoring.in_range_rate.mean, b.urgency_scoring.in_range_rate.mean),
+    category_accuracy: compareMetric(
+      a.categorization.accuracy.mean,
+      b.categorization.accuracy.mean,
+    ),
+    score_in_range: compareMetric(
+      a.urgency_scoring.in_range_rate.mean,
+      b.urgency_scoring.in_range_rate.mean,
+    ),
     scam_detection: compareMetric(a.scam_detection.accuracy.mean, b.scam_detection.accuracy.mean),
   }
 
@@ -49,8 +55,14 @@ export async function runEvalCompare() {
 
   // JSON health comparison
   const jsonComparison = {
-    clean_parse_rate: compareMetric(a.json_health.clean_parse_rate.mean, b.json_health.clean_parse_rate.mean),
-    corrective_retry_rate: compareMetric(a.json_health.corrective_retry_rate.mean, b.json_health.corrective_retry_rate.mean),
+    clean_parse_rate: compareMetric(
+      a.json_health.clean_parse_rate.mean,
+      b.json_health.clean_parse_rate.mean,
+    ),
+    corrective_retry_rate: compareMetric(
+      a.json_health.corrective_retry_rate.mean,
+      b.json_health.corrective_retry_rate.mean,
+    ),
     total_failures: { a: a.json_health.total_failures, b: b.json_health.total_failures },
   }
 
@@ -117,19 +129,36 @@ export async function runEvalCompare() {
   const fmt = (d) => `${d > 0 ? '+' : ''}${d}`
   console.log(`[eval-compare] verdict: ${passFail.verdict}`)
   console.log(`[eval-compare] --- Detection ---`)
-  console.log(`[eval-compare] recall:    ${comparison.recall.a} → ${comparison.recall.b} (${fmt(comparison.recall.delta)})`)
-  console.log(`[eval-compare] precision: ${comparison.precision.a} → ${comparison.precision.b} (${fmt(comparison.precision.delta)})`)
-  console.log(`[eval-compare] f2:        ${comparison.f2.a} → ${comparison.f2.b} (${fmt(comparison.f2.delta)})`)
+  console.log(
+    `[eval-compare] recall:    ${comparison.recall.a} → ${comparison.recall.b} (${fmt(comparison.recall.delta)})`,
+  )
+  console.log(
+    `[eval-compare] precision: ${comparison.precision.a} → ${comparison.precision.b} (${fmt(comparison.precision.delta)})`,
+  )
+  console.log(
+    `[eval-compare] f2:        ${comparison.f2.a} → ${comparison.f2.b} (${fmt(comparison.f2.delta)})`,
+  )
   console.log(`[eval-compare] --- Sub-metrics ---`)
-  console.log(`[eval-compare] category:  ${comparison.category_accuracy.a} → ${comparison.category_accuracy.b} (${fmt(comparison.category_accuracy.delta)})`)
-  console.log(`[eval-compare] urgency:   ${comparison.score_in_range.a} → ${comparison.score_in_range.b} (${fmt(comparison.score_in_range.delta)})`)
-  console.log(`[eval-compare] scam:      ${comparison.scam_detection.a} → ${comparison.scam_detection.b} (${fmt(comparison.scam_detection.delta)})`)
-  console.log(`[eval-compare] cost:      $${costComparison.a} → $${costComparison.b} (${fmt(costComparison.delta)})`)
+  console.log(
+    `[eval-compare] category:  ${comparison.category_accuracy.a} → ${comparison.category_accuracy.b} (${fmt(comparison.category_accuracy.delta)})`,
+  )
+  console.log(
+    `[eval-compare] urgency:   ${comparison.score_in_range.a} → ${comparison.score_in_range.b} (${fmt(comparison.score_in_range.delta)})`,
+  )
+  console.log(
+    `[eval-compare] scam:      ${comparison.scam_detection.a} → ${comparison.scam_detection.b} (${fmt(comparison.scam_detection.delta)})`,
+  )
+  console.log(
+    `[eval-compare] cost:      $${costComparison.a} → $${costComparison.b} (${fmt(costComparison.delta)})`,
+  )
   console.log(`[eval-compare] --- Per Category ---`)
   for (const [cat, data] of Object.entries(perCategoryComparison)) {
-    console.log(`[eval-compare] ${cat}: ${data.a} → ${data.b} (${fmt(data.delta)}) [${data.a_count} threads]`)
+    console.log(
+      `[eval-compare] ${cat}: ${data.a} → ${data.b} (${fmt(data.delta)}) [${data.a_count} threads]`,
+    )
   }
-  if (newMissedDeals.length > 0) console.log(`[eval-compare] NEW MISSED DEALS: ${newMissedDeals.join(', ')}`)
+  if (newMissedDeals.length > 0)
+    console.log(`[eval-compare] NEW MISSED DEALS: ${newMissedDeals.join(', ')}`)
 
   return result
 }

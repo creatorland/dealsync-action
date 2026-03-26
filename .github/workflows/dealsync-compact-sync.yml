@@ -1,19 +1,21 @@
-name: dealsync-deal-state-sync-3f784f8
+name: dealsync-compact-sync
 on:
   workflow_dispatch:
     inputs:
       offset:
         type: string
+        default: '0'
       limit:
         type: string
+        default: '500'
 
 jobs:
-  create:
+  sync:
     runs-on: ubuntu-latest
     environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
     steps:
-      - id: sync-deal-states
-        name: Create deal states from email metadata diff
+      - id: sync
+        name: Sync deal states from email metadata
         uses: creatorland/dealsync-action@main
         with:
           command: sync-deal-states

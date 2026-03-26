@@ -20,7 +20,9 @@ export async function runSyncDealStates() {
   const offset = parseInt(rawOffset || '0', 10)
   const limit = parseInt(rawLimit || '500', 10)
 
-  console.log(`[sync-deal-states] inputs: offset="${rawOffset}" limit="${rawLimit}" → parsed: offset=${offset} limit=${limit}`)
+  console.log(
+    `[sync-deal-states] inputs: offset="${rawOffset}" limit="${rawLimit}" → parsed: offset=${offset} limit=${limit}`,
+  )
   const jwt = await authenticate(authUrl, authSecret)
 
   const diffSql = `SELECT em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID

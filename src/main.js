@@ -9,6 +9,10 @@ import { runSxtQuery } from './commands/sxt-execute.js'
 import { runUpdateDealStates } from './commands/update-deal-states.js'
 import { runEval } from './commands/eval.js'
 import { runEvalCompare } from './commands/eval-compare.js'
+import { runClaimFilterBatch } from './commands/claim-filter-batch.js'
+import { runClaimClassifyBatch } from './commands/claim-classify-batch.js'
+import { runFilterPipeline } from './commands/run-filter-pipeline.js'
+import { runClassifyPipeline } from './commands/run-classify-pipeline.js'
 
 const COMMANDS = {
   'sxt-execute': runSxtQuery,
@@ -19,8 +23,12 @@ const COMMANDS = {
   'save-deals': runSaveDeals,
   'update-deal-states': runUpdateDealStates,
   'sync-deal-states': runSyncDealStates,
-  'eval': runEval,
+  eval: runEval,
   'eval-compare': runEvalCompare,
+  'claim-filter-batch': runClaimFilterBatch,
+  'claim-classify-batch': runClaimClassifyBatch,
+  'run-filter-pipeline': runFilterPipeline,
+  'run-classify-pipeline': runClassifyPipeline,
 }
 
 export async function run() {

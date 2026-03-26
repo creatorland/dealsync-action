@@ -7,7 +7,12 @@ export function aggregateStats(values) {
   const min = Math.min(...values)
   const max = Math.max(...values)
   const stddev = Math.sqrt(values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length)
-  return { mean: +mean.toFixed(4), min: +min.toFixed(4), max: +max.toFixed(4), stddev: +stddev.toFixed(4) }
+  return {
+    mean: +mean.toFixed(4),
+    min: +min.toFixed(4),
+    max: +max.toFixed(4),
+    stddev: +stddev.toFixed(4),
+  }
 }
 
 /**
@@ -22,7 +27,9 @@ export function computeDetectionMetrics(allRuns, groundTruth) {
 
   for (const run of allRuns) {
     const resultMap = new Map(run.map((r) => [r.thread_id, r]))
-    let tp = 0, fp = 0, fn = 0
+    let tp = 0,
+      fp = 0,
+      fn = 0
 
     for (const gt of groundTruth) {
       const result = resultMap.get(gt.id)
@@ -37,9 +44,7 @@ export function computeDetectionMetrics(allRuns, groundTruth) {
 
     const recall = tp + fn > 0 ? tp / (tp + fn) : 1
     const precision = tp + fp > 0 ? tp / (tp + fp) : 1
-    const f2 = precision + recall > 0
-      ? (5 * precision * recall) / (4 * precision + recall)
-      : 0
+    const f2 = precision + recall > 0 ? (5 * precision * recall) / (4 * precision + recall) : 0
 
     recallPerRun.push(recall)
     precisionPerRun.push(precision)

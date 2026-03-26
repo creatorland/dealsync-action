@@ -16,7 +16,9 @@ jest.unstable_mockModule('../src/commands/sync-deal-states.js', () => ({
 }))
 
 jest.unstable_mockModule('../src/commands/fetch-and-filter.js', () => ({
-  runFetchAndFilter: jest.fn().mockResolvedValue({ filtered_ids: "'id-1'", rejected_ids: '', total: 1 }),
+  runFetchAndFilter: jest
+    .fn()
+    .mockResolvedValue({ filtered_ids: "'id-1'", rejected_ids: '', total: 1 }),
 }))
 
 jest.unstable_mockModule('../src/commands/fetch-and-classify.js', () => ({
@@ -51,6 +53,32 @@ jest.unstable_mockModule('../src/commands/eval-compare.js', () => ({
   runEvalCompare: jest.fn().mockResolvedValue({ verdict: 'PASS' }),
 }))
 
+jest.unstable_mockModule('../src/commands/claim-filter-batch.js', () => ({
+  runClaimFilterBatch: jest.fn().mockResolvedValue({ batch_id: null, count: 0 }),
+}))
+
+jest.unstable_mockModule('../src/commands/claim-classify-batch.js', () => ({
+  runClaimClassifyBatch: jest.fn().mockResolvedValue({ batch_id: null, count: 0 }),
+}))
+
+jest.unstable_mockModule('../src/commands/run-filter-pipeline.js', () => ({
+  runFilterPipeline: jest.fn().mockResolvedValue({
+    batches_processed: 0,
+    batches_failed: 0,
+    total_filtered: 0,
+    total_rejected: 0,
+  }),
+}))
+
+jest.unstable_mockModule('../src/commands/run-classify-pipeline.js', () => ({
+  runClassifyPipeline: jest.fn().mockResolvedValue({
+    batches_processed: 0,
+    batches_failed: 0,
+    total_deals: 0,
+    total_not_deals: 0,
+  }),
+}))
+
 const core = await import('@actions/core')
 const { run } = await import('../src/main.js')
 
@@ -66,7 +94,11 @@ describe('dealsync main (command router)', () => {
     await run()
 
     expect(outputs['success']).toBe('true')
-    expect(JSON.parse(outputs['result'])).toEqual({ filtered_ids: "'id-1'", rejected_ids: '', total: 1 })
+    expect(JSON.parse(outputs['result'])).toEqual({
+      filtered_ids: "'id-1'",
+      rejected_ids: '',
+      total: 1,
+    })
   })
 
   it('fails on unknown command', async () => {

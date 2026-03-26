@@ -1,13 +1,13 @@
 import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { buildPrompt } from '../lib/build-prompt.js'
-import { callModel, parseAndValidate, VALID_CATEGORIES, VALID_DEAL_TYPES } from '../lib/ai-client.js'
 import {
-  saveResults,
-  sanitizeString,
-  sanitizeSchema,
-  sanitizeId,
-} from '../lib/queries.js'
+  callModel,
+  parseAndValidate,
+  VALID_CATEGORIES,
+  VALID_DEAL_TYPES,
+} from '../lib/ai-client.js'
+import { saveResults, sanitizeString, sanitizeSchema, sanitizeId } from '../lib/queries.js'
 import { authenticate, executeSql, withTimeout } from '../lib/sxt-client.js'
 
 /**
@@ -36,13 +36,17 @@ export async function runFetchAndClassify() {
 
   if (!batchId) throw new Error('batch-id is required')
 
-  console.log(`[classify] starting batch ${batchId} (chunk=${chunkSize}, timeout=${fetchTimeoutMs}ms)`)
+  console.log(
+    `[classify] starting batch ${batchId} (chunk=${chunkSize}, timeout=${fetchTimeoutMs}ms)`,
+  )
 
   const jwt = await authenticate(authUrl, authSecret)
 
   // Check metadata exists
   const metadataRows = await executeSql(
-    apiUrl, jwt, biscuit,
+    apiUrl,
+    jwt,
+    biscuit,
     `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, SYNC_STATE_ID, THREAD_ID
     FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
   )
@@ -56,7 +60,10 @@ export async function runFetchAndClassify() {
 
   // Check for existing audit (checkpoint)
   const existingAudit = await executeSql(
-    apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId),
+    apiUrl,
+    jwt,
+    biscuit,
+    saveResults.getAuditByBatchId(schema, batchId),
   )
 
   if (existingAudit.length > 0 && existingAudit[0].AI_EVALUATION) {
@@ -86,14 +93,21 @@ export async function runFetchAndClassify() {
         const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId, ...(syncStateId ? { syncStateId } : {}), messageIds: chunk }),
+          body: JSON.stringify({
+            userId,
+            ...(syncStateId ? { syncStateId } : {}),
+            messageIds: chunk,
+          }),
           signal,
         })
         clear()
         if (resp.status === 429) {
           const body = await resp.json().catch(() => ({}))
-          const retryAfter = body.retryAfterMs || parseInt(body.message?.match(/\d+/)?.[0] || '30', 10) * 1000
-          console.log(`[classify] content fetch 429, waiting ${retryAfter}ms (attempt ${attempt + 1}/${CONTENT_FETCH_MAX_RETRIES})`)
+          const retryAfter =
+            body.retryAfterMs || parseInt(body.message?.match(/\d+/)?.[0] || '30', 10) * 1000
+          console.log(
+            `[classify] content fetch 429, waiting ${retryAfter}ms (attempt ${attempt + 1}/${CONTENT_FETCH_MAX_RETRIES})`,
+          )
           await new Promise((r) => setTimeout(r, retryAfter))
           continue
         }
@@ -164,7 +178,10 @@ export async function runFetchAndClassify() {
             content: `Your previous classification response could not be parsed as valid JSON.\n\nParse error:\n${parseError.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting issue. Do not change any classification decisions. Return ONLY the JSON array with no other text.`,
           },
         ]
-        const corrected = await callModel(primaryModel, correctiveMessages, { temperature: 0, ...aiOpts })
+        const corrected = await callModel(primaryModel, correctiveMessages, {
+          temperature: 0,
+          ...aiOpts,
+        })
         const correctedRaw = corrected.content
         threads = parseAndValidate(correctedRaw)
         modelUsed = `${primaryModel}(corrective-retry)`
@@ -180,7 +197,10 @@ export async function runFetchAndClassify() {
     console.log(`[classify] Falling back to ${fallbackModel}`)
     modelUsed = fallbackModel
     try {
-      const fallbackResult = await callModel(fallbackModel, classifyMessages, { temperature: 0.6, ...aiOpts })
+      const fallbackResult = await callModel(fallbackModel, classifyMessages, {
+        temperature: 0.6,
+        ...aiOpts,
+      })
       const fallbackRaw = fallbackResult.content
       threads = parseAndValidate(fallbackRaw)
       console.log(`[classify] Fallback model succeeded: ${threads.length} threads`)
@@ -200,16 +220,28 @@ export async function runFetchAndClassify() {
   const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400))
   try {
     await executeSql(
-      apiUrl, jwt, biscuit,
+      apiUrl,
+      jwt,
+      biscuit,
       saveResults.insertAudit(schema, {
-        id: auditId, batchId, threadCount: threads.length,
-        emailCount: metadataRows.length, cost: 0, inputTokens: 0,
-        outputTokens: 0, model: modelUsed, evaluation,
+        id: auditId,
+        batchId,
+        threadCount: threads.length,
+        emailCount: metadataRows.length,
+        cost: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        model: modelUsed,
+        evaluation,
       }),
     )
     console.log(`[classify] audit saved: ${auditId} (model: ${modelUsed})`)
   } catch (err) {
-    if (err.message.includes('integrity constraint') || err.message.includes('unique') || err.message.includes('duplicate')) {
+    if (
+      err.message.includes('integrity constraint') ||
+      err.message.includes('unique') ||
+      err.message.includes('duplicate')
+    ) {
       console.log(`[classify] audit already exists for batch (concurrent run), continuing`)
     } else {
       throw err

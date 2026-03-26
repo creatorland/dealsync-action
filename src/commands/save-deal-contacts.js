@@ -21,7 +21,12 @@ export async function runSaveDealContacts() {
   const jwt = await authenticate(authUrl, authSecret)
 
   // Read audit
-  const audits = await executeSql(apiUrl, jwt, biscuit, saveResults.getAuditByBatchId(schema, batchId))
+  const audits = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    saveResults.getAuditByBatchId(schema, batchId),
+  )
   if (audits.length === 0 || !audits[0].AI_EVALUATION) {
     console.log('[save-deal-contacts] no audit found — skipping')
     return { contacts_created: 0 }
@@ -40,8 +45,12 @@ export async function runSaveDealContacts() {
   const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id))
   const quotedIds = dealThreadIds.map((id) => `'${id}'`).join(',')
 
-  const deals = await executeSql(apiUrl, jwt, biscuit,
-    `SELECT ID, THREAD_ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`)
+  const deals = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    `SELECT ID, THREAD_ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`,
+  )
 
   const dealByThread = {}
   for (const row of deals) {
@@ -52,8 +61,12 @@ export async function runSaveDealContacts() {
   const dealIds = Object.values(dealByThread)
   if (dealIds.length > 0) {
     const quotedDealIds = dealIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-    await executeSql(apiUrl, jwt, biscuit,
-      `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (${quotedDealIds})`)
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (${quotedDealIds})`,
+    )
   }
 
   // Build contact rows with enrichment data from main_contact
@@ -76,15 +89,19 @@ export async function runSaveDealContacts() {
     const phone = sanitizeString(mc.phone_number || '')
 
     contactValues.push(
-      `('${uuidv7()}', '${sanitizeId(dealId)}', '${contactEmail}', 'primary', '${name}', '${contactEmail}', '${company}', '${title}', '${phone}', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      `('${uuidv7()}', '${sanitizeId(dealId)}', '${contactEmail}', 'primary', '${name}', '${contactEmail}', '${company}', '${title}', '${phone}', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
     )
   }
 
   if (contactValues.length > 0) {
-    await executeSql(apiUrl, jwt, biscuit,
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
       `INSERT INTO ${schema}.DEAL_CONTACTS
         (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, NAME, EMAIL, COMPANY, TITLE, PHONE_NUMBER, IS_FAVORITE, CREATED_AT, UPDATED_AT)
-      VALUES ${contactValues.join(', ')}`)
+      VALUES ${contactValues.join(', ')}`,
+    )
   }
 
   console.log(`[save-deal-contacts] ${contactValues.length} contacts saved`)

@@ -50,10 +50,10 @@ export function sanitizeEmailBody(body) {
 
   // Step 3: Collapse whitespace
   text = text
-    .replace(/\r\n/g, '\n')           // Normalize line endings
-    .replace(/\n{3,}/g, '\n\n')       // Max 2 consecutive newlines
-    .replace(/[ \t]{2,}/g, ' ')       // Collapse horizontal whitespace
-    .replace(/^\s+$/gm, '')           // Remove whitespace-only lines
+    .replace(/\r\n/g, '\n') // Normalize line endings
+    .replace(/\n{3,}/g, '\n\n') // Max 2 consecutive newlines
+    .replace(/[ \t]{2,}/g, ' ') // Collapse horizontal whitespace
+    .replace(/^\s+$/gm, '') // Remove whitespace-only lines
     .trim()
 
   // Step 4: Truncate

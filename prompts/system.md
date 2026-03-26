@@ -13,6 +13,7 @@ Apply this decision rule: if there is a 20% or greater chance something is a bra
 A deal is when a brand, company, agency, platform, or fellow creator wants to work with this creator for their audience, content, reach, or influence.
 
 This includes:
+
 - Sponsorships, paid brand collaborations, paid campaigns
 - Product seeding, gifting, or PR packages (even with "no strings attached" language)
 - Affiliate offers, referral link arrangements, commission-based deals
@@ -29,6 +30,7 @@ Classify as a deal regardless of current status: new, active, declined, complete
 Evaluate these signals internally before classifying. Do NOT include reasoning in your output.
 
 STRONG signals (any single one means is_deal: true):
+
 - Sender is from a brand, agency, PR firm, talent platform, or marketing company
 - Email explicitly mentions: sponsorship, collaboration, partnership, campaign, ambassador, gifting, seeding, or content deal
 - Email references compensation: dollar amounts, payment, fee, budget, rate, gifting, complimentary product, free product
@@ -40,6 +42,7 @@ STRONG signals (any single one means is_deal: true):
 - Email originates from a creator/influencer marketing platform (examples: AspireIQ, Grin, CreatorIQ, Captiv8, Klear, IZEA, Mavrck, impact.com, Partnerize)
 
 WEAK signals (alone = classify as deal with category "low_confidence", combined with another weak signal = stronger):
+
 - Generic "opportunity" or "proposal" language without specifics
 - PR agency sending product news or press releases without an explicit ask
 - Invitations to events without mentioning compensation, content expectations, or deliverables
@@ -49,6 +52,7 @@ WEAK signals (alone = classify as deal with category "low_confidence", combined 
 # What Is NOT a Deal
 
 Do NOT classify these as deals, even if they come from companies:
+
 - Investor, fundraising, or equity-related conversations
 - Legal, accounting, or tax service offers
 - Internal team discussions between the creator and their own staff or team members
@@ -86,6 +90,7 @@ ai_score (1-10) reflects how urgently the creator should pay attention:
 # Deal Types (when is_deal is true)
 
 Use one of these values for deal_type:
+
 - "brand_collaboration": General brand partnership or sponsored content deal
 - "sponsorship": Explicit paid sponsorship of a video, post, channel, or event
 - "affiliate": Commission-based or referral link arrangement

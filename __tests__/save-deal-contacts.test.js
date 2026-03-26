@@ -143,7 +143,14 @@ describe('save-deal-contacts command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // 1. auth
       .mockResolvedValueOnce(sxtResponse(makeAudit(threads))) // 2. getAuditByBatchId
-      .mockResolvedValueOnce(sxtResponse(makeDeals([['thread-no-email', 'deal-a'], ['thread-no-contact', 'deal-b']]))) // 3. SELECT deals
+      .mockResolvedValueOnce(
+        sxtResponse(
+          makeDeals([
+            ['thread-no-email', 'deal-a'],
+            ['thread-no-contact', 'deal-b'],
+          ]),
+        ),
+      ) // 3. SELECT deals
       .mockResolvedValueOnce(sxtResponse()) // 4. DELETE contacts
 
     const result = await runSaveDealContacts()
@@ -151,7 +158,9 @@ describe('save-deal-contacts command', () => {
     expect(result.contacts_created).toBe(0)
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    const contactInserts = sqlCalls.filter((c) => getSqlText(c).includes('INSERT') && getSqlText(c).includes('DEAL_CONTACTS'))
+    const contactInserts = sqlCalls.filter(
+      (c) => getSqlText(c).includes('INSERT') && getSqlText(c).includes('DEAL_CONTACTS'),
+    )
     expect(contactInserts).toHaveLength(0)
   })
 
@@ -183,8 +192,12 @@ describe('save-deal-contacts command', () => {
     await runSaveDealContacts()
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    const deleteIdx = sqlCalls.findIndex((c) => getSqlText(c).includes('DELETE') && getSqlText(c).includes('DEAL_CONTACTS'))
-    const insertIdx = sqlCalls.findIndex((c) => getSqlText(c).includes('INSERT') && getSqlText(c).includes('DEAL_CONTACTS'))
+    const deleteIdx = sqlCalls.findIndex(
+      (c) => getSqlText(c).includes('DELETE') && getSqlText(c).includes('DEAL_CONTACTS'),
+    )
+    const insertIdx = sqlCalls.findIndex(
+      (c) => getSqlText(c).includes('INSERT') && getSqlText(c).includes('DEAL_CONTACTS'),
+    )
     expect(deleteIdx).toBeGreaterThanOrEqual(0)
     expect(insertIdx).toBeGreaterThan(deleteIdx)
 
@@ -230,13 +243,25 @@ describe('save-deal-contacts command', () => {
         thread_id: 'thread-001',
         is_deal: true,
         deal_name: 'Deal A',
-        main_contact: { name: 'Alice', email: 'alice@a.com', company: 'A Inc', title: 'VP', phone_number: null },
+        main_contact: {
+          name: 'Alice',
+          email: 'alice@a.com',
+          company: 'A Inc',
+          title: 'VP',
+          phone_number: null,
+        },
       },
       {
         thread_id: 'thread-002',
         is_deal: true,
         deal_name: 'Deal B',
-        main_contact: { name: 'Bob', email: 'bob@b.com', company: 'B Corp', title: 'Director', phone_number: '+1-555-0200' },
+        main_contact: {
+          name: 'Bob',
+          email: 'bob@b.com',
+          company: 'B Corp',
+          title: 'Director',
+          phone_number: '+1-555-0200',
+        },
       },
       {
         thread_id: 'thread-003',
@@ -249,7 +274,14 @@ describe('save-deal-contacts command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse()) // 1. auth
       .mockResolvedValueOnce(sxtResponse(makeAudit(threads))) // 2. getAuditByBatchId
-      .mockResolvedValueOnce(sxtResponse(makeDeals([['thread-001', 'deal-a'], ['thread-002', 'deal-b']]))) // 3. SELECT deals
+      .mockResolvedValueOnce(
+        sxtResponse(
+          makeDeals([
+            ['thread-001', 'deal-a'],
+            ['thread-002', 'deal-b'],
+          ]),
+        ),
+      ) // 3. SELECT deals
       .mockResolvedValueOnce(sxtResponse()) // 4. DELETE contacts
       .mockResolvedValueOnce(sxtResponse()) // 5. INSERT contacts
 
@@ -271,13 +303,25 @@ describe('save-deal-contacts command', () => {
         thread_id: 'thread-has-deal',
         is_deal: true,
         deal_name: 'Deal OK',
-        main_contact: { name: 'Alice', email: 'alice@a.com', company: 'A Inc', title: 'VP', phone_number: null },
+        main_contact: {
+          name: 'Alice',
+          email: 'alice@a.com',
+          company: 'A Inc',
+          title: 'VP',
+          phone_number: null,
+        },
       },
       {
         thread_id: 'thread-no-deal',
         is_deal: true,
         deal_name: 'Deal Missing',
-        main_contact: { name: 'Bob', email: 'bob@b.com', company: 'B Corp', title: 'CEO', phone_number: null },
+        main_contact: {
+          name: 'Bob',
+          email: 'bob@b.com',
+          company: 'B Corp',
+          title: 'CEO',
+          phone_number: null,
+        },
       },
     ]
 

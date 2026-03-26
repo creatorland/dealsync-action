@@ -152,9 +152,7 @@ describe('sync-deal-states command', () => {
   it('authenticates via proxy with x-shared-secret', async () => {
     mockInputs()
 
-    fetchSpy
-      .mockResolvedValueOnce(authResponse())
-      .mockResolvedValueOnce(sxtResponse([]))
+    fetchSpy.mockResolvedValueOnce(authResponse()).mockResolvedValueOnce(sxtResponse([]))
 
     await runSyncDealStates()
 
@@ -167,9 +165,7 @@ describe('sync-deal-states command', () => {
   it('uses correct SQL column names in diff and insert', async () => {
     mockInputs()
 
-    const diffRows = [
-      { ID: 'em-abc', USER_ID: 'u-1', THREAD_ID: 't-1', MESSAGE_ID: 'm-1' },
-    ]
+    const diffRows = [{ ID: 'em-abc', USER_ID: 'u-1', THREAD_ID: 't-1', MESSAGE_ID: 'm-1' }]
 
     fetchSpy
       .mockResolvedValueOnce(authResponse())
