@@ -27361,7 +27361,7 @@ function sanitizeSchema(schema) {
 
 const SQL_TIMEOUT_MS = 120000;
 const AUTH_TIMEOUT_MS = 30000;
-const MAX_RETRIES = 3;
+const MAX_RETRIES = 6;
 
 let cachedJwt = null;
 
