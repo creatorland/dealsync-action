@@ -34847,10 +34847,8 @@ function isRejected(email) {
 
 /**
  * Combined fetch-headers + filter command.
- * Fetches email headers from content fetcher, applies filter rules,
- * and returns filtered/rejected ID lists ready for SxT updates.
- *
- * No large data passes between steps — only small ID lists in output.
+ * Fetches email headers (metadata only, no body) from content fetcher,
+ * applies filter rules, and returns filtered/rejected ID lists.
  */
 async function runFetchAndFilter() {
   const authUrl = coreExports.getInput('auth-url');
@@ -34859,10 +34857,12 @@ async function runFetchAndFilter() {
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
   const batchId = sanitizeId(coreExports.getInput('batch-id'));
+  const chunkSize = parseInt(coreExports.getInput('chunk-size') || '50', 10);
+  const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '30000', 10);
 
   if (!batchId) throw new Error('batch-id is required')
 
-  console.log(`[fetch-and-filter] starting for batch ${batchId}`);
+  console.log(`[fetch-and-filter] starting for batch ${batchId} (chunk=${chunkSize}, timeout=${fetchTimeoutMs}ms)`);
 
   // 1. Authenticate + fetch metadata from SxT
   const jwt = await authenticate(authUrl, authSecret);
@@ -34880,24 +34880,28 @@ async function runFetchAndFilter() {
 
   console.log(`[fetch-and-filter] found ${metadataRows.length} deal_states`);
 
-  // 2. Fetch headers from content fetcher
+  // 2. Fetch headers only from content fetcher (format=metadata, no body)
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
   const userId = metadataRows[0].USER_ID;
   const syncStateId = metadataRows[0].SYNC_STATE_ID;
   const messageIds = metadataRows.map((r) => r.MESSAGE_ID);
 
-  const MAX_PER_CHUNK = 10;
   const allEmails = [];
   const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]));
 
-  for (let i = 0; i < messageIds.length; i += MAX_PER_CHUNK) {
-    const chunk = messageIds.slice(i, i + MAX_PER_CHUNK);
+  for (let i = 0; i < messageIds.length; i += chunkSize) {
+    const chunk = messageIds.slice(i, i + chunkSize);
     try {
-      const { signal, clear } = withTimeout();
+      const { signal, clear } = withTimeout(fetchTimeoutMs);
       const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, ...(syncStateId ? { syncStateId } : {}), messageIds: chunk }),
+        body: JSON.stringify({
+          userId,
+          ...(syncStateId ? { syncStateId } : {}),
+          messageIds: chunk,
+          format: 'metadata',
+        }),
         signal,
       });
       clear();
@@ -34909,15 +34913,11 @@ async function runFetchAndFilter() {
         const meta = metaByMessageId.get(email.messageId);
         if (meta) {
           email.id = meta.EMAIL_METADATA_ID;
-          // Only keep header fields
-          delete email.body;
-          delete email.replyBody;
-          delete email.attachments;
         }
         allEmails.push(email);
       }
     } catch (err) {
-      console.log(`[fetch-and-filter] content fetch failed for chunk: ${err.message}`);
+      console.log(`[fetch-and-filter] content fetch failed for chunk ${Math.floor(i / chunkSize) + 1}: ${err.message}`);
     }
   }
 
@@ -34927,7 +34927,7 @@ async function runFetchAndFilter() {
 
   console.log(`[fetch-and-filter] fetched ${allEmails.length} emails, applying filter rules`);
 
-  // 4. Apply filter rules
+  // 3. Apply filter rules
   const filteredIds = [];
   const rejectedIds = [];
 
