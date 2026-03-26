@@ -31,7 +31,7 @@ export async function runClassifyPipeline() {
   const primaryModel = core.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507'
   const fallbackModel = core.getInput('fallback-model') || 'moonshotai/Kimi-K2-Instruct'
   const aiApiUrl = core.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions'
-  const maxConcurrent = parseInt(core.getInput('max-concurrent') || '3', 10)
+  const maxConcurrent = parseInt(core.getInput('max-concurrent') || '30', 10)
   const classifyBatchSize = parseInt(core.getInput('classify-batch-size') || '5', 10)
   const maxRetries = parseInt(core.getInput('max-retries') || '3', 10)
   const chunkSize = parseInt(core.getInput('chunk-size') || '10', 10)

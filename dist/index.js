@@ -38981,7 +38981,7 @@ async function runClassifyPipeline() {
   const primaryModel = coreExports.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
   const fallbackModel = coreExports.getInput('fallback-model') || 'moonshotai/Kimi-K2-Instruct';
   const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
-  const maxConcurrent = parseInt(coreExports.getInput('max-concurrent') || '3', 10);
+  const maxConcurrent = parseInt(coreExports.getInput('max-concurrent') || '30', 10);
   const classifyBatchSize = parseInt(coreExports.getInput('classify-batch-size') || '5', 10);
   const maxRetries = parseInt(coreExports.getInput('max-retries') || '3', 10);
   const chunkSize = parseInt(coreExports.getInput('chunk-size') || '10', 10);
