@@ -27478,13 +27478,17 @@ async function acquireRateLimitToken() {
 }
 
 /**
- * Deduplicated re-authentication. Only one worker calls authenticate() at a time.
- * Others wait for the same promise and get the refreshed JWT.
+ * Deduplicated re-authentication. Only re-auths if the bad token matches
+ * the current cachedJwt (meaning no one else has refreshed it yet).
+ * If cachedJwt is already different, the token was already refreshed — skip.
+ * If another worker is already re-authing, wait for that result.
  */
 async function reauthenticate(badToken) {
-  if (reauthPromise) {
-    return reauthPromise
-  }
+  // Already refreshed by another worker — skip
+  if (cachedJwt && cachedJwt !== badToken) return cachedJwt
+  // Another worker is already re-authing — wait for it
+  if (reauthPromise) return reauthPromise
+
   const authUrl = coreExports.getInput('auth-url');
   const authSecret = coreExports.getInput('auth-secret');
   reauthPromise = authenticate(authUrl, authSecret, badToken).finally(() => {
