@@ -292,7 +292,7 @@ describe('insertBatchEvent', () => {
     })
 
     const expectedSql =
-      "INSERT INTO TEST_SCHEMA.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ('trigger-abc', 'batch-xyz', 'classify', 'completed', CURRENT_TIMESTAMP)"
+      "INSERT INTO TEST_SCHEMA.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ('trigger-abc', 'batch-xyz', 'classify', 'completed', CURRENT_TIMESTAMP) ON CONFLICT (TRIGGER_HASH) DO UPDATE SET EVENT_TYPE = EXCLUDED.EVENT_TYPE, CREATED_AT = CURRENT_TIMESTAMP"
     expect(executeSqlFn).toHaveBeenCalledWith(expectedSql)
   })
 })
