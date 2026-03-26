@@ -17,7 +17,7 @@ export async function runClaimFilterBatch() {
   const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
   const batchSize = parseInt(core.getInput('filter-batch-size') || '200', 10)
-  const maxRetries = parseInt(core.getInput('max-retries') || '3', 10)
+  const maxRetries = parseInt(core.getInput('max-retries') || '6', 10)
 
   console.log(`[claim-filter-batch] starting (batchSize=${batchSize}, maxRetries=${maxRetries})`)
 

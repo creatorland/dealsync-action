@@ -22,7 +22,7 @@ export async function runFilterPipeline() {
   const contentFetcherUrl = core.getInput('content-fetcher-url')
   const maxConcurrent = parseInt(core.getInput('max-concurrent') || '5', 10)
   const batchSize = parseInt(core.getInput('filter-batch-size') || '200', 10)
-  const maxRetries = parseInt(core.getInput('max-retries') || '3', 10)
+  const maxRetries = parseInt(core.getInput('max-retries') || '6', 10)
   const chunkSize = parseInt(core.getInput('chunk-size') || '50', 10)
   const fetchTimeoutMs = parseInt(core.getInput('fetch-timeout-ms') || '30000', 10)
 

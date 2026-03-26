@@ -43,7 +43,7 @@ export async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries }) 
             results.failed++
             return
           }
-          const delay = 2000 * Math.pow(2, currentAttempt - 1)
+          const delay = Math.min(2000 * Math.pow(2, currentAttempt - 1), 30000)
           await new Promise((r) => setTimeout(r, delay))
         }
       }

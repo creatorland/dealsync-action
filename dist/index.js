@@ -38382,7 +38382,7 @@ async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries }) {
             results.failed++;
             return
           }
-          const delay = 2000 * Math.pow(2, currentAttempt - 1);
+          const delay = Math.min(2000 * Math.pow(2, currentAttempt - 1), 30000);
           await new Promise((r) => setTimeout(r, delay));
         }
       }
@@ -38444,7 +38444,7 @@ async function runClaimFilterBatch() {
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
   const batchSize = parseInt(coreExports.getInput('filter-batch-size') || '200', 10);
-  const maxRetries = parseInt(coreExports.getInput('max-retries') || '3', 10);
+  const maxRetries = parseInt(coreExports.getInput('max-retries') || '6', 10);
 
   console.log(`[claim-filter-batch] starting (batchSize=${batchSize}, maxRetries=${maxRetries})`);
 
@@ -38540,7 +38540,7 @@ async function runClaimClassifyBatch() {
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
   const batchSize = parseInt(coreExports.getInput('classify-batch-size') || '5', 10);
-  const maxRetries = parseInt(coreExports.getInput('max-retries') || '3', 10);
+  const maxRetries = parseInt(coreExports.getInput('max-retries') || '6', 10);
 
   console.log(`[claim-classify-batch] starting (batchSize=${batchSize}, maxRetries=${maxRetries})`);
 
@@ -38765,7 +38765,7 @@ async function runFilterPipeline() {
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
   const maxConcurrent = parseInt(coreExports.getInput('max-concurrent') || '5', 10);
   const batchSize = parseInt(coreExports.getInput('filter-batch-size') || '200', 10);
-  const maxRetries = parseInt(coreExports.getInput('max-retries') || '3', 10);
+  const maxRetries = parseInt(coreExports.getInput('max-retries') || '6', 10);
   const chunkSize = parseInt(coreExports.getInput('chunk-size') || '50', 10);
   const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '30000', 10);
 
@@ -39176,7 +39176,7 @@ async function runClassifyPipeline() {
   const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
   const maxConcurrent = parseInt(coreExports.getInput('max-concurrent') || '70', 10);
   const classifyBatchSize = parseInt(coreExports.getInput('classify-batch-size') || '5', 10);
-  const maxRetries = parseInt(coreExports.getInput('max-retries') || '3', 10);
+  const maxRetries = parseInt(coreExports.getInput('max-retries') || '6', 10);
   const chunkSize = parseInt(coreExports.getInput('chunk-size') || '10', 10);
   const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '120000', 10);
   const flushIntervalMs = parseInt(coreExports.getInput('flush-interval-ms') || '5000', 10);

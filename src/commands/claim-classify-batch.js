@@ -22,7 +22,7 @@ export async function runClaimClassifyBatch() {
   const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
   const batchSize = parseInt(core.getInput('classify-batch-size') || '5', 10)
-  const maxRetries = parseInt(core.getInput('max-retries') || '3', 10)
+  const maxRetries = parseInt(core.getInput('max-retries') || '6', 10)
 
   console.log(`[claim-classify-batch] starting (batchSize=${batchSize}, maxRetries=${maxRetries})`)
 

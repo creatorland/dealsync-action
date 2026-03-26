@@ -32,7 +32,7 @@ export async function runClassifyPipeline() {
   const aiApiUrl = core.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions'
   const maxConcurrent = parseInt(core.getInput('max-concurrent') || '70', 10)
   const classifyBatchSize = parseInt(core.getInput('classify-batch-size') || '5', 10)
-  const maxRetries = parseInt(core.getInput('max-retries') || '3', 10)
+  const maxRetries = parseInt(core.getInput('max-retries') || '6', 10)
   const chunkSize = parseInt(core.getInput('chunk-size') || '10', 10)
   const fetchTimeoutMs = parseInt(core.getInput('fetch-timeout-ms') || '120000', 10)
   const flushIntervalMs = parseInt(core.getInput('flush-interval-ms') || '5000', 10)

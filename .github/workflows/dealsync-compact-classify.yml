@@ -10,7 +10,7 @@ on:
         default: '5'
       max_retries:
         type: string
-        default: '3'
+        default: '6'
       chunk_size:
         type: string
         default: '10'

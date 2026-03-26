@@ -83,7 +83,7 @@ inputs:
     default: '5'
   max-retries:
     description: 'Max attempts per batch before dead letter (run-filter-pipeline, run-classify-pipeline)'
-    default: '3'
+    default: '6'
   flush-interval-ms:
     description: 'Write batcher flush interval in ms (run-classify-pipeline)'
     default: '5000'
