@@ -47,35 +47,48 @@ export async function runFetchAndFilter() {
   const allEmails = []
   const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]))
 
+  const MAX_RETRIES = 3
   for (let i = 0; i < messageIds.length; i += chunkSize) {
     const chunk = messageIds.slice(i, i + chunkSize)
-    try {
-      const { signal, clear } = withTimeout(fetchTimeoutMs)
-      const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId,
-          ...(syncStateId ? { syncStateId } : {}),
-          messageIds: chunk,
-          format: 'metadata',
-        }),
-        signal,
-      })
-      clear()
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-      const result = await resp.json()
-      const emails = result.data || result
+    const chunkNum = Math.floor(i / chunkSize) + 1
+    let fetched = false
 
-      for (const email of emails) {
-        const meta = metaByMessageId.get(email.messageId)
-        if (meta) {
-          email.id = meta.EMAIL_METADATA_ID
+    for (let attempt = 0; attempt < MAX_RETRIES && !fetched; attempt++) {
+      try {
+        const { signal, clear } = withTimeout(fetchTimeoutMs)
+        const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId,
+            ...(syncStateId ? { syncStateId } : {}),
+            messageIds: chunk,
+            format: 'metadata',
+          }),
+          signal,
+        })
+        clear()
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+        const result = await resp.json()
+        const emails = result.data || result
+
+        for (const email of emails) {
+          const meta = metaByMessageId.get(email.messageId)
+          if (meta) {
+            email.id = meta.EMAIL_METADATA_ID
+          }
+          allEmails.push(email)
         }
-        allEmails.push(email)
+        fetched = true
+      } catch (err) {
+        if (attempt < MAX_RETRIES - 1) {
+          const delay = Math.min(1000 * Math.pow(2, attempt), 10000)
+          console.log(`[fetch-and-filter] chunk ${chunkNum} failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`)
+          await new Promise((r) => setTimeout(r, delay))
+        } else {
+          console.log(`[fetch-and-filter] chunk ${chunkNum} failed after ${MAX_RETRIES} attempts: ${err.message}`)
+        }
       }
-    } catch (err) {
-      console.log(`[fetch-and-filter] content fetch failed for chunk ${Math.floor(i / chunkSize) + 1}: ${err.message}`)
     }
   }
 

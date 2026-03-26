@@ -27,8 +27,8 @@ jobs:
           rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
           rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
           content-fetcher-url: ${{ secrets.CONTENT_FETCHER_URL }}
-          chunk-size: '25'
-          fetch-timeout-ms: '60000'
+          chunk-size: '200'
+          fetch-timeout-ms: '120000'
 
       - id: save-passed
         name: Save passed emails
