@@ -1,13 +1,6 @@
 name: dealsync-compact-sync
 on:
   workflow_dispatch:
-    inputs:
-      offset:
-        type: string
-        default: '0'
-      limit:
-        type: string
-        default: '500'
 
 concurrency:
   group: compact-sync
@@ -23,8 +16,6 @@ jobs:
         uses: creatorland/dealsync-action@main
         with:
           command: sync-deal-states
-          offset: ${{ inputs.offset }}
-          limit: ${{ inputs.limit }}
           auth-url: ${{ secrets.SXT_AUTH_URL }}
           auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
           api-url: ${{ secrets.SXT_API_URL }}
