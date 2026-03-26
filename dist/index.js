@@ -27451,6 +27451,7 @@ function sanitizeSchema(schema) {
 
 
 const SQL_TIMEOUT_MS = 120000;
+const AUTH_TIMEOUT_MS = 30000;
 const MAX_AUTH_RETRIES = 3;
 
 let cachedJwt = null;
@@ -27469,7 +27470,7 @@ function withTimeout(ms = SQL_TIMEOUT_MS) {
  * Get token from sxt/auth. If badToken provided, backend refreshes.
  */
 async function authenticate(authUrl, authSecret, badToken) {
-  const { signal, clear } = withTimeout(30000);
+  const { signal, clear } = withTimeout(AUTH_TIMEOUT_MS);
   try {
     const headers = { 'x-shared-secret': authSecret };
     if (badToken) headers['x-bad-token'] = badToken;
