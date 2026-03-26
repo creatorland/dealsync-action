@@ -82,6 +82,23 @@ jest.unstable_mockModule('../src/lib/pipeline.js', () => ({
   insertBatchEvent: mockInsertBatchEvent,
 }))
 
+// Mock WriteBatcher
+const mockBatcherInstance = {
+  pushEvals: jest.fn().mockResolvedValue(undefined),
+  pushDealDeletes: jest.fn().mockResolvedValue(undefined),
+  pushDeals: jest.fn().mockResolvedValue(undefined),
+  pushContactDeletes: jest.fn().mockResolvedValue(undefined),
+  pushContacts: jest.fn().mockResolvedValue(undefined),
+  pushStateUpdates: jest.fn().mockResolvedValue(undefined),
+  pushBatchEvents: jest.fn().mockResolvedValue(undefined),
+  drain: jest.fn().mockResolvedValue(undefined),
+  stop: jest.fn(),
+}
+const MockWriteBatcher = jest.fn(() => mockBatcherInstance)
+jest.unstable_mockModule('../src/lib/write-batcher.js', () => ({
+  WriteBatcher: MockWriteBatcher,
+}))
+
 const core = await import('@actions/core')
 const { runClassifyPipeline } = await import('../src/commands/run-classify-pipeline.js')
 
@@ -106,6 +123,8 @@ function mockInputs(overrides = {}) {
     'max-retries': '3',
     'chunk-size': '10',
     'fetch-timeout-ms': '120000',
+    'flush-interval-ms': '5000',
+    'flush-threshold': '10',
     ...overrides,
   }
   core.getInput.mockImplementation((name) => defaults[name] ?? '')
@@ -161,6 +180,48 @@ describe('run-classify-pipeline command', () => {
     for (const key of Object.keys(outputs)) delete outputs[key]
     mockAuthenticate.mockResolvedValue('test-jwt')
     mockInsertBatchEvent.mockResolvedValue(undefined)
+    // Reset batcher mock
+    mockBatcherInstance.pushEvals.mockResolvedValue(undefined)
+    mockBatcherInstance.pushDealDeletes.mockResolvedValue(undefined)
+    mockBatcherInstance.pushDeals.mockResolvedValue(undefined)
+    mockBatcherInstance.pushContactDeletes.mockResolvedValue(undefined)
+    mockBatcherInstance.pushContacts.mockResolvedValue(undefined)
+    mockBatcherInstance.pushStateUpdates.mockResolvedValue(undefined)
+    mockBatcherInstance.pushBatchEvents.mockResolvedValue(undefined)
+    mockBatcherInstance.drain.mockResolvedValue(undefined)
+  })
+
+  // ----------------------------------------------------------
+  // WriteBatcher is created with correct params
+  // ----------------------------------------------------------
+
+  it('creates WriteBatcher with correct params', async () => {
+    mockInputs({ 'flush-interval-ms': '3000', 'flush-threshold': '20' })
+
+    mockRunPool.mockResolvedValue({ processed: 0, failed: 0 })
+
+    await runClassifyPipeline()
+
+    expect(MockWriteBatcher).toHaveBeenCalledTimes(1)
+    expect(MockWriteBatcher).toHaveBeenCalledWith(
+      expect.any(Function),
+      'dealsync_stg_v1',
+      { flushIntervalMs: 3000, flushThreshold: 20 },
+    )
+  })
+
+  // ----------------------------------------------------------
+  // drain() called after runPool
+  // ----------------------------------------------------------
+
+  it('calls batcher.drain() after runPool completes', async () => {
+    mockInputs()
+
+    mockRunPool.mockResolvedValue({ processed: 0, failed: 0 })
+
+    await runClassifyPipeline()
+
+    expect(mockBatcherInstance.drain).toHaveBeenCalledTimes(1)
   })
 
   // ----------------------------------------------------------
@@ -204,28 +265,16 @@ describe('run-classify-pipeline command', () => {
       // Save audit checkpoint
       mockExecuteSql.mockResolvedValueOnce([]) // insertAudit
 
-      // Step 4: Save evals
-      mockExecuteSql.mockResolvedValueOnce([]) // INSERT evals
-
-      // Step 5: Save deals
-      // DELETE non-deals
-      mockExecuteSql.mockResolvedValueOnce([]) // DELETE non-deal from DEALS
-      // INSERT deals
-      mockExecuteSql.mockResolvedValueOnce([]) // INSERT deals
-
-      // Step 6: Save deal contacts
-      // SELECT deals by thread_id
-      mockExecuteSql.mockResolvedValueOnce([{ ID: 'deal-1', THREAD_ID: 'thread-1' }])
-      // DELETE existing contacts
-      mockExecuteSql.mockResolvedValueOnce([])
-      // INSERT contacts
-      mockExecuteSql.mockResolvedValueOnce([])
-
-      // Step 7: Update deal states
-      mockExecuteSql.mockResolvedValueOnce([]) // updateDeals
-      mockExecuteSql.mockResolvedValueOnce([]) // updateNotDeal
-
       await workerFn(batch, { attempt: 0 })
+
+      // Verify batcher was used for all save operations
+      expect(mockBatcherInstance.pushEvals).toHaveBeenCalledTimes(1)
+      expect(mockBatcherInstance.pushDealDeletes).toHaveBeenCalledTimes(1) // non-deal threads
+      expect(mockBatcherInstance.pushDeals).toHaveBeenCalledTimes(1) // deal threads
+      expect(mockBatcherInstance.pushContactDeletes).toHaveBeenCalledTimes(1)
+      expect(mockBatcherInstance.pushContacts).toHaveBeenCalledTimes(1)
+      expect(mockBatcherInstance.pushStateUpdates).toHaveBeenCalledTimes(1)
+      expect(mockBatcherInstance.pushBatchEvents).toHaveBeenCalledTimes(1)
 
       return { processed: 1, failed: 0 }
     })
@@ -247,14 +296,6 @@ describe('run-classify-pipeline command', () => {
       batchId: 'test-uuid-1',
       batchType: 'classify',
       eventType: 'new',
-    })
-
-    // Verify batch event for completion
-    expect(mockInsertBatchEvent).toHaveBeenCalledWith(expect.any(Function), 'dealsync_stg_v1', {
-      triggerHash: 'test-uuid-1',
-      batchId: 'test-uuid-1',
-      batchType: 'classify',
-      eventType: 'complete',
     })
   })
 
@@ -280,22 +321,6 @@ describe('run-classify-pipeline command', () => {
       // Step 2: Check existing audit (found!)
       mockExecuteSql.mockResolvedValueOnce([{ AI_EVALUATION: JSON.stringify(cachedAudit) }])
 
-      // Step 4: Save evals (no AI calls needed)
-      mockExecuteSql.mockResolvedValueOnce([]) // INSERT evals
-
-      // Step 5: Save deals
-      mockExecuteSql.mockResolvedValueOnce([]) // DELETE non-deal from DEALS
-      mockExecuteSql.mockResolvedValueOnce([]) // INSERT deals
-
-      // Step 6: Save deal contacts
-      mockExecuteSql.mockResolvedValueOnce([{ ID: 'deal-1', THREAD_ID: 'thread-1' }]) // SELECT deals
-      mockExecuteSql.mockResolvedValueOnce([]) // DELETE contacts
-      mockExecuteSql.mockResolvedValueOnce([]) // INSERT contacts
-
-      // Step 7: Update deal states
-      mockExecuteSql.mockResolvedValueOnce([]) // updateDeals
-      mockExecuteSql.mockResolvedValueOnce([]) // updateNotDeal
-
       await workerFn(batch, { attempt: 0 })
 
       return { processed: 1, failed: 0 }
@@ -308,6 +333,9 @@ describe('run-classify-pipeline command', () => {
     expect(mockCallModel).not.toHaveBeenCalled()
     expect(mockBuildPrompt).not.toHaveBeenCalled()
     expect(mockParseAndValidate).not.toHaveBeenCalled()
+
+    // But batcher should still have been used
+    expect(mockBatcherInstance.pushEvals).toHaveBeenCalledTimes(1)
   })
 
   // ----------------------------------------------------------
@@ -638,10 +666,10 @@ describe('run-classify-pipeline command', () => {
   })
 
   // ----------------------------------------------------------
-  // Save evals uses correct SQL
+  // Save evals uses batcher
   // ----------------------------------------------------------
 
-  it('saves evals with correct ON CONFLICT upsert', async () => {
+  it('pushes evals to batcher with correct values', async () => {
     mockInputs()
 
     const rows = makeBatchRows(2)
@@ -657,23 +685,14 @@ describe('run-classify-pipeline command', () => {
       // Existing audit
       mockExecuteSql.mockResolvedValueOnce([{ AI_EVALUATION: JSON.stringify({ threads }) }])
 
-      // Capture evals SQL
-      mockExecuteSql.mockResolvedValueOnce([]) // INSERT evals
-
-      // Rest of pipeline
-      mockExecuteSql.mockResolvedValue([])
-
       await workerFn(batch, { attempt: 0 })
 
-      // Find the evals INSERT call
-      const evalCall = mockExecuteSql.mock.calls.find(
-        (c) => typeof c[3] === 'string' && c[3].includes('EMAIL_THREAD_EVALUATIONS'),
-      )
-      expect(evalCall).toBeTruthy()
-      expect(evalCall[3]).toContain('INSERT INTO dealsync_stg_v1.EMAIL_THREAD_EVALUATIONS')
-      expect(evalCall[3]).toContain('ON CONFLICT (THREAD_ID) DO UPDATE SET')
-      expect(evalCall[3]).toContain('thread-1')
-      expect(evalCall[3]).toContain('thread-2')
+      // Verify pushEvals was called with correct values
+      expect(mockBatcherInstance.pushEvals).toHaveBeenCalledTimes(1)
+      const evalValues = mockBatcherInstance.pushEvals.mock.calls[0][0]
+      expect(evalValues).toHaveLength(2)
+      expect(evalValues[0]).toContain('thread-1')
+      expect(evalValues[1]).toContain('thread-2')
 
       return { processed: 1, failed: 0 }
     })
@@ -701,38 +720,19 @@ describe('run-classify-pipeline command', () => {
       // Existing audit
       mockExecuteSql.mockResolvedValueOnce([{ AI_EVALUATION: JSON.stringify({ threads }) }])
 
-      // Evals
-      mockExecuteSql.mockResolvedValueOnce([])
-
-      // Deals: DELETE non-deal + INSERT deals
-      mockExecuteSql.mockResolvedValueOnce([]) // DELETE non-deal
-      mockExecuteSql.mockResolvedValueOnce([]) // INSERT deals
-
-      // Contacts
-      mockExecuteSql.mockResolvedValueOnce([{ ID: 'deal-1', THREAD_ID: 'thread-1' }])
-      mockExecuteSql.mockResolvedValueOnce([]) // DELETE contacts
-      mockExecuteSql.mockResolvedValueOnce([]) // INSERT contacts
-
-      // States
-      mockExecuteSql.mockResolvedValueOnce([]) // updateDeals
-      mockExecuteSql.mockResolvedValueOnce([]) // updateNotDeal
-
       await workerFn(batch, { attempt: 0 })
 
-      // Verify DELETE non-deal was called with thread-2
-      const deleteCall = mockExecuteSql.mock.calls.find(
-        (c) => typeof c[3] === 'string' && c[3].includes('DELETE FROM dealsync_stg_v1.DEALS'),
-      )
-      expect(deleteCall).toBeTruthy()
-      expect(deleteCall[3]).toContain("'thread-2'")
+      // Verify non-deal deletes via batcher
+      expect(mockBatcherInstance.pushDealDeletes).toHaveBeenCalledTimes(1)
+      const deleteArgs = mockBatcherInstance.pushDealDeletes.mock.calls[0][0]
+      expect(deleteArgs).toEqual(["'thread-2'"])
 
-      // Verify INSERT deals was called with thread-1
-      const insertDealsCall = mockExecuteSql.mock.calls.find(
-        (c) => typeof c[3] === 'string' && c[3].includes('INSERT INTO dealsync_stg_v1.DEALS'),
-      )
-      expect(insertDealsCall).toBeTruthy()
-      expect(insertDealsCall[3]).toContain("'thread-1'")
-      expect(insertDealsCall[3]).toContain('ON CONFLICT (THREAD_ID) DO UPDATE SET')
+      // Verify deal upserts via batcher
+      expect(mockBatcherInstance.pushDeals).toHaveBeenCalledTimes(1)
+      const dealValues = mockBatcherInstance.pushDeals.mock.calls[0][0]
+      expect(dealValues).toHaveLength(1)
+      expect(dealValues[0]).toContain('thread-1')
+      expect(dealValues[0]).toContain('Test Deal')
 
       return { processed: 1, failed: 0 }
     })
@@ -741,10 +741,10 @@ describe('run-classify-pipeline command', () => {
   })
 
   // ----------------------------------------------------------
-  // Save deal contacts
+  // Save deal contacts uses thread_id as deal_id
   // ----------------------------------------------------------
 
-  it('saves deal contacts with correct data from main_contact', async () => {
+  it('saves deal contacts using thread_id as deal_id (no DEALS lookup)', async () => {
     mockInputs()
 
     const rows = makeBatchRows(1)
@@ -760,35 +760,30 @@ describe('run-classify-pipeline command', () => {
       // Existing audit
       mockExecuteSql.mockResolvedValueOnce([{ AI_EVALUATION: JSON.stringify({ threads }) }])
 
-      // Evals
-      mockExecuteSql.mockResolvedValueOnce([])
-
-      // No non-deal threads to delete, so INSERT deals
-      mockExecuteSql.mockResolvedValueOnce([])
-
-      // Contacts: SELECT deals
-      mockExecuteSql.mockResolvedValueOnce([{ ID: 'deal-abc', THREAD_ID: 'thread-1' }])
-      // DELETE existing contacts
-      mockExecuteSql.mockResolvedValueOnce([])
-      // INSERT contacts
-      mockExecuteSql.mockResolvedValueOnce([])
-
-      // States
-      mockExecuteSql.mockResolvedValueOnce([])
-
       await workerFn(batch, { attempt: 0 })
 
-      // Verify INSERT contacts
-      const contactInsert = mockExecuteSql.mock.calls.find(
-        (c) =>
-          typeof c[3] === 'string' && c[3].includes('INSERT INTO dealsync_stg_v1.DEAL_CONTACTS'),
+      // Verify contacts use thread_id as deal_id
+      expect(mockBatcherInstance.pushContactDeletes).toHaveBeenCalledTimes(1)
+      const contactDeleteArgs = mockBatcherInstance.pushContactDeletes.mock.calls[0][0]
+      expect(contactDeleteArgs).toEqual(["'thread-1'"])
+
+      expect(mockBatcherInstance.pushContacts).toHaveBeenCalledTimes(1)
+      const contactValues = mockBatcherInstance.pushContacts.mock.calls[0][0]
+      expect(contactValues).toHaveLength(1)
+      expect(contactValues[0]).toContain('alice@co.com')
+      expect(contactValues[0]).toContain('Alice')
+      expect(contactValues[0]).toContain('TestCo')
+      expect(contactValues[0]).toContain('CEO')
+      expect(contactValues[0]).toContain('555-1234')
+      // thread_id is used as deal_id
+      expect(contactValues[0]).toContain("'thread-1'")
+
+      // No DEALS SELECT query should have been made during worker
+      // (only audit query and claim queries)
+      const workerExecCalls = mockExecuteSql.mock.calls.filter(
+        (c) => typeof c[3] === 'string' && c[3].includes('SELECT ID, THREAD_ID FROM'),
       )
-      expect(contactInsert).toBeTruthy()
-      expect(contactInsert[3]).toContain('alice@co.com')
-      expect(contactInsert[3]).toContain('Alice')
-      expect(contactInsert[3]).toContain('TestCo')
-      expect(contactInsert[3]).toContain('CEO')
-      expect(contactInsert[3]).toContain('555-1234')
+      expect(workerExecCalls).toHaveLength(0)
 
       return { processed: 1, failed: 0 }
     })
@@ -797,10 +792,10 @@ describe('run-classify-pipeline command', () => {
   })
 
   // ----------------------------------------------------------
-  // Update deal states to terminal
+  // Update deal states via batcher
   // ----------------------------------------------------------
 
-  it('updates deal states to terminal status using detection queries', async () => {
+  it('updates deal states via batcher with correct IDs', async () => {
     mockInputs()
 
     const rows = makeBatchRows(2)
@@ -816,36 +811,51 @@ describe('run-classify-pipeline command', () => {
       // Existing audit
       mockExecuteSql.mockResolvedValueOnce([{ AI_EVALUATION: JSON.stringify({ threads }) }])
 
-      // Evals
-      mockExecuteSql.mockResolvedValueOnce([])
+      await workerFn(batch, { attempt: 0 })
 
-      // Deals
-      mockExecuteSql.mockResolvedValueOnce([]) // DELETE non-deal
-      mockExecuteSql.mockResolvedValueOnce([]) // INSERT deals
+      // Verify state updates via batcher
+      expect(mockBatcherInstance.pushStateUpdates).toHaveBeenCalledTimes(1)
+      const [dealIds, notDealIds] = mockBatcherInstance.pushStateUpdates.mock.calls[0]
+      expect(dealIds).toEqual(["'em-1'"]) // thread-1's email
+      expect(notDealIds).toEqual(["'em-2'"]) // thread-2's email
 
-      // Contacts
-      mockExecuteSql.mockResolvedValueOnce([{ ID: 'deal-1', THREAD_ID: 'thread-1' }])
-      mockExecuteSql.mockResolvedValueOnce([]) // DELETE contacts
-      mockExecuteSql.mockResolvedValueOnce([]) // INSERT contacts
+      return { processed: 1, failed: 0 }
+    })
 
-      // States
-      mockExecuteSql.mockResolvedValueOnce([]) // updateDeals
-      mockExecuteSql.mockResolvedValueOnce([]) // updateNotDeal
+    await runClassifyPipeline()
+  })
+
+  // ----------------------------------------------------------
+  // Batch completion event via batcher
+  // ----------------------------------------------------------
+
+  it('records batch completion via batcher', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(1)
+    const threads = [
+      { thread_id: 'thread-1', is_deal: false, ai_score: 5, ai_summary: 'test', category: null },
+    ]
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed
+
+      const batch = await claimFn()
+
+      // Existing audit
+      mockExecuteSql.mockResolvedValueOnce([{ AI_EVALUATION: JSON.stringify({ threads }) }])
 
       await workerFn(batch, { attempt: 0 })
 
-      // Find deal state update calls
-      const dealUpdateCall = mockExecuteSql.mock.calls.find(
-        (c) => typeof c[3] === 'string' && c[3].includes("STATUS = 'deal'"),
-      )
-      const notDealUpdateCall = mockExecuteSql.mock.calls.find(
-        (c) => typeof c[3] === 'string' && c[3].includes("STATUS = 'not_deal'"),
-      )
-
-      expect(dealUpdateCall).toBeTruthy()
-      expect(dealUpdateCall[3]).toContain("'em-1'") // thread-1's email
-      expect(notDealUpdateCall).toBeTruthy()
-      expect(notDealUpdateCall[3]).toContain("'em-2'") // thread-2's email
+      // Verify batch event via batcher
+      expect(mockBatcherInstance.pushBatchEvents).toHaveBeenCalledTimes(1)
+      const eventValues = mockBatcherInstance.pushBatchEvents.mock.calls[0][0]
+      expect(eventValues).toHaveLength(1)
+      expect(eventValues[0]).toContain('classify')
+      expect(eventValues[0]).toContain('complete')
+      expect(eventValues[0]).toContain('test-uuid-1') // batchId
 
       return { processed: 1, failed: 0 }
     })
@@ -886,9 +896,6 @@ describe('run-classify-pipeline command', () => {
       // Audit insert fails with integrity constraint (duplicate)
       mockExecuteSql.mockRejectedValueOnce(new Error('integrity constraint violation'))
 
-      // Rest of pipeline should still proceed
-      mockExecuteSql.mockResolvedValue([]) // all remaining
-
       // Should NOT throw — handles gracefully
       await workerFn(batch, { attempt: 0 })
 
@@ -913,6 +920,8 @@ describe('run-classify-pipeline command', () => {
       'max-retries': '',
       'chunk-size': '',
       'fetch-timeout-ms': '',
+      'flush-interval-ms': '',
+      'flush-threshold': '',
     })
 
     mockRunPool.mockResolvedValue({ processed: 0, failed: 0 })
@@ -920,7 +929,14 @@ describe('run-classify-pipeline command', () => {
     await runClassifyPipeline()
 
     const [, , opts] = mockRunPool.mock.calls[0]
-    expect(opts).toEqual({ maxConcurrent: 3, maxRetries: 3 })
+    expect(opts).toEqual({ maxConcurrent: 30, maxRetries: 3 })
+
+    // WriteBatcher created with defaults
+    expect(MockWriteBatcher).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.any(String),
+      { flushIntervalMs: 5000, flushThreshold: 10 },
+    )
   })
 
   // ----------------------------------------------------------
@@ -1068,23 +1084,13 @@ describe('run-classify-pipeline command', () => {
       // Existing audit with scam thread
       mockExecuteSql.mockResolvedValueOnce([{ AI_EVALUATION: JSON.stringify({ threads }) }])
 
-      // Evals
-      mockExecuteSql.mockResolvedValueOnce([])
-
-      // No deals — skip deal INSERT, just states
-      mockExecuteSql.mockResolvedValueOnce([]) // updateNotDeal
-
       await workerFn(batch, { attempt: 0 })
 
-      // Find the evals INSERT call
-      const evalCall = mockExecuteSql.mock.calls.find(
-        (c) => typeof c[3] === 'string' && c[3].includes('EMAIL_THREAD_EVALUATIONS'),
-      )
-      expect(evalCall).toBeTruthy()
-      // LIKELY_SCAM should be true
-      expect(evalCall[3]).toContain('true') // both IS_DEAL=false and LIKELY_SCAM=true are present
-      // Check the specific value tuple has likely_scam = true
-      expect(evalCall[3]).toMatch(/false, true/) // IS_DEAL=false, LIKELY_SCAM=true
+      // Find the evals push and verify LIKELY_SCAM is true
+      const evalValues = mockBatcherInstance.pushEvals.mock.calls[0][0]
+      expect(evalValues).toHaveLength(1)
+      // IS_DEAL=false, LIKELY_SCAM=true
+      expect(evalValues[0]).toMatch(/false, true/)
 
       return { processed: 1, failed: 0 }
     })

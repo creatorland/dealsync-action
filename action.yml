@@ -84,6 +84,12 @@ inputs:
   max-retries:
     description: 'Max attempts per batch before dead letter (run-filter-pipeline, run-classify-pipeline)'
     default: '3'
+  flush-interval-ms:
+    description: 'Write batcher flush interval in ms (run-classify-pipeline)'
+    default: '5000'
+  flush-threshold:
+    description: 'Write batcher flush threshold per queue (run-classify-pipeline)'
+    default: '10'
 
 outputs:
   success:
