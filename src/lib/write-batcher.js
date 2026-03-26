@@ -86,9 +86,16 @@ export class WriteBatcher {
     await this._flushAll()
   }
 
-  /** Clear the timer without flushing. For cleanup on fatal error. */
+  /** Clear the timer without flushing. Rejects all pending waiters. For cleanup on fatal error. */
   stop() {
     clearInterval(this._timer)
+    const err = new Error('WriteBatcher stopped')
+    for (const queue of Object.values(this._queues)) {
+      const waiters = queue.waiters
+      queue.waiters = []
+      queue.items = []
+      for (const w of waiters) w.reject(err)
+    }
   }
 
   // ===========================================================

@@ -265,14 +265,15 @@ describe('WriteBatcher', () => {
   // stop() clears timer without flushing
   // ----------------------------------------------------------
 
-  it('stop() clears timer without flushing pending items', () => {
+  it('stop() clears timer and rejects pending waiters', async () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 100 })
 
-    batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    const p = batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
 
     batcher.stop()
 
     expect(mockExec).not.toHaveBeenCalled()
+    await expect(p).rejects.toThrow('WriteBatcher stopped')
   })
 
   // ----------------------------------------------------------
@@ -345,8 +346,8 @@ describe('WriteBatcher', () => {
   it('queues are independent — flushing one does not affect others', async () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 2 })
 
-    // Push to evals (below threshold)
-    batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    // Push to evals (below threshold) — capture promise to handle rejection on stop
+    const evalPromise = batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
 
     // Push to dealDeletes (at threshold) — should flush only dealDeletes
     const p = batcher.pushDealDeletes(["'th-1'", "'th-2'"])
@@ -360,6 +361,8 @@ describe('WriteBatcher', () => {
     expect(batcher._queues.evals.items).toHaveLength(1)
 
     batcher.stop()
+    // The eval promise is rejected by stop() — catch to avoid unhandled rejection
+    await expect(evalPromise).rejects.toThrow('WriteBatcher stopped')
   })
 
   // ----------------------------------------------------------
