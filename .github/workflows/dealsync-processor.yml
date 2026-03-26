@@ -27,7 +27,7 @@ jobs:
           rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
           rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
           content-fetcher-url: ${{ secrets.CONTENT_FETCHER_URL }}
-          chunk-size: '200'
+          chunk-size: '50'
           fetch-timeout-ms: '120000'
 
       - id: save-passed
