@@ -27554,7 +27554,7 @@ async function acquireRateLimitToken() {
       if (data.granted) return
 
       const waitMs = data.retryAfterMs || 1000;
-      console.log(`[sxt-client] Rate limited, waiting ${waitMs}ms`);
+      console.log(`[sxt-client] Rate limiter: token denied, waiting ${waitMs}ms`);
       await sleep$1(waitMs);
     } catch (err) {
       errors++;
