@@ -3,22 +3,28 @@
  *
  * Flow:
  *   acquireRateLimitToken() → wait until granted (no max, fail-open on errors)
- *   authenticate() → get cached token from sxt/auth
- *   executeSql() → call SxT API
- *   401? → authenticate(badJwt) with backoff → retry (max 3)
+ *   authenticate() → get cached token from sxt/auth (retry with backoff)
+ *   executeSql() → call SxT API (retry with backoff)
+ *   401? → authenticate(badJwt) with backoff → retry
  *   max retry? → fail
+ *
+ * Every path has exponential backoff.
  */
 
 import * as core from '@actions/core'
 
 const SQL_TIMEOUT_MS = 120000
 const AUTH_TIMEOUT_MS = 30000
-const MAX_AUTH_RETRIES = 3
+const MAX_RETRIES = 3
 
 let cachedJwt = null
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+function backoff(attempt, base = 2000, max = 10000) {
+  return Math.min(base * Math.pow(2, attempt), max)
 }
 
 function withTimeout(ms = SQL_TIMEOUT_MS) {
@@ -30,23 +36,37 @@ function withTimeout(ms = SQL_TIMEOUT_MS) {
 export { withTimeout }
 
 /**
- * Get token from sxt/auth. If badToken provided, backend refreshes.
+ * Get token from sxt/auth with retry + backoff.
+ * If badToken provided, backend refreshes.
  */
 export async function authenticate(authUrl, authSecret, badToken) {
-  const { signal, clear } = withTimeout(AUTH_TIMEOUT_MS)
-  try {
-    const headers = { 'x-shared-secret': authSecret }
-    if (badToken) headers['x-bad-token'] = badToken
-    const resp = await fetch(authUrl, { method: 'GET', headers, signal })
-    if (!resp.ok) throw new Error(`Auth failed: ${resp.status}`)
-    const data = await resp.json()
-    const jwt = data.data || data.accessToken
-    if (!jwt) throw new Error('Auth returned no token')
-    cachedJwt = jwt
-    return jwt
-  } finally {
-    clear()
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const headers = { 'x-shared-secret': authSecret }
+      if (badToken) headers['x-bad-token'] = badToken
+      const { signal, clear } = withTimeout(AUTH_TIMEOUT_MS)
+      try {
+        const resp = await fetch(authUrl, { method: 'GET', headers, signal })
+        if (!resp.ok) throw new Error(`Auth failed: ${resp.status}`)
+        const data = await resp.json()
+        const jwt = data.data || data.accessToken
+        if (!jwt) throw new Error('Auth returned no token')
+        cachedJwt = jwt
+        return jwt
+      } finally {
+        clear()
+      }
+    } catch (err) {
+      if (attempt < MAX_RETRIES - 1) {
+        const delay = backoff(attempt)
+        console.log(`[sxt-client] Auth failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`)
+        await sleep(delay)
+      } else {
+        throw err
+      }
+    }
   }
+  throw new Error('Auth failed after all retries')
 }
 
 /**
@@ -75,12 +95,12 @@ async function acquireRateLimitToken() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey, tokens: 1, source: 'dealsync-action' }),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(AUTH_TIMEOUT_MS),
       })
 
       if (!resp.ok && resp.status !== 429) {
         errors++
-        const delay = Math.min(1000 * Math.pow(2, errors), 30000)
+        const delay = backoff(errors)
         console.log(`[sxt-client] Rate limiter HTTP ${resp.status}, error ${errors}/${MAX_ERRORS}, retrying in ${delay}ms`)
         await sleep(delay)
         continue
@@ -95,7 +115,7 @@ async function acquireRateLimitToken() {
       await sleep(waitMs)
     } catch (err) {
       errors++
-      const delay = Math.min(1000 * Math.pow(2, errors), 30000)
+      const delay = backoff(errors)
       console.log(`[sxt-client] Rate limiter error: ${err.message}, error ${errors}/${MAX_ERRORS}, retrying in ${delay}ms`)
       await sleep(delay)
     }
@@ -105,21 +125,20 @@ async function acquireRateLimitToken() {
 }
 
 /**
- * Execute SQL against SxT.
+ * Execute SQL against SxT. Every path retries with backoff.
  *
- * 1. Acquire rate limit token (waits, no max)
- * 2. Call SQL with cached JWT
- * 3. On 401 → authenticate(badJwt) with backoff → retry (max 3)
- * 4. Max retry → fail
+ * 1. Acquire rate limit token (waits, fail-open)
+ * 2. Call SQL with cached JWT (retry with backoff on network error)
+ * 3. On 401 → authenticate(badJwt) with backoff → retry
+ * 4. Max retries → fail
  */
 export async function executeSql(apiUrl, jwt, biscuit, sql) {
   await acquireRateLimitToken()
 
-  // Use provided jwt or cached
   let currentJwt = jwt || cachedJwt
   if (!currentJwt) throw new Error('No JWT available — call authenticate() first')
 
-  for (let attempt = 0; attempt <= MAX_AUTH_RETRIES; attempt++) {
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const { signal, clear } = withTimeout()
     try {
       const resp = await fetch(`${apiUrl}/v1/sql`, {
@@ -134,13 +153,8 @@ export async function executeSql(apiUrl, jwt, biscuit, sql) {
 
       if (resp.status === 401) {
         clear()
-        if (attempt >= MAX_AUTH_RETRIES) {
-          throw new Error(`SxT 401 after ${MAX_AUTH_RETRIES} auth retries`)
-        }
-
-        const delay = Math.min(2000 * Math.pow(2, attempt), 10000)
-        console.log(`[sxt-client] 401 received (attempt ${attempt + 1}/${MAX_AUTH_RETRIES}), re-authenticating, backoff ${delay}ms`)
-
+        const delay = backoff(attempt)
+        console.log(`[sxt-client] 401 received (attempt ${attempt + 1}/${MAX_RETRIES}), re-authenticating, backoff ${delay}ms`)
         const authUrl = core.getInput('auth-url')
         const authSecret = core.getInput('auth-secret')
         currentJwt = await authenticate(authUrl, authSecret, currentJwt)
@@ -150,8 +164,17 @@ export async function executeSql(apiUrl, jwt, biscuit, sql) {
 
       if (!resp.ok) throw new Error(`SxT ${resp.status}: ${await resp.text()}`)
       return resp.json()
-    } finally {
+    } catch (err) {
       clear()
+      if (err.message.startsWith('SxT ')) throw err // Non-retryable SxT error
+
+      if (attempt < MAX_RETRIES - 1) {
+        const delay = backoff(attempt)
+        console.log(`[sxt-client] SQL query failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`)
+        await sleep(delay)
+      } else {
+        throw err
+      }
     }
   }
 
