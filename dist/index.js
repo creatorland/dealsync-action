@@ -38972,6 +38972,225 @@ async function runFilterPipeline() {
 }
 
 /**
+ * WriteBatcher — collects SQL write operations from concurrent workers
+ * and flushes them in combined statements to reduce SxT API calls.
+ *
+ * Each queue is independent. Workers await push*() which resolves once
+ * the items have been flushed (or rejects on flush error).
+ */
+
+class WriteBatcher {
+  /**
+   * @param {Function} executeSqlFn — bound (sql) => executeSql(apiUrl, jwt, biscuit, sql)
+   * @param {string} schema — sanitized schema name
+   * @param {object} opts
+   * @param {number} opts.flushIntervalMs — timer-based flush interval (default 5000)
+   * @param {number} opts.flushThreshold — count-based flush threshold per queue (default 10)
+   */
+  constructor(executeSqlFn, schema, { flushIntervalMs = 5000, flushThreshold = 10 } = {}) {
+    this._executeSqlFn = executeSqlFn;
+    this._schema = schema;
+    this._flushThreshold = flushThreshold;
+
+    // Each queue: { items: [], waiters: [] }
+    this._queues = {
+      evals: { items: [], waiters: [] },
+      dealDeletes: { items: [], waiters: [] },
+      deals: { items: [], waiters: [] },
+      contactDeletes: { items: [], waiters: [] },
+      contacts: { items: [], waiters: [] },
+      stateUpdates: { items: [], waiters: [] },
+      batchEvents: { items: [], waiters: [] },
+    };
+
+    this._timer = setInterval(() => this._flushAll(), flushIntervalMs);
+  }
+
+  // ===========================================================
+  // Push methods
+  // ===========================================================
+
+  /** Push pre-built VALUES strings for EMAIL_THREAD_EVALUATIONS upsert */
+  pushEvals(rows) {
+    return this._push('evals', rows)
+  }
+
+  /** Push sanitized thread IDs for DEALS delete */
+  pushDealDeletes(threadIds) {
+    return this._push('dealDeletes', threadIds)
+  }
+
+  /** Push pre-built VALUES strings for DEALS upsert */
+  pushDeals(rows) {
+    return this._push('deals', rows)
+  }
+
+  /** Push sanitized deal IDs for DEAL_CONTACTS delete */
+  pushContactDeletes(dealIds) {
+    return this._push('contactDeletes', dealIds)
+  }
+
+  /** Push pre-built VALUES strings for DEAL_CONTACTS insert */
+  pushContacts(rows) {
+    return this._push('contacts', rows)
+  }
+
+  /**
+   * Push state update IDs.
+   * @param {string[]} dealEmailIds — email metadata IDs for 'deal' status
+   * @param {string[]} notDealEmailIds — email metadata IDs for 'not_deal' status
+   */
+  pushStateUpdates(dealEmailIds, notDealEmailIds) {
+    return this._push('stateUpdates', [{ dealEmailIds, notDealEmailIds }])
+  }
+
+  /** Push pre-built VALUES strings for BATCH_EVENTS upsert */
+  pushBatchEvents(rows) {
+    return this._push('batchEvents', rows)
+  }
+
+  // ===========================================================
+  // Lifecycle
+  // ===========================================================
+
+  /** Flush all pending queues and clear the timer. Called at pipeline end. */
+  async drain() {
+    clearInterval(this._timer);
+    await this._flushAll();
+  }
+
+  /** Clear the timer without flushing. Rejects all pending waiters. For cleanup on fatal error. */
+  stop() {
+    clearInterval(this._timer);
+    const err = new Error('WriteBatcher stopped');
+    for (const queue of Object.values(this._queues)) {
+      const waiters = queue.waiters;
+      queue.waiters = [];
+      queue.items = [];
+      for (const w of waiters) w.reject(err);
+    }
+  }
+
+  // ===========================================================
+  // Internal
+  // ===========================================================
+
+  /**
+   * Add items to a queue, register a waiter, and trigger flush if threshold met.
+   * @returns {Promise<void>} resolves when the items have been flushed
+   */
+  _push(queueName, items) {
+    const queue = this._queues[queueName];
+    queue.items.push(...items);
+
+    const promise = new Promise((resolve, reject) => {
+      queue.waiters.push({ resolve, reject });
+    });
+
+    if (queue.items.length >= this._flushThreshold) {
+      this._flushQueue(queueName);
+    }
+
+    return promise
+  }
+
+  /** Flush all queues that have pending items */
+  async _flushAll() {
+    const promises = [];
+    for (const name of Object.keys(this._queues)) {
+      if (this._queues[name].items.length > 0) {
+        promises.push(this._flushQueue(name));
+      }
+    }
+    await Promise.all(promises);
+  }
+
+  /** Flush a single queue */
+  async _flushQueue(queueName) {
+    const queue = this._queues[queueName];
+
+    // Swap out items and waiters atomically
+    const items = queue.items;
+    const waiters = queue.waiters;
+    queue.items = [];
+    queue.waiters = [];
+
+    if (items.length === 0) return
+
+    console.log(`[write-batcher] flushing ${queueName}: ${items.length} items`);
+
+    try {
+      await this._executeQueue(queueName, items);
+      for (const w of waiters) w.resolve();
+    } catch (err) {
+      for (const w of waiters) w.reject(err);
+    }
+  }
+
+  /** Build and execute SQL for a given queue */
+  async _executeQueue(queueName, items) {
+    const s = this._schema;
+
+    switch (queueName) {
+      case 'evals': {
+        const sql = `INSERT INTO ${s}.EMAIL_THREAD_EVALUATIONS (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (THREAD_ID) DO UPDATE SET AI_EVALUATION_AUDIT_ID = EXCLUDED.AI_EVALUATION_AUDIT_ID, AI_INSIGHT = EXCLUDED.AI_INSIGHT, AI_SUMMARY = EXCLUDED.AI_SUMMARY, IS_DEAL = EXCLUDED.IS_DEAL, LIKELY_SCAM = EXCLUDED.LIKELY_SCAM, AI_SCORE = EXCLUDED.AI_SCORE, UPDATED_AT = CURRENT_TIMESTAMP`;
+        await this._executeSqlFn(sql);
+        break
+      }
+
+      case 'dealDeletes': {
+        const sql = `DELETE FROM ${s}.DEALS WHERE THREAD_ID IN (${items.join(',')})`;
+        await this._executeSqlFn(sql);
+        break
+      }
+
+      case 'deals': {
+        const sql = `INSERT INTO ${s}.DEALS (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (THREAD_ID) DO UPDATE SET EMAIL_THREAD_EVALUATION_ID = EXCLUDED.EMAIL_THREAD_EVALUATION_ID, DEAL_NAME = EXCLUDED.DEAL_NAME, DEAL_TYPE = EXCLUDED.DEAL_TYPE, CATEGORY = EXCLUDED.CATEGORY, VALUE = EXCLUDED.VALUE, CURRENCY = EXCLUDED.CURRENCY, BRAND = EXCLUDED.BRAND, UPDATED_AT = CURRENT_TIMESTAMP`;
+        await this._executeSqlFn(sql);
+        break
+      }
+
+      case 'contactDeletes': {
+        const sql = `DELETE FROM ${s}.DEAL_CONTACTS WHERE DEAL_ID IN (${items.join(',')})`;
+        await this._executeSqlFn(sql);
+        break
+      }
+
+      case 'contacts': {
+        const sql = `INSERT INTO ${s}.DEAL_CONTACTS (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, NAME, EMAIL, COMPANY, TITLE, PHONE_NUMBER, IS_FAVORITE, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')}`;
+        await this._executeSqlFn(sql);
+        break
+      }
+
+      case 'stateUpdates': {
+        // Merge all stateUpdate items into combined ID lists
+        const allDealIds = [];
+        const allNotDealIds = [];
+        for (const item of items) {
+          allDealIds.push(...item.dealEmailIds);
+          allNotDealIds.push(...item.notDealEmailIds);
+        }
+        if (allDealIds.length > 0) {
+          const sql = `UPDATE ${s}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${allDealIds.join(',')})`;
+          await this._executeSqlFn(sql);
+        }
+        if (allNotDealIds.length > 0) {
+          const sql = `UPDATE ${s}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${allNotDealIds.join(',')})`;
+          await this._executeSqlFn(sql);
+        }
+        break
+      }
+
+      case 'batchEvents': {
+        const sql = `INSERT INTO ${s}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ${items.join(', ')} ON CONFLICT (TRIGGER_HASH) DO UPDATE SET EVENT_TYPE = EXCLUDED.EVENT_TYPE, CREATED_AT = CURRENT_TIMESTAMP`;
+        await this._executeSqlFn(sql);
+        break
+      }
+    }
+  }
+}
+
+/**
  * Orchestrator that claims and processes classify batches concurrently,
  * with in-memory audit passing through save-evals, save-deals,
  * save-deal-contacts, and update-deal-states.
@@ -38992,6 +39211,8 @@ async function runClassifyPipeline() {
   const maxRetries = parseInt(coreExports.getInput('max-retries') || '3', 10);
   const chunkSize = parseInt(coreExports.getInput('chunk-size') || '10', 10);
   const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '120000', 10);
+  const flushIntervalMs = parseInt(coreExports.getInput('flush-interval-ms') || '5000', 10);
+  const flushThreshold = parseInt(coreExports.getInput('flush-threshold') || '10', 10);
 
   console.log(
     `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, maxRetries=${maxRetries}, chunkSize=${chunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
@@ -39002,6 +39223,9 @@ async function runClassifyPipeline() {
 
   // 2. Create a bound exec helper
   const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
+
+  // 3. Create write batcher
+  const batcher = new WriteBatcher(exec, schema, { flushIntervalMs, flushThreshold });
 
   // =========================================================================
   //  CLAIM FUNCTION (inline, same pattern as claim-classify-batch)
@@ -39249,34 +39473,20 @@ async function runClassifyPipeline() {
     }
 
     // -----------------------------------------------------------------------
-    // Step 4: Save evals (in-memory)
+    // Step 4: Save evals via batcher
     // -----------------------------------------------------------------------
 
-    const evalValues = threads
-      .map((thread) => {
-        const threadId = sanitizeId(thread.thread_id);
-        return `('${v7()}', '${threadId}', '', '${sanitizeString(thread.category || '')}', '${sanitizeString(thread.ai_summary || '')}', ${thread.is_deal ? 'true' : 'false'}, ${(thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'}, ${typeof thread.ai_score === 'number' ? thread.ai_score : 0}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-      })
-      .join(', ');
+    const evalValues = threads.map((thread) => {
+      const threadId = sanitizeId(thread.thread_id);
+      return `('${v7()}', '${threadId}', '', '${sanitizeString(thread.category || '')}', '${sanitizeString(thread.ai_summary || '')}', ${thread.is_deal ? 'true' : 'false'}, ${(thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'}, ${typeof thread.ai_score === 'number' ? thread.ai_score : 0}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+    });
 
-    await exec(
-      `INSERT INTO ${schema}.EMAIL_THREAD_EVALUATIONS
-      (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT)
-    VALUES ${evalValues}
-    ON CONFLICT (THREAD_ID) DO UPDATE SET
-      AI_EVALUATION_AUDIT_ID = EXCLUDED.AI_EVALUATION_AUDIT_ID,
-      AI_INSIGHT = EXCLUDED.AI_INSIGHT,
-      AI_SUMMARY = EXCLUDED.AI_SUMMARY,
-      IS_DEAL = EXCLUDED.IS_DEAL,
-      LIKELY_SCAM = EXCLUDED.LIKELY_SCAM,
-      AI_SCORE = EXCLUDED.AI_SCORE,
-      UPDATED_AT = CURRENT_TIMESTAMP`,
-    );
+    await batcher.pushEvals(evalValues);
 
     console.log(`[run-classify-pipeline] upserted ${threads.length} thread evaluations`);
 
     // -----------------------------------------------------------------------
-    // Step 5: Save deals (in-memory)
+    // Step 5: Save deals via batcher
     // -----------------------------------------------------------------------
 
     // Build userByThread map from batch rows
@@ -39297,73 +39507,40 @@ async function runClassifyPipeline() {
       }
     }
 
-    // Batch DELETE non-deal threads (single query)
+    // Batch DELETE non-deal threads via batcher
     if (notDealThreadIds.length > 0) {
-      const quotedIds = notDealThreadIds.map((id) => `'${id}'`).join(',');
-      await exec(`DELETE FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`);
+      const quoted = notDealThreadIds.map((id) => `'${id}'`);
+      await batcher.pushDealDeletes(quoted);
       console.log(`[run-classify-pipeline] deleted ${notDealThreadIds.length} non-deal threads`);
     }
 
-    // Batch upsert deals
+    // Batch upsert deals via batcher
     if (dealThreads.length > 0) {
-      const dealValues = dealThreads
-        .map((thread) => {
-          const threadId = sanitizeId(thread.thread_id);
-          const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
-          const dealId = v7();
-          const dealName = sanitizeString(thread.deal_name || '');
-          const dealType = sanitizeString(thread.deal_type || '');
-          const dealValue =
-            typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
-          const currency = sanitizeString(thread.currency || 'USD');
-          const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
-          const category = sanitizeString(thread.category || '');
-          return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-        })
-        .join(', ');
+      const dealValues = dealThreads.map((thread) => {
+        const threadId = sanitizeId(thread.thread_id);
+        const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
+        const dealId = v7();
+        const dealName = sanitizeString(thread.deal_name || '');
+        const dealType = sanitizeString(thread.deal_type || '');
+        const dealValue =
+          typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
+        const currency = sanitizeString(thread.currency || 'USD');
+        const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
+        const category = sanitizeString(thread.category || '');
+        return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      });
 
-      await exec(
-        `INSERT INTO ${schema}.DEALS
-        (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT)
-      VALUES ${dealValues}
-      ON CONFLICT (THREAD_ID) DO UPDATE SET
-        EMAIL_THREAD_EVALUATION_ID = EXCLUDED.EMAIL_THREAD_EVALUATION_ID,
-        DEAL_NAME = EXCLUDED.DEAL_NAME,
-        DEAL_TYPE = EXCLUDED.DEAL_TYPE,
-        CATEGORY = EXCLUDED.CATEGORY,
-        VALUE = EXCLUDED.VALUE,
-        CURRENCY = EXCLUDED.CURRENCY,
-        BRAND = EXCLUDED.BRAND,
-        UPDATED_AT = CURRENT_TIMESTAMP`,
-      );
+      await batcher.pushDeals(dealValues);
 
       console.log(`[run-classify-pipeline] ${dealThreads.length} deals upserted`);
     }
 
     // -----------------------------------------------------------------------
-    // Step 6: Save deal contacts (in-memory, but needs DEALS lookup)
+    // Step 6: Save deal contacts via batcher (use thread_id as deal_id)
     // -----------------------------------------------------------------------
 
     if (dealThreads.length > 0) {
       const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id));
-      const quotedDealThreadIds = dealThreadIds.map((id) => `'${id}'`).join(',');
-
-      // Query DEALS by thread_id to get deal IDs
-      const deals = await exec(
-        `SELECT ID, THREAD_ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedDealThreadIds})`,
-      );
-
-      const dealByThread = {};
-      for (const row of deals) {
-        dealByThread[row.THREAD_ID] = row.ID;
-      }
-
-      // DELETE existing contacts for those deals
-      const dealIds = Object.values(dealByThread);
-      if (dealIds.length > 0) {
-        const quotedDealIds = dealIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-        await exec(`DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (${quotedDealIds})`);
-      }
 
       // Build contact rows from thread.main_contact (email required)
       const contactValues = [];
@@ -39372,14 +39549,7 @@ async function runClassifyPipeline() {
         if (!mc || !mc.email) continue
 
         const threadId = sanitizeId(thread.thread_id);
-        const dealId = dealByThread[threadId];
-        if (!dealId) {
-          console.log(
-            `[run-classify-pipeline] no deal found for thread ${threadId} — skipping contact`,
-          );
-          continue
-        }
-
+        // Use threadId as dealId directly
         const contactEmail = sanitizeString(mc.email);
         const name = sanitizeString(mc.name || '');
         const company = sanitizeString(mc.company || '');
@@ -39387,23 +39557,24 @@ async function runClassifyPipeline() {
         const phone = sanitizeString(mc.phone_number || '');
 
         contactValues.push(
-          `('${v7()}', '${sanitizeId(dealId)}', '${contactEmail}', 'primary', '${name}', '${contactEmail}', '${company}', '${title}', '${phone}', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          `('${v7()}', '${threadId}', '${contactEmail}', 'primary', '${name}', '${contactEmail}', '${company}', '${title}', '${phone}', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
         );
       }
 
+      // Delete old contacts using thread_id as deal_id
+      if (dealThreadIds.length > 0) {
+        await batcher.pushContactDeletes(dealThreadIds.map((id) => `'${id}'`));
+      }
+
       if (contactValues.length > 0) {
-        await exec(
-          `INSERT INTO ${schema}.DEAL_CONTACTS
-          (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, NAME, EMAIL, COMPANY, TITLE, PHONE_NUMBER, IS_FAVORITE, CREATED_AT, UPDATED_AT)
-        VALUES ${contactValues.join(', ')}`,
-        );
+        await batcher.pushContacts(contactValues);
       }
 
       console.log(`[run-classify-pipeline] ${contactValues.length} contacts saved`);
     }
 
     // -----------------------------------------------------------------------
-    // Step 7: Update deal states to terminal
+    // Step 7: Update deal states to terminal via batcher
     // -----------------------------------------------------------------------
 
     // Build metadataByThread map from batch rows
@@ -39430,27 +39601,21 @@ async function runClassifyPipeline() {
       }
     }
 
-    if (dealEmailIds.length > 0) {
-      await exec(detection.updateDeals(schema, toSqlIdList(dealEmailIds)));
-    }
-    if (notDealEmailIds.length > 0) {
-      await exec(detection.updateNotDeal(schema, toSqlIdList(notDealEmailIds)));
-    }
+    const quotedDealIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`);
+    const quotedNotDealIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`);
+    await batcher.pushStateUpdates(quotedDealIds, quotedNotDealIds);
 
     console.log(
       `[run-classify-pipeline] states: ${dealEmailIds.length} -> deal, ${notDealEmailIds.length} -> not_deal`,
     );
 
     // -----------------------------------------------------------------------
-    // Step 8: Record completion
+    // Step 8: Record completion via batcher
     // -----------------------------------------------------------------------
 
-    await insertBatchEvent(exec, schema, {
-      triggerHash: batchId,
-      batchId,
-      batchType: 'classify',
-      eventType: 'complete',
-    });
+    await batcher.pushBatchEvents([
+      `('${batchId}', '${batchId}', 'classify', 'complete', CURRENT_TIMESTAMP)`,
+    ]);
 
     console.log(`[run-classify-pipeline] batch ${batchId} complete`);
   }
@@ -39460,6 +39625,9 @@ async function runClassifyPipeline() {
   // =========================================================================
 
   const poolResults = await runPool(claimBatch, processClassifyBatch, { maxConcurrent, maxRetries });
+
+  // Drain all pending writes
+  await batcher.drain();
 
   console.log(
     `[run-classify-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}`,
