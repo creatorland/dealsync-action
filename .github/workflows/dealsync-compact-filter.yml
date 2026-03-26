@@ -18,6 +18,10 @@ on:
         type: string
         default: '30000'
 
+concurrency:
+  group: compact-filter
+  cancel-in-progress: false
+
 jobs:
   filter:
     runs-on: ubuntu-latest

@@ -18,6 +18,10 @@ on:
         type: string
         default: '120000'
 
+concurrency:
+  group: compact-classify
+  cancel-in-progress: false
+
 jobs:
   classify:
     runs-on: ubuntu-latest
