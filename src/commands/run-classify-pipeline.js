@@ -28,7 +28,7 @@ export async function runClassifyPipeline() {
   const contentFetcherUrl = core.getInput('content-fetcher-url')
   const hyperbolicKey = core.getInput('hyperbolic-key')
   const primaryModel = core.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507'
-  const fallbackModel = core.getInput('fallback-model') || 'moonshotai/Kimi-K2-Instruct'
+  const fallbackModel = core.getInput('fallback-model') || 'deepseek-ai/DeepSeek-V3'
   const aiApiUrl = core.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions'
   const maxConcurrent = parseInt(core.getInput('max-concurrent') || '70', 10)
   const classifyBatchSize = parseInt(core.getInput('classify-batch-size') || '5', 10)

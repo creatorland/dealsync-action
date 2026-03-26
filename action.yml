@@ -38,7 +38,7 @@ inputs:
     default: 'Qwen/Qwen3-235B-A22B-Instruct-2507'
   fallback-model:
     description: 'Fallback AI model ID (fetch-and-classify)'
-    default: 'moonshotai/Kimi-K2-Instruct'
+    default: 'deepseek-ai/DeepSeek-V3'
   ai-api-url:
     description: 'AI API URL (fetch-and-classify)'
     default: 'https://api.hyperbolic.xyz/v1/chat/completions'

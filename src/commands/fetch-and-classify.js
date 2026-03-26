@@ -29,7 +29,7 @@ export async function runFetchAndClassify() {
   const contentFetcherUrl = core.getInput('content-fetcher-url')
   const hyperbolicKey = core.getInput('hyperbolic-key')
   const primaryModel = core.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507'
-  const fallbackModel = core.getInput('fallback-model') || 'moonshotai/Kimi-K2-Instruct'
+  const fallbackModel = core.getInput('fallback-model') || 'deepseek-ai/DeepSeek-V3'
   const aiApiUrl = core.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions'
   const chunkSize = parseInt(core.getInput('chunk-size') || '10', 10)
   const fetchTimeoutMs = parseInt(core.getInput('fetch-timeout-ms') || '120000', 10)
