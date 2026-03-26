@@ -12,6 +12,7 @@
 import * as core from '@actions/core'
 
 const SQL_TIMEOUT_MS = 120000
+const AUTH_TIMEOUT_MS = 30000
 const MAX_AUTH_RETRIES = 3
 
 let cachedJwt = null
@@ -32,7 +33,7 @@ export { withTimeout }
  * Get token from sxt/auth. If badToken provided, backend refreshes.
  */
 export async function authenticate(authUrl, authSecret, badToken) {
-  const { signal, clear } = withTimeout(30000)
+  const { signal, clear } = withTimeout(AUTH_TIMEOUT_MS)
   try {
     const headers = { 'x-shared-secret': authSecret }
     if (badToken) headers['x-bad-token'] = badToken
