@@ -27504,8 +27504,9 @@ async function reauthenticate(badToken) {
 async function executeSql(apiUrl, jwt, biscuit, sql) {
   await acquireRateLimitToken();
 
-  let currentJwt = jwt || cachedJwt;
-  if (!currentJwt) throw new Error('No JWT available — call authenticate() first')
+  // Always prefer cachedJwt (refreshed on 401), fall back to passed jwt
+  if (!cachedJwt && jwt) cachedJwt = jwt;
+  if (!cachedJwt) throw new Error('No JWT available — call authenticate() first')
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const { signal, clear } = withTimeout();
@@ -27513,7 +27514,7 @@ async function executeSql(apiUrl, jwt, biscuit, sql) {
       const resp = await fetch(`${apiUrl}/v1/sql`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${currentJwt}`,
+          Authorization: `Bearer ${cachedJwt}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ sqlText: sql, biscuits: [biscuit] }),
@@ -27524,7 +27525,7 @@ async function executeSql(apiUrl, jwt, biscuit, sql) {
         clear();
         const delay = backoff(attempt);
         console.log(`[sxt-client] 401 received (attempt ${attempt + 1}/${MAX_RETRIES}), re-authenticating, backoff ${delay}ms`);
-        currentJwt = await reauthenticate(currentJwt);
+        await reauthenticate(cachedJwt);
         await sleep$1(delay);
         continue
       }
