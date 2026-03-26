@@ -38452,7 +38452,7 @@ async function insertBatchEvent(
   const safeBatchType = sanitizeString(batchType);
   const safeEventType = sanitizeString(eventType);
 
-  const sql = `INSERT INTO ${safeSchema}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ('${safeTriggerHash}', '${safeBatchId}', '${safeBatchType}', '${safeEventType}', CURRENT_TIMESTAMP)`;
+  const sql = `INSERT INTO ${safeSchema}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ('${safeTriggerHash}', '${safeBatchId}', '${safeBatchType}', '${safeEventType}', CURRENT_TIMESTAMP) ON CONFLICT (TRIGGER_HASH) DO UPDATE SET EVENT_TYPE = EXCLUDED.EVENT_TYPE, CREATED_AT = CURRENT_TIMESTAMP`;
 
   await executeSqlFn(sql);
 }
