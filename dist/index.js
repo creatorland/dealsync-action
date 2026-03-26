@@ -27526,6 +27526,8 @@ async function acquireRateLimitToken() {
   const OVERALL_TIMEOUT_MS = 5 * 60 * 1000;
   const startTime = Date.now();
   let errors = 0;
+  let denials = 0;
+  let waiting = false;
 
   while (errors < MAX_ERRORS) {
     if (Date.now() - startTime > OVERALL_TIMEOUT_MS) {
@@ -27553,7 +27555,12 @@ async function acquireRateLimitToken() {
       const data = result.data || result;
       if (data.granted) return
 
-      const waitMs = data.retryAfterMs || 1000;
+      denials++;
+      if (!waiting) {
+        console.log('[sxt-client] Waiting for rate limit token...');
+        waiting = true;
+      }
+      const waitMs = data.retryAfterMs || backoff(denials);
       await sleep$1(waitMs);
     } catch (err) {
       errors++;
