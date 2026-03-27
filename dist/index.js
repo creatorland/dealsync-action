@@ -27541,7 +27541,11 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
         continue
       }
 
-      if (!resp.ok) throw new Error(`SxT ${resp.status}: ${await resp.text()}`)
+      if (!resp.ok) {
+        const body = await resp.text();
+        console.error(`[sxt-client] SxT ${resp.status} error. SQL: ${sql.substring(0, 500)}`);
+        throw new Error(`SxT ${resp.status}: ${body}`)
+      }
       return resp.json()
     } catch (err) {
       clear();
