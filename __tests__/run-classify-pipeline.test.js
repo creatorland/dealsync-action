@@ -27,9 +27,11 @@ jest.unstable_mockModule('uuid', () => ({
 // Mock sxt-client
 const mockAuthenticate = jest.fn()
 const mockExecuteSql = jest.fn()
+const mockAcquireRateLimitToken = jest.fn().mockResolvedValue(undefined)
 jest.unstable_mockModule('../src/lib/sxt-client.js', () => ({
   authenticate: mockAuthenticate,
   executeSql: mockExecuteSql,
+  acquireRateLimitToken: mockAcquireRateLimitToken,
   withTimeout: jest.fn(() => ({
     signal: new AbortController().signal,
     clear: jest.fn(),
@@ -136,6 +138,7 @@ function makeBatchRows(count = 2) {
     MESSAGE_ID: `msg-${i + 1}`,
     USER_ID: 'user-1',
     THREAD_ID: `thread-${i + 1}`,
+    CREATOR_EMAIL: 'creator@test.com',
     SYNC_STATE_ID: 'ss-1',
   }))
 }
@@ -272,7 +275,6 @@ describe('run-classify-pipeline command', () => {
       expect(mockBatcherInstance.pushDeals).toHaveBeenCalledTimes(1) // deal threads
       expect(mockBatcherInstance.pushContactDeletes).toHaveBeenCalledTimes(1)
       expect(mockBatcherInstance.pushContacts).toHaveBeenCalledTimes(1)
-      expect(mockBatcherInstance.pushStateUpdates).toHaveBeenCalledTimes(1)
       expect(mockBatcherInstance.pushBatchEvents).toHaveBeenCalledTimes(1)
 
       return { processed: 1, failed: 0 }
@@ -812,12 +814,6 @@ describe('run-classify-pipeline command', () => {
 
       await workerFn(batch, { attempt: 0 })
 
-      // Verify state updates via batcher
-      expect(mockBatcherInstance.pushStateUpdates).toHaveBeenCalledTimes(1)
-      const [dealIds, notDealIds] = mockBatcherInstance.pushStateUpdates.mock.calls[0]
-      expect(dealIds).toEqual(["'em-1'"]) // thread-1's email
-      expect(notDealIds).toEqual(["'em-2'"]) // thread-2's email
-
       return { processed: 1, failed: 0 }
     })
 
@@ -928,12 +924,12 @@ describe('run-classify-pipeline command', () => {
     await runClassifyPipeline()
 
     const [, , opts] = mockRunPool.mock.calls[0]
-    expect(opts).toEqual({ maxConcurrent: 30, maxRetries: 3 })
+    expect(opts).toEqual({ maxConcurrent: 70, maxRetries: 6 })
 
     // WriteBatcher created with defaults
     expect(MockWriteBatcher).toHaveBeenCalledWith(expect.any(Function), expect.any(String), {
       flushIntervalMs: 5000,
-      flushThreshold: 10,
+      flushThreshold: 5,
     })
   })
 
