@@ -431,13 +431,18 @@ export async function runClassifyPipeline() {
     }
 
     // Write state updates directly (not through batcher) to ensure they commit
+    console.log(`[run-classify-pipeline] batch ${batchId} state update: dealIds=[${dealEmailIds.join(',')}] notDealIds=[${notDealEmailIds.join(',')}] threads=${threads.map(t => `${t.thread_id}:${t.is_deal}`).join(',')} rows=${rows.length}`)
     if (dealEmailIds.length > 0) {
       const quotedIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-      await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`)
+      const sql = `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`
+      console.log(`[run-classify-pipeline] deal UPDATE SQL: ${sql.substring(0, 500)}`)
+      await execNoRL(sql)
     }
     if (notDealEmailIds.length > 0) {
       const quotedIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-      await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`)
+      const sql = `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`
+      console.log(`[run-classify-pipeline] not_deal UPDATE SQL: ${sql.substring(0, 500)}`)
+      await execNoRL(sql)
     }
 
     console.log(
