@@ -9,7 +9,8 @@ const mockCore = {
 
 jest.unstable_mockModule('@actions/core', () => mockCore)
 
-const { runPool, insertBatchEvent } = await import('../src/lib/pipeline.js')
+const { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } =
+  await import('../src/lib/pipeline.js')
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -200,6 +201,35 @@ describe('runPool', () => {
     expect(workerFn).not.toHaveBeenCalled()
     expect(results).toEqual({ processed: 0, failed: 1 })
   })
+
+  it('invokes onDeadLetter when batch is already exhausted', async () => {
+    const onDeadLetter = jest.fn().mockResolvedValue(undefined)
+    const batches = [{ batch_id: 'b-exhausted', attempts: 3 }]
+    let idx = 0
+    const claimFn = jest.fn(async () => (idx < batches.length ? batches[idx++] : null))
+    const workerFn = jest.fn()
+
+    await runPool(claimFn, workerFn, { maxConcurrent: 1, maxRetries: 3, onDeadLetter })
+
+    expect(onDeadLetter).toHaveBeenCalledTimes(1)
+    expect(onDeadLetter).toHaveBeenCalledWith(batches[0])
+    expect(workerFn).not.toHaveBeenCalled()
+  })
+
+  it('invokes onDeadLetter after worker exhausts retries', async () => {
+    const onDeadLetter = jest.fn().mockResolvedValue(undefined)
+    const batches = [{ batch_id: 'b-fail', attempts: 0 }]
+    let idx = 0
+    const claimFn = jest.fn(async () => (idx < batches.length ? batches[idx++] : null))
+    const workerFn = jest.fn(async () => {
+      throw new Error('boom')
+    })
+
+    await runPool(claimFn, workerFn, { maxConcurrent: 1, maxRetries: 2, onDeadLetter })
+
+    expect(onDeadLetter).toHaveBeenCalledTimes(1)
+    expect(onDeadLetter).toHaveBeenCalledWith(batches[0])
+  })
 })
 
 // ============================================================
@@ -294,5 +324,68 @@ describe('insertBatchEvent', () => {
     const expectedSql =
       "INSERT INTO TEST_SCHEMA.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ('trigger-abc', 'batch-xyz', 'classify', 'completed', CURRENT_TIMESTAMP) ON CONFLICT (TRIGGER_HASH) DO UPDATE SET EVENT_TYPE = EXCLUDED.EVENT_TYPE, CREATED_AT = CURRENT_TIMESTAMP"
     expect(executeSqlFn).toHaveBeenCalledWith(expectedSql)
+  })
+})
+
+// ============================================================
+// sweepStuckRows / sweepOrphanedRows
+// ============================================================
+
+describe('sweepStuckRows', () => {
+  it('returns 0 when no exhausted batches', async () => {
+    const exec = jest.fn().mockResolvedValueOnce([])
+    const n = await sweepStuckRows(exec, 'dealsync_stg_v1', {
+      activeStatus: 'filtering',
+      batchType: 'filter',
+      maxRetries: 6,
+    })
+    expect(n).toBe(0)
+    expect(exec).toHaveBeenCalledTimes(1)
+    expect(exec.mock.calls[0][0]).toContain('HAVING COUNT(DISTINCT be.TRIGGER_HASH) >= 6')
+  })
+
+  it('updates rows to failed and inserts dead_letter event per exhausted batch', async () => {
+    const exec = jest
+      .fn()
+      .mockResolvedValueOnce([{ BATCH_ID: 'batch-a' }])
+      .mockResolvedValueOnce([{ C: 2 }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+    const n = await sweepStuckRows(exec, 'dealsync_stg_v1', {
+      activeStatus: 'filtering',
+      batchType: 'filter',
+      maxRetries: 3,
+    })
+    expect(n).toBe(2)
+    expect(exec).toHaveBeenCalledTimes(4)
+    expect(exec.mock.calls[2][0]).toContain("STATUS = 'failed'")
+    expect(exec.mock.calls[3][0]).toContain("'dead_letter'")
+  })
+})
+
+describe('sweepOrphanedRows', () => {
+  it('returns 0 when count is 0', async () => {
+    const exec = jest.fn().mockResolvedValueOnce([{ C: 0 }])
+    const n = await sweepOrphanedRows(exec, 'dealsync_stg_v1', {
+      statuses: ['pending_classification'],
+      staleMinutes: 30,
+    })
+    expect(n).toBe(0)
+    expect(exec).toHaveBeenCalledTimes(1)
+  })
+
+  it('updates orphaned rows to failed when count > 0', async () => {
+    const exec = jest
+      .fn()
+      .mockResolvedValueOnce([{ C: 3 }])
+      .mockResolvedValueOnce([])
+    const n = await sweepOrphanedRows(exec, 'dealsync_stg_v1', {
+      statuses: ['pending_classification'],
+      staleMinutes: 30,
+    })
+    expect(n).toBe(3)
+    expect(exec).toHaveBeenCalledTimes(2)
+    expect(exec.mock.calls[1][0]).toContain("STATUS = 'failed'")
+    expect(exec.mock.calls[1][0]).toContain('BATCH_ID IS NULL')
   })
 })

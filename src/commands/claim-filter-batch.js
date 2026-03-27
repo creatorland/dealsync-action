@@ -2,7 +2,7 @@ import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { STATUS, sanitizeSchema } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
-import { insertBatchEvent } from '../lib/pipeline.js'
+import { insertBatchEvent, sweepStuckRows } from '../lib/pipeline.js'
 
 /**
  * Atomically claims pending deal_states for filtering.
@@ -61,8 +61,19 @@ export async function runClaimFilterBatch() {
   )
 
   if (!stuckBatches || stuckBatches.length === 0) {
-    console.log(`[claim-filter-batch] no stuck batches found, nothing to do`)
-    return { batch_id: null, count: 0 }
+    const stuckFailed = await sweepStuckRows(exec, schema, {
+      activeStatus: STATUS.FILTERING,
+      batchType: 'filter',
+      maxRetries,
+    })
+    if (stuckFailed > 0) {
+      console.log(
+        `[claim-filter-batch] dead-lettered ${stuckFailed} row(s) in exhausted filter batches (no retrigger-eligible stuck batches)`,
+      )
+    } else {
+      console.log(`[claim-filter-batch] no stuck batches found, nothing to do`)
+    }
+    return { batch_id: null, count: 0, stuck_failed: stuckFailed }
   }
 
   // 7. Re-claim the stuck batch

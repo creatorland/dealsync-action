@@ -1,10 +1,10 @@
 import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { sanitizeSchema, sanitizeId, STATUS } from '../lib/queries.js'
+import { runPool, insertBatchEvent, sweepStuckRows } from '../lib/pipeline.js'
 import { authenticate, executeSql, acquireRateLimitToken } from '../lib/sxt-client.js'
 import { isRejected } from '../lib/filter-rules.js'
 import { fetchEmails } from '../lib/email-client.js'
-import { runPool, insertBatchEvent } from '../lib/pipeline.js'
 
 /**
  * Orchestrator that claims and processes filter batches concurrently
@@ -184,18 +184,45 @@ export async function runFilterPipeline() {
     totalRejected += rejectedIds.length
   }
 
-  // 5. Call runPool
-  const poolResults = await runPool(claimBatch, processFilterBatch, { maxConcurrent, maxRetries })
+  // 5. Dead-letter: persist failed status when pool gives up on a batch
+  async function onDeadLetter(batch) {
+    const bid = batch.batch_id
+    if (!bid) return
+    const safeBid = sanitizeId(bid)
+    await execNoRL(
+      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}'`,
+    )
+    await insertBatchEvent(execNoRL, schema, {
+      triggerHash: uuidv7(),
+      batchId: bid,
+      batchType: 'filter',
+      eventType: 'dead_letter',
+    })
+    console.log(`[run-filter-pipeline] dead-lettered batch ${bid} → status=failed`)
+  }
+
+  const poolResults = await runPool(claimBatch, processFilterBatch, {
+    maxConcurrent,
+    maxRetries,
+    onDeadLetter,
+  })
+
+  // 6. Sweep: DB rows stuck in filtering with exhausted retrigger attempts (Explorer had "nothing to process" but SxT still had leftovers)
+  const stuckFailed = await sweepStuckRows(exec, schema, {
+    activeStatus: STATUS.FILTERING,
+    batchType: 'filter',
+    maxRetries,
+  })
 
   console.log(
-    `[run-filter-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}, total_filtered=${totalFiltered}, total_rejected=${totalRejected}`,
+    `[run-filter-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}, total_filtered=${totalFiltered}, total_rejected=${totalRejected}, stuck_failed=${stuckFailed}`,
   )
 
-  // 6. Return totals
   return {
     batches_processed: poolResults.processed,
     batches_failed: poolResults.failed,
     total_filtered: totalFiltered,
     total_rejected: totalRejected,
+    stuck_failed: stuckFailed,
   }
 }

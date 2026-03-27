@@ -27,9 +27,11 @@ jest.unstable_mockModule('uuid', () => ({
 // Mock sxt-client
 const mockAuthenticate = jest.fn()
 const mockExecuteSql = jest.fn()
+const mockAcquireRateLimitToken = jest.fn().mockResolvedValue(undefined)
 jest.unstable_mockModule('../src/lib/sxt-client.js', () => ({
   authenticate: mockAuthenticate,
   executeSql: mockExecuteSql,
+  acquireRateLimitToken: mockAcquireRateLimitToken,
   withTimeout: jest.fn(() => ({
     signal: new AbortController().signal,
     clear: jest.fn(),
@@ -51,9 +53,11 @@ jest.unstable_mockModule('../src/lib/filter-rules.js', () => ({
 // Mock pipeline — use real insertBatchEvent but mock runPool
 const mockRunPool = jest.fn()
 const mockInsertBatchEvent = jest.fn()
+const mockSweepStuckRows = jest.fn().mockResolvedValue(0)
 jest.unstable_mockModule('../src/lib/pipeline.js', () => ({
   runPool: mockRunPool,
   insertBatchEvent: mockInsertBatchEvent,
+  sweepStuckRows: mockSweepStuckRows,
 }))
 
 const core = await import('@actions/core')
@@ -102,6 +106,7 @@ describe('run-filter-pipeline command', () => {
     for (const key of Object.keys(outputs)) delete outputs[key]
     mockAuthenticate.mockResolvedValue('test-jwt')
     mockInsertBatchEvent.mockResolvedValue(undefined)
+    mockSweepStuckRows.mockResolvedValue(0)
   })
 
   // ----------------------------------------------------------
@@ -163,6 +168,7 @@ describe('run-filter-pipeline command', () => {
       batches_failed: 0,
       total_filtered: 2,
       total_rejected: 1,
+      stuck_failed: 0,
     })
 
     // Verify authentication was called once
@@ -451,6 +457,7 @@ describe('run-filter-pipeline command', () => {
       batches_failed: 0,
       total_filtered: 3,
       total_rejected: 2,
+      stuck_failed: 0,
     })
   })
 
@@ -481,6 +488,7 @@ describe('run-filter-pipeline command', () => {
       batches_failed: 0,
       total_filtered: 0,
       total_rejected: 0,
+      stuck_failed: 0,
     })
 
     // No emails should have been fetched
@@ -503,7 +511,11 @@ describe('run-filter-pipeline command', () => {
     const [claimFn, workerFn, opts] = mockRunPool.mock.calls[0]
     expect(typeof claimFn).toBe('function')
     expect(typeof workerFn).toBe('function')
-    expect(opts).toEqual({ maxConcurrent: 3, maxRetries: 5 })
+    expect(opts).toEqual({
+      maxConcurrent: 3,
+      maxRetries: 5,
+      onDeadLetter: expect.any(Function),
+    })
   })
 
   // ----------------------------------------------------------
@@ -547,7 +559,11 @@ describe('run-filter-pipeline command', () => {
     await runFilterPipeline()
 
     const [, , opts] = mockRunPool.mock.calls[0]
-    expect(opts).toEqual({ maxConcurrent: 5, maxRetries: 3 })
+    expect(opts).toEqual({
+      maxConcurrent: 5,
+      maxRetries: 6,
+      onDeadLetter: expect.any(Function),
+    })
   })
 
   // ----------------------------------------------------------
@@ -772,6 +788,7 @@ describe('run-filter-pipeline command', () => {
       batches_failed: 2,
       total_filtered: 0,
       total_rejected: 0,
+      stuck_failed: 0,
     })
   })
 
