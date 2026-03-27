@@ -110,6 +110,12 @@ export async function sweepStuckRows(exec, schema, { activeStatus, batchType, ma
       `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE BATCH_ID = '${safeBid}' AND STATUS = '${statusSql}'`,
     )
     const n = Number(countRows?.[0]?.C ?? 0) || 0
+    if (n === 0) {
+      core.info(
+        `[sweepStuckRows] skip batch ${bid}: no rows still in status=${activeStatus} (race with other workers)`,
+      )
+      continue
+    }
     await exec(
       `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${statusSql}'`,
     )

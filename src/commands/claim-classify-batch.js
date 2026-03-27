@@ -13,7 +13,8 @@ import { insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipe
  * Returns:
  *  - New batch:   { batch_id, count, attempts: 0, rows }
  *  - Stuck batch: { batch_id, count, attempts, rows }
- *  - Nothing:     { batch_id: null, count: 0 }
+ *  - Nothing:     { batch_id: null, count: 0, stuck_failed, orphan_failed } — last two are
+ *    counts from post-claim sweeps when nothing was claimable (each may be 0).
  */
 export async function runClaimClassifyBatch() {
   const authUrl = core.getInput('auth-url')

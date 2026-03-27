@@ -8,7 +8,16 @@ import { insertBatchEvent, sweepStuckRows } from '../lib/pipeline.js'
  * Atomically claims pending deal_states for filtering.
  * Falls back to re-claiming a stuck batch if no pending rows exist.
  *
- * Returns { batch_id, count, attempts?, rows? }
+ * @returns {Promise<{
+ *   batch_id: string | null,
+ *   count: number,
+ *   attempts?: number,
+ *   rows?: unknown[],
+ *   stuck_failed?: number
+ * }>}
+ * - New or retriggered batch: `batch_id` set, optional `attempts` / `rows`.
+ * - No work and no retrigger-eligible stuck batch: `batch_id: null`, `count: 0`,
+ *   and `stuck_failed` (rows moved to failed by the exhausted-batch sweep, may be 0).
  */
 export async function runClaimFilterBatch() {
   const authUrl = core.getInput('auth-url')

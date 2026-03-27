@@ -361,6 +361,22 @@ describe('sweepStuckRows', () => {
     expect(exec.mock.calls[2][0]).toContain("STATUS = 'failed'")
     expect(exec.mock.calls[3][0]).toContain("'dead_letter'")
   })
+
+  it('skips update and dead_letter event when no rows remain in active status', async () => {
+    const exec = jest
+      .fn()
+      .mockResolvedValueOnce([{ BATCH_ID: 'batch-z' }])
+      .mockResolvedValueOnce([{ C: 0 }])
+    const n = await sweepStuckRows(exec, 'dealsync_stg_v1', {
+      activeStatus: 'filtering',
+      batchType: 'filter',
+      maxRetries: 3,
+    })
+    expect(n).toBe(0)
+    expect(exec).toHaveBeenCalledTimes(2)
+    expect(exec.mock.calls[1][0]).toContain('COUNT(*)')
+    expect(exec.mock.calls[1][0]).toContain("STATUS = 'filtering'")
+  })
 })
 
 describe('sweepOrphanedRows', () => {

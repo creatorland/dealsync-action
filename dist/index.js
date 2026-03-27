@@ -38534,6 +38534,12 @@ async function sweepStuckRows(exec, schema, { activeStatus, batchType, maxRetrie
       `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE BATCH_ID = '${safeBid}' AND STATUS = '${statusSql}'`,
     );
     const n = Number(countRows?.[0]?.C ?? 0) || 0;
+    if (n === 0) {
+      coreExports.info(
+        `[sweepStuckRows] skip batch ${bid}: no rows still in status=${activeStatus} (race with other workers)`,
+      );
+      continue
+    }
     await exec(
       `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${statusSql}'`,
     );
@@ -38618,7 +38624,16 @@ async function insertBatchEvent(
  * Atomically claims pending deal_states for filtering.
  * Falls back to re-claiming a stuck batch if no pending rows exist.
  *
- * Returns { batch_id, count, attempts?, rows? }
+ * @returns {Promise<{
+ *   batch_id: string | null,
+ *   count: number,
+ *   attempts?: number,
+ *   rows?: unknown[],
+ *   stuck_failed?: number
+ * }>}
+ * - New or retriggered batch: `batch_id` set, optional `attempts` / `rows`.
+ * - No work and no retrigger-eligible stuck batch: `batch_id: null`, `count: 0`,
+ *   and `stuck_failed` (rows moved to failed by the exhausted-batch sweep, may be 0).
  */
 async function runClaimFilterBatch() {
   const authUrl = coreExports.getInput('auth-url');
@@ -38725,7 +38740,8 @@ async function runClaimFilterBatch() {
  * Returns:
  *  - New batch:   { batch_id, count, attempts: 0, rows }
  *  - Stuck batch: { batch_id, count, attempts, rows }
- *  - Nothing:     { batch_id: null, count: 0 }
+ *  - Nothing:     { batch_id: null, count: 0, stuck_failed, orphan_failed } — last two are
+ *    counts from post-claim sweeps when nothing was claimable (each may be 0).
  */
 async function runClaimClassifyBatch() {
   const authUrl = coreExports.getInput('auth-url');
