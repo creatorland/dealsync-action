@@ -27332,10 +27332,10 @@ function sanitizeId(id) {
 
 function sanitizeString(s) {
   return (s || '')
-    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")  // curly single quotes → straight
-    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')   // curly double quotes → straight
-    .replace(/'/g, "''")                             // escape single quotes for SQL
-    .replace(/\\/g, '\\\\')                          // escape backslashes
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'") // curly single quotes → straight
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"') // curly double quotes → straight
+    .replace(/'/g, "''") // escape single quotes for SQL
+    .replace(/\\/g, '\\\\') // escape backslashes
 }
 
 function toSqlIdList(ids) {
@@ -27410,7 +27410,9 @@ async function authenticate(authUrl, authSecret, badToken) {
     } catch (err) {
       if (attempt < MAX_RETRIES - 1) {
         const delay = backoff(attempt);
-        console.log(`[sxt-client] Auth failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`);
+        console.log(
+          `[sxt-client] Auth failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`,
+        );
         await sleep$1(delay);
       } else {
         throw err
@@ -27455,7 +27457,9 @@ async function acquireRateLimitToken(tokens = 1) {
       if (!resp.ok && resp.status !== 429) {
         errors++;
         const delay = backoff(errors);
-        console.log(`[sxt-client] Rate limiter HTTP ${resp.status}, error ${errors}/${MAX_ERRORS}, retrying in ${delay}ms`);
+        console.log(
+          `[sxt-client] Rate limiter HTTP ${resp.status}, error ${errors}/${MAX_ERRORS}, retrying in ${delay}ms`,
+        );
         await sleep$1(delay);
         continue
       }
@@ -27474,7 +27478,9 @@ async function acquireRateLimitToken(tokens = 1) {
     } catch (err) {
       errors++;
       const delay = backoff(errors);
-      console.log(`[sxt-client] Rate limiter error: ${err.message}, error ${errors}/${MAX_ERRORS}, retrying in ${delay}ms`);
+      console.log(
+        `[sxt-client] Rate limiter error: ${err.message}, error ${errors}/${MAX_ERRORS}, retrying in ${delay}ms`,
+      );
       await sleep$1(delay);
     }
   }
@@ -27539,7 +27545,9 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
       if (resp.status === 401) {
         clear();
         const delay = backoff(attempt);
-        console.log(`[sxt-client] 401 received (attempt ${attempt + 1}/${MAX_RETRIES}), re-authenticating, backoff ${delay}ms`);
+        console.log(
+          `[sxt-client] 401 received (attempt ${attempt + 1}/${MAX_RETRIES}), re-authenticating, backoff ${delay}ms`,
+        );
         await reauthenticate(cachedJwt);
         await sleep$1(delay);
         continue
@@ -27557,7 +27565,9 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
 
       if (attempt < MAX_RETRIES - 1) {
         const delay = backoff(attempt);
-        console.log(`[sxt-client] SQL query failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`);
+        console.log(
+          `[sxt-client] SQL query failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`,
+        );
         await sleep$1(delay);
       } else {
         throw err
@@ -27580,7 +27590,9 @@ async function runSyncDealStates() {
   const schema = sanitizeSchema(coreExports.getInput('schema'));
   const emailCoreSchema = sanitizeSchema(coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING');
 
-  console.log(`[sync-deal-states] syncing from ${emailCoreSchema}.EMAIL_METADATA → ${schema}.DEAL_STATES`);
+  console.log(
+    `[sync-deal-states] syncing from ${emailCoreSchema}.EMAIL_METADATA → ${schema}.DEAL_STATES`,
+  );
   const jwt = await authenticate(authUrl, authSecret);
 
   const sql = `INSERT INTO ${schema}.DEAL_STATES (ID, EMAIL_METADATA_ID, USER_ID, THREAD_ID, MESSAGE_ID, STATUS, CREATED_AT, UPDATED_AT) SELECT gen_random_uuid(), em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM ${emailCoreSchema}.EMAIL_METADATA em WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID) ON CONFLICT (EMAIL_METADATA_ID) DO UPDATE SET UPDATED_AT = CURRENT_TIMESTAMP`;
@@ -34545,8 +34557,8 @@ async function runFetchAndClassify() {
   const batchId = sanitizeId(coreExports.getInput('batch-id'));
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
   const hyperbolicKey = coreExports.getInput('hyperbolic-key');
-  const primaryModel = coreExports.getInput('primary-model') || 'deepseek-ai/DeepSeek-V3';
-  const fallbackModel = coreExports.getInput('fallback-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
+  const primaryModel = coreExports.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
+  const fallbackModel = coreExports.getInput('fallback-model') || 'deepseek-ai/DeepSeek-V3';
   const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
   const chunkSize = parseInt(coreExports.getInput('chunk-size') || '10', 10);
   const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '120000', 10);
@@ -34979,7 +34991,9 @@ async function runFetchAndFilter() {
 
   if (!batchId) throw new Error('batch-id is required')
 
-  console.log(`[fetch-and-filter] starting for batch ${batchId} (chunk=${chunkSize}, timeout=${fetchTimeoutMs}ms)`);
+  console.log(
+    `[fetch-and-filter] starting for batch ${batchId} (chunk=${chunkSize}, timeout=${fetchTimeoutMs}ms)`,
+  );
 
   // 1. Authenticate + fetch metadata from SxT
   const jwt = await authenticate(authUrl, authSecret);
@@ -35042,10 +35056,14 @@ async function runFetchAndFilter() {
       } catch (err) {
         if (attempt < MAX_RETRIES - 1) {
           const delay = Math.min(1000 * Math.pow(2, attempt), 10000);
-          console.log(`[fetch-and-filter] chunk ${chunkNum} failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`);
+          console.log(
+            `[fetch-and-filter] chunk ${chunkNum} failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`,
+          );
           await new Promise((r) => setTimeout(r, delay));
         } else {
-          console.log(`[fetch-and-filter] chunk ${chunkNum} failed after ${MAX_RETRIES} attempts: ${err.message}`);
+          console.log(
+            `[fetch-and-filter] chunk ${chunkNum} failed after ${MAX_RETRIES} attempts: ${err.message}`,
+          );
         }
       }
     }
@@ -39146,7 +39164,9 @@ class WriteBatcher {
     } catch (err) {
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
-        console.error(`[write-batcher] combined ${queueName} flush failed, falling back to individual items`);
+        console.error(
+          `[write-batcher] combined ${queueName} flush failed, falling back to individual items`,
+        );
         for (let i = 0; i < items.length; i++) {
           try {
             await this._executeQueue(queueName, [items[i]]);
@@ -39239,8 +39259,8 @@ async function runClassifyPipeline() {
   const schema = sanitizeSchema(coreExports.getInput('schema'));
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
   const hyperbolicKey = coreExports.getInput('hyperbolic-key');
-  const primaryModel = coreExports.getInput('primary-model') || 'deepseek-ai/DeepSeek-V3';
-  const fallbackModel = coreExports.getInput('fallback-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
+  const primaryModel = coreExports.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
+  const fallbackModel = coreExports.getInput('fallback-model') || 'deepseek-ai/DeepSeek-V3';
   const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
   const maxConcurrent = parseInt(coreExports.getInput('max-concurrent') || '70', 10);
   const classifyBatchSize = parseInt(coreExports.getInput('classify-batch-size') || '5', 10);
@@ -39648,13 +39668,15 @@ async function runClassifyPipeline() {
       const quotedIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',');
       const sql = `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`;
       console.log(`[run-classify-pipeline] deal UPDATE SQL: ${sql.substring(0, 500)}`);
-      await execNoRL(sql);
+      const dealResult = await execNoRL(sql);
+      console.log(`[run-classify-pipeline] deal UPDATE response: ${JSON.stringify(dealResult)}`);
     }
     if (notDealEmailIds.length > 0) {
       const quotedIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',');
       const sql = `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`;
       console.log(`[run-classify-pipeline] not_deal UPDATE SQL: ${sql.substring(0, 500)}`);
-      await execNoRL(sql);
+      const notDealResult = await execNoRL(sql);
+      console.log(`[run-classify-pipeline] not_deal UPDATE response: ${JSON.stringify(notDealResult)}`);
     }
 
     console.log(

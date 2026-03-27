@@ -52,7 +52,10 @@ describe('WriteBatcher', () => {
   it('flushes evals when threshold is reached', async () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 2 })
 
-    const p = batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", "('id2', 'th-2', '', 'cat', 'sum', false, false, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    const p = batcher.pushEvals([
+      "('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      "('id2', 'th-2', '', 'cat', 'sum', false, false, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
 
     await p
 
@@ -92,7 +95,9 @@ describe('WriteBatcher', () => {
   it('flushes deals with correct upsert SQL', async () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 1 })
 
-    const p = batcher.pushDeals(["('d1', 'u1', 'th-1', '', 'Deal', 'brand', 'new', 100, 'USD', 'Co', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    const p = batcher.pushDeals([
+      "('d1', 'u1', 'th-1', '', 'Deal', 'brand', 'new', 100, 'USD', 'Co', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
     await p
 
     const sql = mockExec.mock.calls[0][0]
@@ -127,7 +132,9 @@ describe('WriteBatcher', () => {
   it('flushes contacts with correct INSERT SQL', async () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 1 })
 
-    const p = batcher.pushContacts(["('c1', 'd1', 'email@co.com', 'primary', 'Alice', 'email@co.com', 'Co', 'CEO', '555', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    const p = batcher.pushContacts([
+      "('c1', 'd1', 'email@co.com', 'primary', 'Alice', 'email@co.com', 'Co', 'CEO', '555', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
     await p
 
     const sql = mockExec.mock.calls[0][0]
@@ -204,7 +211,9 @@ describe('WriteBatcher', () => {
   it('flushes batch events with correct upsert SQL', async () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 1 })
 
-    const p = batcher.pushBatchEvents(["('hash1', 'batch1', 'classify', 'complete', CURRENT_TIMESTAMP)"])
+    const p = batcher.pushBatchEvents([
+      "('hash1', 'batch1', 'classify', 'complete', CURRENT_TIMESTAMP)",
+    ])
     await p
 
     const sql = mockExec.mock.calls[0][0]
@@ -223,15 +232,21 @@ describe('WriteBatcher', () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 3 })
 
     // Push 2 items, below threshold of 3
-    batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
-    batcher.pushEvals(["('id2', 'th-2', '', 'cat', 'sum', false, false, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    batcher.pushEvals([
+      "('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
+    batcher.pushEvals([
+      "('id2', 'th-2', '', 'cat', 'sum', false, false, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
 
     // Not flushed yet
     expect(mockExec).not.toHaveBeenCalled()
     expect(batcher._queues.evals.items).toHaveLength(2)
 
     // Push third item to trigger threshold
-    const p = batcher.pushEvals(["('id3', 'th-3', '', 'cat', 'sum', false, false, 5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    const p = batcher.pushEvals([
+      "('id3', 'th-3', '', 'cat', 'sum', false, false, 5, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
     await p
 
     expect(mockExec).toHaveBeenCalledTimes(1)
@@ -247,8 +262,12 @@ describe('WriteBatcher', () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 100 }) // very high threshold
 
     // Push to multiple queues (below threshold)
-    batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
-    batcher.pushDeals(["('d1', 'u1', 'th-1', '', 'Deal', 'brand', 'new', 100, 'USD', 'Co', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    batcher.pushEvals([
+      "('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
+    batcher.pushDeals([
+      "('d1', 'u1', 'th-1', '', 'Deal', 'brand', 'new', 100, 'USD', 'Co', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
 
     expect(mockExec).not.toHaveBeenCalled()
 
@@ -256,9 +275,9 @@ describe('WriteBatcher', () => {
 
     // Both queues should have been flushed
     expect(mockExec).toHaveBeenCalledTimes(2)
-    const sqls = mockExec.mock.calls.map(c => c[0])
-    expect(sqls.some(s => s.includes('EMAIL_THREAD_EVALUATIONS'))).toBe(true)
-    expect(sqls.some(s => s.includes('TEST_SCHEMA.DEALS'))).toBe(true)
+    const sqls = mockExec.mock.calls.map((c) => c[0])
+    expect(sqls.some((s) => s.includes('EMAIL_THREAD_EVALUATIONS'))).toBe(true)
+    expect(sqls.some((s) => s.includes('TEST_SCHEMA.DEALS'))).toBe(true)
   })
 
   // ----------------------------------------------------------
@@ -268,7 +287,9 @@ describe('WriteBatcher', () => {
   it('stop() clears timer and rejects pending waiters', async () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 100 })
 
-    const p = batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    const p = batcher.pushEvals([
+      "('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
 
     batcher.stop()
 
@@ -285,8 +306,12 @@ describe('WriteBatcher', () => {
 
     mockExec.mockRejectedValueOnce(new Error('SQL execution failed'))
 
-    const p1 = batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
-    const p2 = batcher.pushEvals(["('id2', 'th-2', '', 'cat', 'sum', false, false, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    const p1 = batcher.pushEvals([
+      "('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
+    const p2 = batcher.pushEvals([
+      "('id2', 'th-2', '', 'cat', 'sum', false, false, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
 
     await expect(p1).rejects.toThrow('SQL execution failed')
     await expect(p2).rejects.toThrow('SQL execution failed')
@@ -347,7 +372,9 @@ describe('WriteBatcher', () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 2 })
 
     // Push to evals (below threshold) — capture promise to handle rejection on stop
-    const evalPromise = batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    const evalPromise = batcher.pushEvals([
+      "('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
 
     // Push to dealDeletes (at threshold) — should flush only dealDeletes
     const p = batcher.pushDealDeletes(["'th-1'", "'th-2'"])
@@ -377,7 +404,9 @@ describe('WriteBatcher', () => {
       flushThreshold: 100, // high so threshold doesn't trigger
     })
 
-    batcher.pushEvals(["('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    batcher.pushEvals([
+      "('id1', 'th-1', '', 'cat', 'sum', true, false, 8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
 
     expect(mockExec).not.toHaveBeenCalled()
 
@@ -413,7 +442,9 @@ describe('WriteBatcher', () => {
     const consoleSpy = jest.spyOn(console, 'log').mockImplementation(() => {})
     const batcher = makeBatcher(mockExec, { flushThreshold: 1 })
 
-    await batcher.pushDeals(["('d1', 'u1', 'th-1', '', 'Deal', 'brand', 'new', 100, 'USD', 'Co', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"])
+    await batcher.pushDeals([
+      "('d1', 'u1', 'th-1', '', 'Deal', 'brand', 'new', 100, 'USD', 'Co', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+    ])
 
     expect(consoleSpy).toHaveBeenCalledWith(
       expect.stringContaining('[write-batcher] flushing deals: 1 items'),

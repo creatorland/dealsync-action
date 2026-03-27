@@ -20,7 +20,9 @@ export async function runFetchAndFilter() {
 
   if (!batchId) throw new Error('batch-id is required')
 
-  console.log(`[fetch-and-filter] starting for batch ${batchId} (chunk=${chunkSize}, timeout=${fetchTimeoutMs}ms)`)
+  console.log(
+    `[fetch-and-filter] starting for batch ${batchId} (chunk=${chunkSize}, timeout=${fetchTimeoutMs}ms)`,
+  )
 
   // 1. Authenticate + fetch metadata from SxT
   const jwt = await authenticate(authUrl, authSecret)
@@ -83,10 +85,14 @@ export async function runFetchAndFilter() {
       } catch (err) {
         if (attempt < MAX_RETRIES - 1) {
           const delay = Math.min(1000 * Math.pow(2, attempt), 10000)
-          console.log(`[fetch-and-filter] chunk ${chunkNum} failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`)
+          console.log(
+            `[fetch-and-filter] chunk ${chunkNum} failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`,
+          )
           await new Promise((r) => setTimeout(r, delay))
         } else {
-          console.log(`[fetch-and-filter] chunk ${chunkNum} failed after ${MAX_RETRIES} attempts: ${err.message}`)
+          console.log(
+            `[fetch-and-filter] chunk ${chunkNum} failed after ${MAX_RETRIES} attempts: ${err.message}`,
+          )
         }
       }
     }

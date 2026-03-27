@@ -72,10 +72,10 @@ export function sanitizeId(id) {
 
 export function sanitizeString(s) {
   return (s || '')
-    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")  // curly single quotes → straight
-    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')   // curly double quotes → straight
-    .replace(/'/g, "''")                             // escape single quotes for SQL
-    .replace(/\\/g, '\\\\')                          // escape backslashes
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'") // curly single quotes → straight
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"') // curly double quotes → straight
+    .replace(/'/g, "''") // escape single quotes for SQL
+    .replace(/\\/g, '\\\\') // escape backslashes
 }
 
 export function toSqlIdList(ids) {

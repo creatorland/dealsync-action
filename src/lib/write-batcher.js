@@ -156,7 +156,9 @@ export class WriteBatcher {
     } catch (err) {
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
-        console.error(`[write-batcher] combined ${queueName} flush failed, falling back to individual items`)
+        console.error(
+          `[write-batcher] combined ${queueName} flush failed, falling back to individual items`,
+        )
         for (let i = 0; i < items.length; i++) {
           try {
             await this._executeQueue(queueName, [items[i]])

@@ -62,7 +62,9 @@ export async function authenticate(authUrl, authSecret, badToken) {
     } catch (err) {
       if (attempt < MAX_RETRIES - 1) {
         const delay = backoff(attempt)
-        console.log(`[sxt-client] Auth failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`)
+        console.log(
+          `[sxt-client] Auth failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`,
+        )
         await sleep(delay)
       } else {
         throw err
@@ -107,7 +109,9 @@ export async function acquireRateLimitToken(tokens = 1) {
       if (!resp.ok && resp.status !== 429) {
         errors++
         const delay = backoff(errors)
-        console.log(`[sxt-client] Rate limiter HTTP ${resp.status}, error ${errors}/${MAX_ERRORS}, retrying in ${delay}ms`)
+        console.log(
+          `[sxt-client] Rate limiter HTTP ${resp.status}, error ${errors}/${MAX_ERRORS}, retrying in ${delay}ms`,
+        )
         await sleep(delay)
         continue
       }
@@ -126,7 +130,9 @@ export async function acquireRateLimitToken(tokens = 1) {
     } catch (err) {
       errors++
       const delay = backoff(errors)
-      console.log(`[sxt-client] Rate limiter error: ${err.message}, error ${errors}/${MAX_ERRORS}, retrying in ${delay}ms`)
+      console.log(
+        `[sxt-client] Rate limiter error: ${err.message}, error ${errors}/${MAX_ERRORS}, retrying in ${delay}ms`,
+      )
       await sleep(delay)
     }
   }
@@ -191,7 +197,9 @@ export async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = fa
       if (resp.status === 401) {
         clear()
         const delay = backoff(attempt)
-        console.log(`[sxt-client] 401 received (attempt ${attempt + 1}/${MAX_RETRIES}), re-authenticating, backoff ${delay}ms`)
+        console.log(
+          `[sxt-client] 401 received (attempt ${attempt + 1}/${MAX_RETRIES}), re-authenticating, backoff ${delay}ms`,
+        )
         await reauthenticate(cachedJwt)
         await sleep(delay)
         continue
@@ -209,7 +217,9 @@ export async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = fa
 
       if (attempt < MAX_RETRIES - 1) {
         const delay = backoff(attempt)
-        console.log(`[sxt-client] SQL query failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`)
+        console.log(
+          `[sxt-client] SQL query failed (attempt ${attempt + 1}/${MAX_RETRIES}): ${err.message}, retrying in ${delay}ms`,
+        )
         await sleep(delay)
       } else {
         throw err

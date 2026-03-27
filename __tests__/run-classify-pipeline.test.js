@@ -203,11 +203,10 @@ describe('run-classify-pipeline command', () => {
     await runClassifyPipeline()
 
     expect(MockWriteBatcher).toHaveBeenCalledTimes(1)
-    expect(MockWriteBatcher).toHaveBeenCalledWith(
-      expect.any(Function),
-      'dealsync_stg_v1',
-      { flushIntervalMs: 3000, flushThreshold: 20 },
-    )
+    expect(MockWriteBatcher).toHaveBeenCalledWith(expect.any(Function), 'dealsync_stg_v1', {
+      flushIntervalMs: 3000,
+      flushThreshold: 20,
+    })
   })
 
   // ----------------------------------------------------------
@@ -932,11 +931,10 @@ describe('run-classify-pipeline command', () => {
     expect(opts).toEqual({ maxConcurrent: 30, maxRetries: 3 })
 
     // WriteBatcher created with defaults
-    expect(MockWriteBatcher).toHaveBeenCalledWith(
-      expect.any(Function),
-      expect.any(String),
-      { flushIntervalMs: 5000, flushThreshold: 10 },
-    )
+    expect(MockWriteBatcher).toHaveBeenCalledWith(expect.any(Function), expect.any(String), {
+      flushIntervalMs: 5000,
+      flushThreshold: 10,
+    })
   })
 
   // ----------------------------------------------------------
