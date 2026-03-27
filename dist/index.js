@@ -27331,7 +27331,11 @@ function sanitizeId(id) {
 }
 
 function sanitizeString(s) {
-  return (s || '').replace(/'/g, "''")
+  return (s || '')
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'")  // curly single quotes → straight
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')   // curly double quotes → straight
+    .replace(/'/g, "''")                             // escape single quotes for SQL
+    .replace(/\\/g, '\\\\')                          // escape backslashes
 }
 
 function toSqlIdList(ids) {
@@ -27543,7 +27547,7 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
 
       if (!resp.ok) {
         const body = await resp.text();
-        console.error(`[sxt-client] SxT ${resp.status} error. SQL: ${sql.substring(0, 500)}`);
+        console.error(`[sxt-client] SxT ${resp.status} error. SQL: ${sql.substring(0, 1000)}`);
         throw new Error(`SxT ${resp.status}: ${body}`)
       }
       return resp.json()
