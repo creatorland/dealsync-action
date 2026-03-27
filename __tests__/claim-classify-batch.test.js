@@ -163,10 +163,12 @@ describe('claim-classify-batch', () => {
       .mockResolvedValueOnce(sxtResponse()) // UPDATE claim (no-op)
       .mockResolvedValueOnce(sxtResponse([])) // SELECT claimed (empty)
       .mockResolvedValueOnce(sxtResponse([])) // stuck query (empty)
+      .mockResolvedValueOnce(sxtResponse([])) // sweep exhausted — empty
+      .mockResolvedValueOnce(sxtResponse([{ C: 0 }])) // orphan count
 
     const result = await runClaimClassifyBatch()
 
-    expect(result).toEqual({ batch_id: null, count: 0 })
+    expect(result).toEqual({ batch_id: null, count: 0, stuck_failed: 0, orphan_failed: 0 })
   })
 
   // -----------------------------------------------------------------------
@@ -255,6 +257,8 @@ describe('claim-classify-batch', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([{ C: 0 }]))
 
     await runClaimClassifyBatch()
 
@@ -272,7 +276,7 @@ describe('claim-classify-batch', () => {
   // -----------------------------------------------------------------------
   // Default batch size and max-retries
   // -----------------------------------------------------------------------
-  it('uses default batch-size=5 and max-retries=3 when inputs are empty', async () => {
+  it('uses default batch-size=5 and max-retries=6 when inputs are empty', async () => {
     mockInputs({ 'classify-batch-size': '', 'max-retries': '' })
 
     fetchSpy
@@ -280,6 +284,8 @@ describe('claim-classify-batch', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([{ C: 0 }]))
 
     await runClaimClassifyBatch()
 
@@ -289,7 +295,7 @@ describe('claim-classify-batch', () => {
     expect(claimSql).toContain('LIMIT 5')
 
     const stuckSql = getSqlText(sqlCalls[2])
-    expect(stuckSql).toContain('HAVING COUNT(DISTINCT be.TRIGGER_HASH) < 3')
+    expect(stuckSql).toContain('HAVING COUNT(DISTINCT be.TRIGGER_HASH) < 6')
   })
 
   // -----------------------------------------------------------------------
@@ -343,6 +349,8 @@ describe('claim-classify-batch', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([{ C: 0 }]))
 
     await runClaimClassifyBatch()
 
@@ -363,6 +371,8 @@ describe('claim-classify-batch', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([{ C: 0 }]))
 
     await runClaimClassifyBatch()
 
@@ -387,6 +397,8 @@ describe('claim-classify-batch', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([{ C: 0 }]))
 
     await runClaimClassifyBatch()
 
@@ -442,6 +454,8 @@ describe('claim-classify-batch', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([{ C: 0 }]))
 
     await runClaimClassifyBatch()
 
