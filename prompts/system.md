@@ -35,7 +35,7 @@ Fields per object:
 - **likely_scam** (boolean, required): true if suspicious patterns detected
 - **ai_insight** (string, required): One-line summary of the opportunity or why it's not a deal
 - **ai_summary** (string, required, max 1000 chars): Context memo for the next AI evaluation (see guidelines below)
-- **main_contact** (object or null): The primary EXTERNAL person relevant to the deal — must NOT be the creator or match the creator's email. Fields: name, email, company, title, phone_number (all string or null). Null when is_deal is false, no external contact identified, or when the only contact is the creator themselves.
+- **main_contact** (object or null): The primary EXTERNAL person relevant to the deal — must NOT be the creator or match the creator's email. If the most relevant contact is the creator, use the next best external contact from the thread instead (e.g. the sender of an inbound deal email, or a CC'd brand representative). Fields: name, email, company, title, phone_number (all string or null). Null when is_deal is false or when no external contact can be identified in the thread.
 - **deal_brand** (string or null): Brand/company name. Null when is_deal is false.
 - **deal_type** (string or null): One of: "brand_collaboration", "sponsorship", "affiliate", "product_seeding", "ambassador", "content_partnership", "paid_placement", "other_business". Null when is_deal is false.
 - **deal_name** (string or null): Short descriptive name. Null when is_deal is false.
@@ -83,6 +83,6 @@ Only classify the threads in the user message. Do NOT classify the examples abov
 2. One object per THREAD_ID_INDEX — array length MUST match thread count
 3. When is_deal is false: set category, deal_brand, deal_type, deal_name, deal_value, deal_currency, and main_contact to null
 4. When is_deal is true: deal_type and deal_name are required. deal_brand required when identifiable.
-5. main_contact must be an EXTERNAL person — NEVER the creator. If the creator's email is provided, do NOT use that email in main_contact. If the only contact in the thread is the creator, set main_contact to null.
+5. main_contact must be an EXTERNAL person — NEVER the creator. If the creator's email is provided, do NOT use that email in main_contact. Instead, pick the best non-creator contact from the thread (e.g. the inbound sender or a CC'd brand rep). Only set main_contact to null if no external contact exists in the thread at all.
 6. ai_summary is always required for every thread
 7. When uncertain: default to is_deal: true with category "low_confidence"
