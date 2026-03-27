@@ -27555,13 +27555,6 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
 
       if (!resp.ok) {
         const body = await resp.text();
-        const headers = Object.fromEntries(resp.headers.entries());
-        console.error(
-          `[sxt-client] SxT ${resp.status} error\n` +
-          `  SQL: ${sql.substring(0, 1500)}\n` +
-          `  Response body: ${body}\n` +
-          `  Response headers: ${JSON.stringify(headers)}`,
-        );
         throw new Error(`SxT ${resp.status}: ${body}`)
       }
       return resp.json()
@@ -39197,10 +39190,7 @@ class WriteBatcher {
       await this._executeQueue(queueName, items);
       for (const w of waiters) w.resolve();
     } catch (err) {
-      console.error(
-        `[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}\n` +
-        `  First item: ${items[0]?.substring?.(0, 300) || JSON.stringify(items[0])?.substring(0, 300)}`,
-      );
+      console.error(`[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}`);
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
         console.error(
@@ -39817,20 +39807,13 @@ async function runClassifyPipeline() {
     }
 
     // Write state updates directly (not through batcher) to ensure they commit
-    console.log(`[run-classify-pipeline] batch ${batchId} state update: dealIds=[${dealEmailIds.join(',')}] notDealIds=[${notDealEmailIds.join(',')}] threads=${threads.map(t => `${t.thread_id}:${t.is_deal}`).join(',')} rows=${rows.length}`);
     if (dealEmailIds.length > 0) {
       const quotedIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-      const sql = `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`;
-      console.log(`[run-classify-pipeline] deal UPDATE SQL: ${sql.substring(0, 500)}`);
-      const dealResult = await execNoRL(sql);
-      console.log(`[run-classify-pipeline] deal UPDATE response: ${JSON.stringify(dealResult)}`);
+      await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`);
     }
     if (notDealEmailIds.length > 0) {
       const quotedIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-      const sql = `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`;
-      console.log(`[run-classify-pipeline] not_deal UPDATE SQL: ${sql.substring(0, 500)}`);
-      const notDealResult = await execNoRL(sql);
-      console.log(`[run-classify-pipeline] not_deal UPDATE response: ${JSON.stringify(notDealResult)}`);
+      await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`);
     }
 
     console.log(
