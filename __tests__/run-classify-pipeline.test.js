@@ -91,6 +91,7 @@ const mockBatcherInstance = {
   pushDeals: jest.fn().mockResolvedValue(undefined),
   pushContactDeletes: jest.fn().mockResolvedValue(undefined),
   pushContacts: jest.fn().mockResolvedValue(undefined),
+  pushCoreContacts: jest.fn().mockResolvedValue(undefined),
   pushStateUpdates: jest.fn().mockResolvedValue(undefined),
   pushBatchEvents: jest.fn().mockResolvedValue(undefined),
   drain: jest.fn().mockResolvedValue(undefined),
@@ -189,6 +190,7 @@ describe('run-classify-pipeline command', () => {
     mockBatcherInstance.pushDeals.mockResolvedValue(undefined)
     mockBatcherInstance.pushContactDeletes.mockResolvedValue(undefined)
     mockBatcherInstance.pushContacts.mockResolvedValue(undefined)
+    mockBatcherInstance.pushCoreContacts.mockResolvedValue(undefined)
     mockBatcherInstance.pushStateUpdates.mockResolvedValue(undefined)
     mockBatcherInstance.pushBatchEvents.mockResolvedValue(undefined)
     mockBatcherInstance.drain.mockResolvedValue(undefined)
@@ -209,6 +211,7 @@ describe('run-classify-pipeline command', () => {
     expect(MockWriteBatcher).toHaveBeenCalledWith(expect.any(Function), 'dealsync_stg_v1', {
       flushIntervalMs: 3000,
       flushThreshold: 20,
+      coreSchema: 'EMAIL_CORE_STAGING',
     })
   })
 
@@ -273,8 +276,9 @@ describe('run-classify-pipeline command', () => {
       expect(mockBatcherInstance.pushEvals).toHaveBeenCalledTimes(1)
       expect(mockBatcherInstance.pushDealDeletes).toHaveBeenCalledTimes(1) // non-deal threads
       expect(mockBatcherInstance.pushDeals).toHaveBeenCalledTimes(1) // deal threads
-      expect(mockBatcherInstance.pushContactDeletes).toHaveBeenCalledTimes(1)
-      expect(mockBatcherInstance.pushContacts).toHaveBeenCalledTimes(1)
+      expect(mockBatcherInstance.pushCoreContacts).toHaveBeenCalledTimes(1) // core contacts
+      expect(mockBatcherInstance.pushContacts).toHaveBeenCalledTimes(1) // deal contacts
+      expect(mockBatcherInstance.pushContactDeletes).not.toHaveBeenCalled() // removed: ON CONFLICT handles it
       expect(mockBatcherInstance.pushBatchEvents).toHaveBeenCalledTimes(1)
 
       return { processed: 1, failed: 0 }
@@ -763,21 +767,26 @@ describe('run-classify-pipeline command', () => {
 
       await workerFn(batch, { attempt: 0 })
 
-      // Verify contacts use thread_id as deal_id
-      expect(mockBatcherInstance.pushContactDeletes).toHaveBeenCalledTimes(1)
-      const contactDeleteArgs = mockBatcherInstance.pushContactDeletes.mock.calls[0][0]
-      expect(contactDeleteArgs).toEqual(["'thread-1'"])
-
+      // Verify two-table contact upsert
+      expect(mockBatcherInstance.pushContactDeletes).not.toHaveBeenCalled() // ON CONFLICT handles it
+      expect(mockBatcherInstance.pushCoreContacts).toHaveBeenCalledTimes(1)
       expect(mockBatcherInstance.pushContacts).toHaveBeenCalledTimes(1)
+
+      // Core contacts contain user, email, name, company, title, phone
+      const coreValues = mockBatcherInstance.pushCoreContacts.mock.calls[0][0]
+      expect(coreValues).toHaveLength(1)
+      expect(coreValues[0]).toContain('alice@co.com')
+      expect(coreValues[0]).toContain("'Alice'")
+      expect(coreValues[0]).toContain("'TestCo'")
+      expect(coreValues[0]).toContain("'CEO'")
+      expect(coreValues[0]).toContain("'555-1234'")
+
+      // Deal contacts contain thread_id, user_id, email, role
       const contactValues = mockBatcherInstance.pushContacts.mock.calls[0][0]
       expect(contactValues).toHaveLength(1)
-      expect(contactValues[0]).toContain('alice@co.com')
-      expect(contactValues[0]).toContain('Alice')
-      expect(contactValues[0]).toContain('TestCo')
-      expect(contactValues[0]).toContain('CEO')
-      expect(contactValues[0]).toContain('555-1234')
-      // thread_id is used as deal_id
       expect(contactValues[0]).toContain("'thread-1'")
+      expect(contactValues[0]).toContain('alice@co.com')
+      expect(contactValues[0]).toContain("'primary'")
 
       // No DEALS SELECT query should have been made during worker
       // (only audit query and claim queries)
@@ -930,6 +939,7 @@ describe('run-classify-pipeline command', () => {
     expect(MockWriteBatcher).toHaveBeenCalledWith(expect.any(Function), expect.any(String), {
       flushIntervalMs: 5000,
       flushThreshold: 5,
+      coreSchema: 'EMAIL_CORE_STAGING',
     })
   })
 
@@ -1090,5 +1100,105 @@ describe('run-classify-pipeline command', () => {
     })
 
     await runClassifyPipeline()
+  })
+
+  // ----------------------------------------------------------
+  // Core contacts: pushCoreContacts with correct values
+  // ----------------------------------------------------------
+
+  it('calls pushCoreContacts with (userId, email, name, company, title, phone) values', async () => {
+    mockInputs()
+    const rows = [{ EMAIL_METADATA_ID: 'em-1', MESSAGE_ID: 'msg-1', USER_ID: 'user-42', THREAD_ID: 'thread-xyz', SYNC_STATE_ID: 'ss-1', CREATOR_EMAIL: 'creator@test.com' }]
+    const threads = [{
+      thread_id: 'thread-xyz', is_deal: true, ai_score: 9, ai_summary: 'Great deal',
+      category: 'new', deal_name: 'Big Deal', deal_type: 'sponsorship', deal_value: '1000', currency: 'USD',
+      main_contact: { name: 'Alice', email: 'alice@brand.com', company: 'BrandCo', title: 'Manager', phone_number: '555-0101' },
+    }]
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql.mockResolvedValueOnce([]).mockResolvedValueOnce(rows)
+      const batch = await claimFn()
+      mockExecuteSql.mockResolvedValueOnce([])
+      mockFetchEmails.mockResolvedValueOnce([{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-xyz', body: 'hi' }])
+      mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
+      mockCallModel.mockResolvedValueOnce({ content: '[]' })
+      mockParseAndValidate.mockReturnValueOnce(threads)
+      mockExecuteSql.mockResolvedValue([])
+      await workerFn(batch, { attempt: 0 })
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+
+    expect(mockBatcherInstance.pushCoreContacts).toHaveBeenCalledTimes(1)
+    const coreValues = mockBatcherInstance.pushCoreContacts.mock.calls[0][0]
+    expect(coreValues).toHaveLength(1)
+    expect(coreValues[0]).toContain('user-42')
+    expect(coreValues[0]).toContain('alice@brand.com')
+    expect(coreValues[0]).toContain("'Alice'")
+    expect(coreValues[0]).toContain("'BrandCo'")
+  })
+
+  // ----------------------------------------------------------
+  // Core contacts: NULL for missing fields
+  // ----------------------------------------------------------
+
+  it('uses NULL literal for missing contact fields in coreContacts', async () => {
+    mockInputs()
+    const rows = [{ EMAIL_METADATA_ID: 'em-1', MESSAGE_ID: 'msg-1', USER_ID: 'user-1', THREAD_ID: 'thread-1', SYNC_STATE_ID: 'ss-1', CREATOR_EMAIL: '' }]
+    const threads = [{
+      thread_id: 'thread-1', is_deal: true, ai_score: 7, ai_summary: 'Deal',
+      category: 'new', deal_name: 'Deal', deal_type: 'sponsorship', deal_value: '100', currency: 'USD',
+      main_contact: { name: '', email: 'contact@co.com', company: '', title: '', phone_number: '' },
+    }]
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql.mockResolvedValueOnce([]).mockResolvedValueOnce(rows)
+      const batch = await claimFn()
+      mockExecuteSql.mockResolvedValueOnce([])
+      mockFetchEmails.mockResolvedValueOnce([{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }])
+      mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
+      mockCallModel.mockResolvedValueOnce({ content: '[]' })
+      mockParseAndValidate.mockReturnValueOnce(threads)
+      mockExecuteSql.mockResolvedValue([])
+      await workerFn(batch, { attempt: 0 })
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+
+    const coreValues = mockBatcherInstance.pushCoreContacts.mock.calls[0][0]
+    expect(coreValues[0]).toMatch(/NULL/)
+  })
+
+  // ----------------------------------------------------------
+  // No pushContactDeletes (ON CONFLICT handles idempotency)
+  // ----------------------------------------------------------
+
+  it('does NOT call pushContactDeletes (ON CONFLICT handles idempotency)', async () => {
+    mockInputs()
+    const rows = [{ EMAIL_METADATA_ID: 'em-1', MESSAGE_ID: 'msg-1', USER_ID: 'user-1', THREAD_ID: 'thread-1', SYNC_STATE_ID: 'ss-1', CREATOR_EMAIL: '' }]
+    const threads = [{
+      thread_id: 'thread-1', is_deal: true, ai_score: 7, ai_summary: 'Deal',
+      category: 'new', deal_name: 'Deal', deal_type: 'sponsorship', deal_value: '100', currency: 'USD',
+      main_contact: { name: 'X', email: 'x@co.com', company: '', title: '', phone_number: '' },
+    }]
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql.mockResolvedValueOnce([]).mockResolvedValueOnce(rows)
+      const batch = await claimFn()
+      mockExecuteSql.mockResolvedValueOnce([])
+      mockFetchEmails.mockResolvedValueOnce([{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }])
+      mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
+      mockCallModel.mockResolvedValueOnce({ content: '[]' })
+      mockParseAndValidate.mockReturnValueOnce(threads)
+      mockExecuteSql.mockResolvedValue([])
+      await workerFn(batch, { attempt: 0 })
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+
+    expect(mockBatcherInstance.pushContactDeletes).not.toHaveBeenCalled()
   })
 })

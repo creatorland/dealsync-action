@@ -14,6 +14,10 @@ import { fetchEmails } from '../lib/email-client.js'
 import { runPool, insertBatchEvent } from '../lib/pipeline.js'
 import { WriteBatcher } from '../lib/write-batcher.js'
 
+function toSqlNullable(s) {
+  return s ? `'${sanitizeString(s)}'` : 'NULL'
+}
+
 /**
  * Orchestrator that claims and processes classify batches concurrently,
  * with in-memory audit passing through save-evals, save-deals,
@@ -25,6 +29,7 @@ export async function runClassifyPipeline() {
   const apiUrl = core.getInput('api-url')
   const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
+  const coreSchema = sanitizeSchema(core.getInput('email-core-schema') || 'EMAIL_CORE_STAGING')
   const contentFetcherUrl = core.getInput('content-fetcher-url')
   const hyperbolicKey = core.getInput('hyperbolic-key')
   const primaryModel = core.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507'
@@ -50,7 +55,7 @@ export async function runClassifyPipeline() {
   const execNoRL = (sql) => executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit: true })
 
   // 3. Create write batcher (uses execNoRL — tokens acquired in bulk by workers)
-  const batcher = new WriteBatcher(execNoRL, schema, { flushIntervalMs, flushThreshold })
+  const batcher = new WriteBatcher(execNoRL, schema, { flushIntervalMs, flushThreshold, coreSchema })
 
   // =========================================================================
   //  CLAIM FUNCTION (inline, same pattern as claim-classify-batch)
@@ -422,41 +427,45 @@ export async function runClassifyPipeline() {
     }
 
     // -----------------------------------------------------------------------
-    // Step 6: Save deal contacts via batcher (use thread_id as deal_id)
+    // Step 6: Save deal contacts via batcher (two-table upsert)
     // -----------------------------------------------------------------------
 
     if (dealThreads.length > 0) {
-      const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id))
+      const coreContactValues = []
+      const dealContactValues = []
 
-      // Build contact rows from thread.main_contact (email required)
-      const contactValues = []
       for (const thread of dealThreads) {
         const mc = thread.main_contact
         if (!mc || !mc.email) continue
 
         const threadId = sanitizeId(thread.thread_id)
-        // Use threadId as dealId directly
+        const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
         const contactEmail = sanitizeString(mc.email)
-        const name = sanitizeString(mc.name || '')
-        const company = sanitizeString(mc.company || '')
-        const title = sanitizeString(mc.title || '')
-        const phone = sanitizeString(mc.phone_number || '')
+        const nameVal = toSqlNullable(mc.name)
+        const companyVal = toSqlNullable(mc.company)
+        const titleVal = toSqlNullable(mc.title)
+        const phoneVal = toSqlNullable(mc.phone_number)
 
-        contactValues.push(
-          `('${uuidv7()}', '${threadId}', '${contactEmail}', 'primary', '${name}', '${contactEmail}', '${company}', '${title}', '${phone}', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        // Core contacts — COALESCE preserves existing non-null values
+        coreContactValues.push(
+          `('${userId}', '${contactEmail}', ${nameVal}, ${companyVal}, ${titleVal}, ${phoneVal}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        )
+
+        // Deal contacts — simplified 4-column relationship upsert
+        dealContactValues.push(
+          `('${threadId}', '${userId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
         )
       }
 
-      // Delete old contacts using thread_id as deal_id
-      if (dealThreadIds.length > 0) {
-        await batcher.pushContactDeletes(dealThreadIds.map((id) => `'${id}'`))
+      if (coreContactValues.length > 0) {
+        await batcher.pushCoreContacts(coreContactValues)
       }
 
-      if (contactValues.length > 0) {
-        await batcher.pushContacts(contactValues)
+      if (dealContactValues.length > 0) {
+        await batcher.pushContacts(dealContactValues)
       }
 
-      console.log(`[run-classify-pipeline] ${contactValues.length} contacts saved`)
+      console.log(`[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`)
     }
 
     // -----------------------------------------------------------------------
