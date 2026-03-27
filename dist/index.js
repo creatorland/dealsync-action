@@ -34545,8 +34545,8 @@ async function runFetchAndClassify() {
   const batchId = sanitizeId(coreExports.getInput('batch-id'));
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
   const hyperbolicKey = coreExports.getInput('hyperbolic-key');
-  const primaryModel = coreExports.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
-  const fallbackModel = coreExports.getInput('fallback-model') || 'deepseek-ai/DeepSeek-V3';
+  const primaryModel = coreExports.getInput('primary-model') || 'deepseek-ai/DeepSeek-V3';
+  const fallbackModel = coreExports.getInput('fallback-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
   const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
   const chunkSize = parseInt(coreExports.getInput('chunk-size') || '10', 10);
   const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '120000', 10);
@@ -39239,8 +39239,8 @@ async function runClassifyPipeline() {
   const schema = sanitizeSchema(coreExports.getInput('schema'));
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
   const hyperbolicKey = coreExports.getInput('hyperbolic-key');
-  const primaryModel = coreExports.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
-  const fallbackModel = coreExports.getInput('fallback-model') || 'deepseek-ai/DeepSeek-V3';
+  const primaryModel = coreExports.getInput('primary-model') || 'deepseek-ai/DeepSeek-V3';
+  const fallbackModel = coreExports.getInput('fallback-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
   const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
   const maxConcurrent = parseInt(coreExports.getInput('max-concurrent') || '70', 10);
   const classifyBatchSize = parseInt(coreExports.getInput('classify-batch-size') || '5', 10);
