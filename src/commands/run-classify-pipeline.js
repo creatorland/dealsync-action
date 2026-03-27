@@ -581,7 +581,7 @@ export async function runClassifyPipeline() {
     if (!bid) return
     const safeBid = sanitizeId(bid)
     await execNoRL(
-      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}'`,
+      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${STATUS.CLASSIFYING}'`,
     )
     await insertBatchEvent(execNoRL, schema, {
       triggerHash: uuidv7(),

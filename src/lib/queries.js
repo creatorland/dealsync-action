@@ -9,6 +9,7 @@
  * Status-based state machine:
  *   pending → filtering → pending_classification → classifying → deal | not_deal
  *   filtering → filter_rejected (terminal)
+ *   filtering | classifying | pending_classification → failed (terminal: dead-letter, stuck sweep, orphan sweep)
  */
 
 // ============================================================

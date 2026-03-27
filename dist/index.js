@@ -27269,6 +27269,7 @@ var coreExports = requireCore();
  * Status-based state machine:
  *   pending → filtering → pending_classification → classifying → deal | not_deal
  *   filtering → filter_rejected (terminal)
+ *   filtering | classifying | pending_classification → failed (terminal: dead-letter, stuck sweep, orphan sweep)
  */
 
 // ============================================================
@@ -38442,10 +38443,9 @@ async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries, onDeadLet
   const active = new Set();
   const results = { processed: 0, failed: 0 };
 
-  async function deadLetter(batch, reason) {
-    coreExports.error(
-      `Batch ${batch.batch_id} ${reason} (${batch.attempts || 0}/${maxRetries}), dead-lettered`,
-    );
+  async function deadLetter(batch, reason, attemptCount) {
+    const attemptsShown = attemptCount ?? batch.attempts ?? 0;
+    coreExports.error(`Batch ${batch.batch_id} ${reason} (${attemptsShown}/${maxRetries}), dead-lettered`);
     if (typeof onDeadLetter === 'function' && batch.batch_id) {
       try {
         await onDeadLetter(batch);
@@ -38460,7 +38460,7 @@ async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries, onDeadLet
     let currentAttempt = batch.attempts || 0;
     return (async () => {
       if (currentAttempt >= maxRetries) {
-        await deadLetter(batch, 'already exhausted');
+        await deadLetter(batch, 'already exhausted', currentAttempt);
         return
       }
       while (currentAttempt < maxRetries) {
@@ -38475,7 +38475,7 @@ async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries, onDeadLet
           );
           if (currentAttempt >= maxRetries) {
             coreExports.error(`Batch ${batch.batch_id} dead-lettered after ${maxRetries} attempts`);
-            await deadLetter(batch, 'after max retries');
+            await deadLetter(batch, 'after max retries', currentAttempt);
             return
           }
           const delay = Math.min(2000 * Math.pow(2, currentAttempt - 1), 30000);
@@ -38516,10 +38516,10 @@ const STUCK_INTERVAL_MINUTES = 5;
  */
 async function sweepStuckRows(exec, schema, { activeStatus, batchType, maxRetries }) {
   const safeSchema = sanitizeSchema(schema);
-  const statusLiteral = activeStatus;
+  const statusSql = sanitizeString(activeStatus);
 
   const exhausted = await exec(
-    `SELECT ds.BATCH_ID FROM ${safeSchema}.DEAL_STATES ds LEFT JOIN ${safeSchema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${statusLiteral}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${STUCK_INTERVAL_MINUTES}' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) >= ${maxRetries}`,
+    `SELECT ds.BATCH_ID FROM ${safeSchema}.DEAL_STATES ds LEFT JOIN ${safeSchema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${statusSql}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${STUCK_INTERVAL_MINUTES}' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) >= ${maxRetries}`,
   );
 
   if (!exhausted || exhausted.length === 0) {
@@ -38531,11 +38531,11 @@ async function sweepStuckRows(exec, schema, { activeStatus, batchType, maxRetrie
     const bid = row.BATCH_ID;
     const safeBid = sanitizeId(bid);
     const countRows = await exec(
-      `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE BATCH_ID = '${safeBid}'`,
+      `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE BATCH_ID = '${safeBid}' AND STATUS = '${statusSql}'`,
     );
     const n = Number(countRows?.[0]?.C ?? 0) || 0;
     await exec(
-      `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}'`,
+      `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${statusSql}'`,
     );
     await insertBatchEvent(exec, safeSchema, {
       triggerHash: v7(),
@@ -38545,7 +38545,7 @@ async function sweepStuckRows(exec, schema, { activeStatus, batchType, maxRetrie
     });
     totalRows += n;
     coreExports.info(
-      `[sweepStuckRows] dead-lettered exhausted batch ${bid} (${n} rows, status=${statusLiteral})`,
+      `[sweepStuckRows] dead-lettered exhausted batch ${bid} (${n} rows, status=${activeStatus})`,
     );
   }
 
@@ -38564,20 +38564,29 @@ async function sweepOrphanedRows(exec, schema, { statuses, staleMinutes }) {
   const safeSchema = sanitizeSchema(schema);
   if (!Array.isArray(statuses) || statuses.length === 0) return 0
 
+  const minutesNumber =
+    staleMinutes;
+  if (!Number.isInteger(minutesNumber) || minutesNumber < 0) {
+    throw new TypeError(
+      `[sweepOrphanedRows] staleMinutes must be a non-negative integer, got: ${staleMinutes}`,
+    )
+  }
+  const safeStaleMinutes = minutesNumber;
+
   const literals = statuses.map((s) => `'${sanitizeString(s)}'`).join(',');
 
   const countRows = await exec(
-    `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${staleMinutes}' MINUTE`,
+    `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${safeStaleMinutes}' MINUTE`,
   );
   const n = Number(countRows?.[0]?.C ?? 0) || 0;
   if (n === 0) return 0
 
   await exec(
-    `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${staleMinutes}' MINUTE`,
+    `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${safeStaleMinutes}' MINUTE`,
   );
 
   coreExports.info(
-    `[sweepOrphanedRows] failed ${n} orphaned row(s) (statuses=${statuses.join(',')}, staleMinutes=${staleMinutes})`,
+    `[sweepOrphanedRows] failed ${n} orphaned row(s) (statuses=${statuses.join(',')}, staleMinutes=${safeStaleMinutes})`,
   );
   return n
 }
@@ -39132,7 +39141,7 @@ async function runFilterPipeline() {
     if (!bid) return
     const safeBid = sanitizeId(bid);
     await execNoRL(
-      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}'`,
+      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${STATUS.FILTERING}'`,
     );
     await insertBatchEvent(execNoRL, schema, {
       triggerHash: v7(),
@@ -40008,7 +40017,7 @@ async function runClassifyPipeline() {
     if (!bid) return
     const safeBid = sanitizeId(bid);
     await execNoRL(
-      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}'`,
+      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${STATUS.CLASSIFYING}'`,
     );
     await insertBatchEvent(execNoRL, schema, {
       triggerHash: v7(),

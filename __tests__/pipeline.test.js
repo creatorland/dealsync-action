@@ -364,6 +364,15 @@ describe('sweepStuckRows', () => {
 })
 
 describe('sweepOrphanedRows', () => {
+  it('rejects invalid staleMinutes', async () => {
+    await expect(
+      sweepOrphanedRows(jest.fn(), 'dealsync_stg_v1', {
+        statuses: ['pending_classification'],
+        staleMinutes: '30x',
+      }),
+    ).rejects.toThrow(/staleMinutes must be a non-negative integer/)
+  })
+
   it('returns 0 when count is 0', async () => {
     const exec = jest.fn().mockResolvedValueOnce([{ C: 0 }])
     const n = await sweepOrphanedRows(exec, 'dealsync_stg_v1', {
