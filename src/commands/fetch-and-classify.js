@@ -133,7 +133,7 @@ export async function runFetchAndClassify() {
   if (allEmails.length === 0) throw new Error('No email content fetched')
 
   // Build prompt
-  const { systemPrompt, userPrompt } = buildPrompt(allEmails)
+  const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails)
 
   // =========================================================================
   //  AI RESILIENCE PIPELINE (callModel + parseAndValidate from ai-client.js)
@@ -162,7 +162,7 @@ export async function runFetchAndClassify() {
   if (primaryRaw) {
     // --- Layer 1: Local JSON repair ---
     try {
-      threads = parseAndValidate(primaryRaw)
+      threads = parseAndValidate(primaryRaw, threadOrder)
       console.log(`[classify] Primary model succeeded: ${threads.length} threads`)
     } catch (parseError) {
       console.log(`[classify] Primary JSON parse failed: ${parseError.message}`)
@@ -183,7 +183,7 @@ export async function runFetchAndClassify() {
           ...aiOpts,
         })
         const correctedRaw = corrected.content
-        threads = parseAndValidate(correctedRaw)
+        threads = parseAndValidate(correctedRaw, threadOrder)
         modelUsed = `${primaryModel}(corrective-retry)`
         console.log(`[classify] Corrective retry succeeded: ${threads.length} threads`)
       } catch (correctiveError) {
@@ -202,7 +202,7 @@ export async function runFetchAndClassify() {
         ...aiOpts,
       })
       const fallbackRaw = fallbackResult.content
-      threads = parseAndValidate(fallbackRaw)
+      threads = parseAndValidate(fallbackRaw, threadOrder)
       console.log(`[classify] Fallback model succeeded: ${threads.length} threads`)
     } catch (fallbackError) {
       console.error(`[classify] All layers exhausted. Primary and fallback both failed.`)

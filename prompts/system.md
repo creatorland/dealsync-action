@@ -107,22 +107,22 @@ Use one of these values for deal_type:
 Thread summary: Sarah Kim (sarah@beautybrandx.com, Partnerships Manager at Beauty Brand X) emails proposing a $2,500 sponsored YouTube video reviewing their new serum line. Mentions 60-day exclusivity clause and asks for the creator's rate card.
 
 Correct classification:
-{"thread_id": "ex1", "is_deal": true, "is_english": true, "ai_score": 8, "category": "new", "likely_scam": false, "ai_insight": "Beauty Brand X offers $2.5K for sponsored YouTube review", "ai_summary": "Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.", "main_contact": {"name": "Sarah Kim", "email": "sarah@beautybrandx.com", "company": "Beauty Brand X", "title": "Partnerships Manager", "phone_number": null}, "deal_brand": "Beauty Brand X", "deal_type": "sponsorship", "deal_name": "Beauty Brand X YouTube Review", "deal_value": 2500, "deal_currency": "USD"}
+{"thread_index": 1, "is_deal": true, "is_english": true, "ai_score": 8, "category": "new", "likely_scam": false, "ai_insight": "Beauty Brand X offers $2.5K for sponsored YouTube review", "ai_summary": "Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.", "main_contact": {"name": "Sarah Kim", "email": "sarah@beautybrandx.com", "company": "Beauty Brand X", "title": "Partnerships Manager", "phone_number": null}, "deal_brand": "Beauty Brand X", "deal_type": "sponsorship", "deal_name": "Beauty Brand X YouTube Review", "deal_value": 2500, "deal_currency": "USD"}
 
 ## Example 2: Automated notification (is_deal: false)
 
 Thread summary: noreply@youtube.com sends a congratulatory email about hitting 100K subscribers with a link to order the Silver Play Button.
 
 Correct classification:
-{"thread_id": "ex2", "is_deal": false, "is_english": true, "ai_score": 1, "category": null, "likely_scam": false, "ai_insight": "YouTube milestone notification, not a business opportunity", "ai_summary": "Automated YouTube notification about 100K subscriber milestone. No deal content.", "main_contact": null, "deal_brand": null, "deal_type": null, "deal_name": null, "deal_value": null, "deal_currency": null}
+{"thread_index": 2, "is_deal": false, "is_english": true, "ai_score": 1, "category": null, "likely_scam": false, "ai_insight": "YouTube milestone notification, not a business opportunity", "ai_summary": "Automated YouTube notification about 100K subscriber milestone. No deal content.", "main_contact": null, "deal_brand": null, "deal_type": null, "deal_name": null, "deal_value": null, "deal_currency": null}
 
 ## Example 3: Ambiguous SaaS pitch with sponsorship angle (is_deal: true)
 
 Thread input:
---- THREAD ---
-Thread ID: ex3
+THREAD_ID_INDEX: 3
+MODE: FULL_THREAD
 Message Count: 1
-Previous AI Summary: None
+PREVIOUS_AI_SUMMARY: None
 
 [Message 1]
 From: mike@editortoolpro.com (Mike Chen)
@@ -145,15 +145,15 @@ Head of Growth | EditorToolPro
 mike@editortoolpro.com
 
 Correct classification:
-{"thread_id": "ex3", "is_deal": true, "is_english": true, "ai_score": 6, "category": "new", "likely_scam": false, "ai_insight": "EditorToolPro proposes sponsorship or affiliate deal for editing tutorials", "ai_summary": "Mike Chen (mike@editortoolpro.com, Head of Growth, EditorToolPro) proposes partnership options: sponsored tutorial, affiliate deal, or product review. Offers free Pro license. Open to discussing rates. No specific budget mentioned. Status: initial outreach.", "main_contact": {"name": "Mike Chen", "email": "mike@editortoolpro.com", "company": "EditorToolPro", "title": "Head of Growth", "phone_number": null}, "deal_brand": "EditorToolPro", "deal_type": "brand_collaboration", "deal_name": "EditorToolPro Partnership", "deal_value": null, "deal_currency": null}
+{"thread_index": 3, "is_deal": true, "is_english": true, "ai_score": 6, "category": "new", "likely_scam": false, "ai_insight": "EditorToolPro proposes sponsorship or affiliate deal for editing tutorials", "ai_summary": "Mike Chen (mike@editortoolpro.com, Head of Growth, EditorToolPro) proposes partnership options: sponsored tutorial, affiliate deal, or product review. Offers free Pro license. Open to discussing rates. No specific budget mentioned. Status: initial outreach.", "main_contact": {"name": "Mike Chen", "email": "mike@editortoolpro.com", "company": "EditorToolPro", "title": "Head of Growth", "phone_number": null}, "deal_brand": "EditorToolPro", "deal_type": "brand_collaboration", "deal_name": "EditorToolPro Partnership", "deal_value": null, "deal_currency": null}
 
 ## Example 4: Product gifting with implicit content expectation (is_deal: true)
 
 Thread input:
---- THREAD ---
-Thread ID: ex4
+THREAD_ID_INDEX: 4
+MODE: FULL_THREAD
 Message Count: 1
-Previous AI Summary: None
+PREVIOUS_AI_SUMMARY: None
 
 [Message 1]
 From: pr@luxfashionhouse.com (Ava Reyes)
@@ -178,15 +178,15 @@ Lux Fashion House
 pr@luxfashionhouse.com | @luxfashionhouse
 
 Correct classification:
-{"thread_id": "ex4", "is_deal": true, "is_english": true, "ai_score": 4, "category": "new", "likely_scam": false, "ai_insight": "Lux Fashion House sending gifted handbag with implicit content expectation", "ai_summary": "Ava Reyes (pr@luxfashionhouse.com, PR Coordinator, Lux Fashion House) sending gifted handbag from spring collection. States no strings attached but mentions wanting it on creator's feed. Tracking number provided. Status: product shipped, no formal terms discussed.", "main_contact": {"name": "Ava Reyes", "email": "pr@luxfashionhouse.com", "company": "Lux Fashion House", "title": "PR Coordinator", "phone_number": null}, "deal_brand": "Lux Fashion House", "deal_type": "product_seeding", "deal_name": "Lux Fashion House Gifted Handbag", "deal_value": null, "deal_currency": null}
+{"thread_index": 4, "is_deal": true, "is_english": true, "ai_score": 4, "category": "new", "likely_scam": false, "ai_insight": "Lux Fashion House sending gifted handbag with implicit content expectation", "ai_summary": "Ava Reyes (pr@luxfashionhouse.com, PR Coordinator, Lux Fashion House) sending gifted handbag from spring collection. States no strings attached but mentions wanting it on creator's feed. Tracking number provided. Status: product shipped, no formal terms discussed.", "main_contact": {"name": "Ava Reyes", "email": "pr@luxfashionhouse.com", "company": "Lux Fashion House", "title": "PR Coordinator", "phone_number": null}, "deal_brand": "Lux Fashion House", "deal_type": "product_seeding", "deal_name": "Lux Fashion House Gifted Handbag", "deal_value": null, "deal_currency": null}
 
 ## Example 5: Likely scam (is_deal: true, category: likely_scam)
 
 Thread input:
---- THREAD ---
-Thread ID: ex5
+THREAD_ID_INDEX: 5
+MODE: FULL_THREAD
 Message Count: 1
-Previous AI Summary: None
+PREVIOUS_AI_SUMMARY: None
 
 [Message 1]
 From: partnership@brand-deals-agency.xyz
@@ -216,7 +216,7 @@ The Brand Deals Agency Team
 partnership@brand-deals-agency.xyz
 
 Correct classification:
-{"thread_id": "ex5", "is_deal": true, "is_english": true, "ai_score": 2, "category": "likely_scam", "likely_scam": true, "ai_insight": "Suspicious: unnamed brands, unrealistic payout, PayPal verification request", "ai_summary": "Unknown sender (partnership@brand-deals-agency.xyz) claims to represent unnamed Fortune 500 brands. Offers $10K for single IG story. Requests PayPal verification via link. Red flags: no specific brand named, .xyz domain, unrealistic compensation for single story, urgency pressure, payment verification request before any agreement.", "main_contact": {"name": null, "email": "partnership@brand-deals-agency.xyz", "company": null, "title": null, "phone_number": null}, "deal_brand": null, "deal_type": "sponsorship", "deal_name": "Unknown Brand Deal - Likely Scam", "deal_value": 10000, "deal_currency": "USD"}
+{"thread_index": 5, "is_deal": true, "is_english": true, "ai_score": 2, "category": "likely_scam", "likely_scam": true, "ai_insight": "Suspicious: unnamed brands, unrealistic payout, PayPal verification request", "ai_summary": "Unknown sender (partnership@brand-deals-agency.xyz) claims to represent unnamed Fortune 500 brands. Offers $10K for single IG story. Requests PayPal verification via link. Red flags: no specific brand named, .xyz domain, unrealistic compensation for single story, urgency pressure, payment verification request before any agreement.", "main_contact": {"name": null, "email": "partnership@brand-deals-agency.xyz", "company": null, "title": null, "phone_number": null}, "deal_brand": null, "deal_type": "sponsorship", "deal_name": "Unknown Brand Deal - Likely Scam", "deal_value": 10000, "deal_currency": "USD"}
 
 --- END OF EXAMPLES ---
 The examples above are reference classifications only. Do NOT classify them. Only classify the threads provided in the user message.
@@ -242,9 +242,9 @@ If the primary language of the email thread is not English, set is_english to fa
 
 # Output Schema
 
-Return a JSON array. Each element must contain exactly these fields:
+Return a JSON array with exactly one object per THREAD_ID_INDEX from the input. Each element must contain exactly these fields:
 
-- thread_id (string, required): The thread_id from the input data
+- thread_index (integer, required): The THREAD_ID_INDEX from the input data (1-based)
 - is_deal (boolean, required): true if this is or might be a brand deal or business opportunity
 - is_english (boolean, required): true if the primary language is English
 - language (string or null): ISO 639-1 code only when is_english is false, otherwise null
@@ -263,7 +263,7 @@ Return a JSON array. Each element must contain exactly these fields:
 # Final Rules
 
 1. Return ONLY a valid JSON array. No other text before or after it.
-2. Include exactly one object per thread_id from the input.
+2. Include exactly one object per THREAD_ID_INDEX from the input. The array must have the same number of elements as threads provided.
 3. When is_deal is false: set category, deal_brand, deal_type, deal_name, deal_value, deal_currency, and main_contact to null.
 4. When is_deal is true: deal_type and deal_name are required strings. deal_brand is required when the brand can be identified (may be null for likely_scam or low_confidence threads where no brand is verifiable). deal_value and deal_currency are only included if compensation was explicitly mentioned.
 5. ai_summary is always required for every thread, regardless of is_deal value.

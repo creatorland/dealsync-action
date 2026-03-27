@@ -16,16 +16,18 @@ function groupByThread(emails) {
 function buildThreadData(emails) {
   const threads = groupByThread(emails)
   const parts = []
+  const threadOrder = [] // maps index (0-based) to threadId
   let threadIndex = 0
 
   for (const [threadId, threadEmails] of Object.entries(threads)) {
     threadIndex++
-    let section = `--- THREAD ${threadIndex} ---\n`
-    section += `Thread ID: ${threadId}\n`
+    threadOrder.push(threadId)
+    let section = `THREAD_ID_INDEX: ${threadIndex}\n`
+    section += `MODE: FULL_THREAD\n`
     section += `Message Count: ${threadEmails.length}\n`
 
     const previousSummary = threadEmails[0].previousAiSummary
-    section += `Previous AI Summary: ${previousSummary || 'None'}\n\n`
+    section += `PREVIOUS_AI_SUMMARY: ${previousSummary || 'None'}\n\n`
 
     threadEmails.forEach((email, i) => {
       const from = getHeader(email, 'from')
@@ -40,14 +42,15 @@ function buildThreadData(emails) {
       section += `${body}\n\n`
     })
 
+    section += '===\n'
     parts.push(section)
   }
 
-  return parts.join('')
+  return { text: parts.join('\n'), threadOrder }
 }
 
 export function buildPrompt(emails, { systemOverride, userOverride } = {}) {
-  const threadData = buildThreadData(emails)
+  const { text: threadData, threadOrder } = buildThreadData(emails)
 
   const systemPrompt = (systemOverride || systemTemplate).trim()
 
@@ -55,5 +58,5 @@ export function buildPrompt(emails, { systemOverride, userOverride } = {}) {
     .replace('{{THREAD_DATA}}', threadData)
     .trim()
 
-  return { systemPrompt, userPrompt }
+  return { systemPrompt, userPrompt, threadOrder }
 }

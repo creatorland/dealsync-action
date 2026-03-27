@@ -105,8 +105,10 @@ export async function callModel(model, messages, { temperature = 0, apiUrl, apiK
 /**
  * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
  * Returns validated array or throws with parse error details.
+ * @param {string} raw — raw AI response
+ * @param {string[]} [threadOrder] — maps thread_index (1-based) to thread_id
  */
-export function parseAndValidate(raw) {
+export function parseAndValidate(raw, threadOrder) {
   let content = raw.trim()
 
   // Strip markdown fences
@@ -155,9 +157,12 @@ export function parseAndValidate(raw) {
     }
   }
 
-  // Schema validation and coercion
+  // Schema validation and coercion — map thread_index to thread_id if threadOrder provided
   return parsed.map((r) => ({
-    thread_id: String(r.thread_id || ''),
+    thread_id: threadOrder
+      ? threadOrder[Math.max(0, (Number(r.thread_index) || 1) - 1)] || String(r.thread_id || '')
+      : String(r.thread_id || ''),
+    thread_index: r.thread_index != null ? Number(r.thread_index) : undefined,
     is_deal: Boolean(r.is_deal),
     is_english: r.is_english !== false,
     language: r.language || null,
