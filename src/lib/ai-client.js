@@ -3,7 +3,7 @@ export const AI_REQUEST_TIMEOUT_MS = 240000
 export const AI_RETRY_DELAY_MS = 2000
 export const AI_BACKOFF_MULTIPLIER = 2
 export const MAX_HTTP_RETRIES = 3
-export const MAX_TOKENS = 51200
+export const MAX_TOKENS = 20480
 
 // --- Valid categories and deal types for validation ---
 export const VALID_CATEGORIES = new Set([
@@ -105,10 +105,8 @@ export async function callModel(model, messages, { temperature = 0, apiUrl, apiK
 /**
  * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
  * Returns validated array or throws with parse error details.
- * @param {string} raw — raw AI response
- * @param {string[]} [threadOrder] — maps thread_index (1-based) to thread_id
  */
-export function parseAndValidate(raw, threadOrder) {
+export function parseAndValidate(raw) {
   let content = raw.trim()
 
   // Strip markdown fences
@@ -157,12 +155,9 @@ export function parseAndValidate(raw, threadOrder) {
     }
   }
 
-  // Schema validation and coercion — map thread_index to thread_id if threadOrder provided
+  // Schema validation and coercion
   return parsed.map((r) => ({
-    thread_id: threadOrder
-      ? threadOrder[Math.max(0, (Number(r.thread_index) || 1) - 1)] || String(r.thread_id || '')
-      : String(r.thread_id || ''),
-    thread_index: r.thread_index != null ? Number(r.thread_index) : undefined,
+    thread_id: String(r.thread_id || ''),
     is_deal: Boolean(r.is_deal),
     is_english: r.is_english !== false,
     language: r.language || null,
