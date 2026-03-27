@@ -405,7 +405,7 @@ export async function runClassifyPipeline() {
       const dealValues = dealThreads.map((thread) => {
         const threadId = sanitizeId(thread.thread_id)
         const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
-        const dealId = uuidv7()
+        const dealId = threadId
         const dealName = sanitizeString(thread.deal_name || '')
         const dealType = sanitizeString(thread.deal_type || '')
         const dealValue =
