@@ -1,12 +1,18 @@
-import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { sanitizeId, sanitizeString, sanitizeSchema, saveResults } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
 
+function toSqlNullable(s) {
+  return s ? `'${sanitizeString(s)}'` : 'NULL'
+}
+
 /**
- * Save deal contacts with enrichment data from AI evaluation.
+ * Save deal contacts with two-table upsert pattern:
+ * 1. Core contacts (EMAIL_CORE_STAGING.CONTACTS) — enrichment via COALESCE
+ * 2. Deal contacts (DEAL_CONTACTS) — simplified relationship table
+ *
  * Reads audit by batch_id, looks up deals by thread_id,
- * then inserts deal_contacts with enrichment from main_contact.
+ * then upserts both tables.
  */
 export async function runSaveDealContacts() {
   const authUrl = core.getInput('auth-url')
@@ -14,6 +20,7 @@ export async function runSaveDealContacts() {
   const apiUrl = core.getInput('api-url')
   const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
+  const coreSchema = sanitizeSchema(core.getInput('email-core-schema') || 'EMAIL_CORE_STAGING')
   const batchId = sanitizeId(core.getInput('batch-id'))
 
   if (!batchId) throw new Error('batch-id is required')
@@ -41,7 +48,7 @@ export async function runSaveDealContacts() {
     return { contacts_created: 0 }
   }
 
-  // Look up deal IDs by thread_id (single SELECT — avoids subqueries in INSERT)
+  // Look up deals to get USER_ID per thread
   const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id))
   const quotedIds = dealThreadIds.map((id) => `'${id}'`).join(',')
 
@@ -49,61 +56,73 @@ export async function runSaveDealContacts() {
     apiUrl,
     jwt,
     biscuit,
-    `SELECT ID, THREAD_ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`,
+    `SELECT ID, THREAD_ID, USER_ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`,
   )
 
   const dealByThread = {}
   for (const row of deals) {
-    dealByThread[row.THREAD_ID] = row.ID
+    dealByThread[row.THREAD_ID] = row
   }
 
-  // Delete existing contacts for these deals
-  const dealIds = Object.values(dealByThread)
-  if (dealIds.length > 0) {
-    const quotedDealIds = dealIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-    await executeSql(
-      apiUrl,
-      jwt,
-      biscuit,
-      `DELETE FROM ${schema}.DEAL_CONTACTS WHERE DEAL_ID IN (${quotedDealIds})`,
-    )
-  }
+  // Build contact rows with two-table pattern
+  const coreContactValues = []
+  const dealContactValues = []
 
-  // Build contact rows with enrichment data from main_contact
-  const contactValues = []
   for (const thread of dealThreads) {
     const mc = thread.main_contact
-    if (!mc || !mc.email) continue
+    if (!mc) continue
+    const email = (mc.email || '').trim().toLowerCase()
+    if (!email) continue
 
     const threadId = sanitizeId(thread.thread_id)
-    const dealId = dealByThread[threadId]
-    if (!dealId) {
+    const deal = dealByThread[threadId]
+    if (!deal) {
       console.log(`[save-deal-contacts] no deal found for thread ${threadId} — skipping`)
       continue
     }
 
-    const contactEmail = sanitizeString(mc.email)
-    const name = sanitizeString(mc.name || '')
-    const company = sanitizeString(mc.company || '')
-    const title = sanitizeString(mc.title || '')
-    const phone = sanitizeString(mc.phone_number || '')
+    const userId = sanitizeId(deal.USER_ID || '')
+    const contactEmail = sanitizeString(email)
+    const nameVal = toSqlNullable(mc.name)
+    const companyVal = toSqlNullable(mc.company)
+    const titleVal = toSqlNullable(mc.title)
+    const phoneVal = toSqlNullable(mc.phone_number)
 
-    contactValues.push(
-      `('${uuidv7()}', '${sanitizeId(dealId)}', '${contactEmail}', 'primary', '${name}', '${contactEmail}', '${company}', '${title}', '${phone}', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    // Core contacts — COALESCE preserves existing non-null values
+    coreContactValues.push(
+      `('${userId}', '${contactEmail}', ${nameVal}, ${companyVal}, ${titleVal}, ${phoneVal}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+    )
+
+    // Deal contacts — simplified relationship table
+    dealContactValues.push(
+      `('${threadId}', '${userId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
     )
   }
 
-  if (contactValues.length > 0) {
+  // Upsert core contacts (non-fatal — table may not exist yet)
+  if (coreContactValues.length > 0) {
+    try {
+      await executeSql(
+        apiUrl,
+        jwt,
+        biscuit,
+        `INSERT INTO ${coreSchema}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${coreContactValues.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = COALESCE(EXCLUDED.NAME, CONTACTS.NAME), COMPANY_NAME = COALESCE(EXCLUDED.COMPANY_NAME, CONTACTS.COMPANY_NAME), TITLE = COALESCE(EXCLUDED.TITLE, CONTACTS.TITLE), PHONE_NUMBER = COALESCE(EXCLUDED.PHONE_NUMBER, CONTACTS.PHONE_NUMBER), UPDATED_AT = CURRENT_TIMESTAMP`,
+      )
+    } catch (err) {
+      console.error(`[save-deal-contacts] core contacts upsert failed (non-fatal): ${err.message}`)
+    }
+  }
+
+  // Upsert deal contacts
+  if (dealContactValues.length > 0) {
     await executeSql(
       apiUrl,
       jwt,
       biscuit,
-      `INSERT INTO ${schema}.DEAL_CONTACTS
-        (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, NAME, EMAIL, COMPANY, TITLE, PHONE_NUMBER, IS_FAVORITE, CREATED_AT, UPDATED_AT)
-      VALUES ${contactValues.join(', ')}`,
+      `INSERT INTO ${schema}.DEAL_CONTACTS (DEAL_ID, USER_ID, EMAIL, CONTACT_TYPE, CREATED_AT, UPDATED_AT) VALUES ${dealContactValues.join(', ')} ON CONFLICT (DEAL_ID, USER_ID, EMAIL) DO UPDATE SET CONTACT_TYPE = COALESCE(EXCLUDED.CONTACT_TYPE, DEAL_CONTACTS.CONTACT_TYPE), UPDATED_AT = CURRENT_TIMESTAMP`,
     )
   }
 
-  console.log(`[save-deal-contacts] ${contactValues.length} contacts saved`)
-  return { contacts_created: contactValues.length }
+  console.log(`[save-deal-contacts] ${dealContactValues.length} contacts saved (core + deal)`)
+  return { contacts_created: dealContactValues.length }
 }
