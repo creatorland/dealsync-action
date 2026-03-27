@@ -142,7 +142,7 @@ describe('WriteBatcher', () => {
     expect(sql).toContain('INSERT INTO TEST_SCHEMA.DEAL_CONTACTS')
     expect(sql).toContain('DEAL_ID, USER_ID, EMAIL, CONTACT_TYPE')
     expect(sql).toContain('ON CONFLICT (DEAL_ID, USER_ID, EMAIL) DO UPDATE SET')
-    expect(sql).toContain('COALESCE(EXCLUDED.CONTACT_TYPE, DEAL_CONTACTS.CONTACT_TYPE)')
+    expect(sql).toContain('CONTACT_TYPE = EXCLUDED.CONTACT_TYPE')
     expect(sql).not.toContain('CONTACT_ID')
     expect(sql).not.toContain('IS_FAVORITE')
 
@@ -486,10 +486,10 @@ describe('WriteBatcher', () => {
       expect(sql).toContain('INSERT INTO MY_CORE_SCHEMA.CONTACTS')
       expect(sql).toContain('USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER')
       expect(sql).toContain('ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET')
-      expect(sql).toContain('COALESCE(EXCLUDED.NAME, CONTACTS.NAME)')
-      expect(sql).toContain('COALESCE(EXCLUDED.COMPANY_NAME, CONTACTS.COMPANY_NAME)')
-      expect(sql).toContain('COALESCE(EXCLUDED.TITLE, CONTACTS.TITLE)')
-      expect(sql).toContain('COALESCE(EXCLUDED.PHONE_NUMBER, CONTACTS.PHONE_NUMBER)')
+      expect(sql).toContain('NAME = EXCLUDED.NAME')
+      expect(sql).toContain('COMPANY_NAME = EXCLUDED.COMPANY_NAME')
+      expect(sql).toContain('TITLE = EXCLUDED.TITLE')
+      expect(sql).toContain('PHONE_NUMBER = EXCLUDED.PHONE_NUMBER')
 
       batcher.stop()
     })

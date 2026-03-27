@@ -113,7 +113,7 @@ describe('save-deal-contacts command', () => {
     const coreSql = getSqlText(sqlCalls[2])
     expect(coreSql).toContain('EMAIL_CORE_STAGING.CONTACTS')
     expect(coreSql).toContain('ON CONFLICT (USER_ID, EMAIL)')
-    expect(coreSql).toContain('COALESCE')
+    expect(coreSql).toContain('EXCLUDED.NAME')
     expect(coreSql).toContain('Sarah Kim')
     expect(coreSql).toContain('Beauty Brand X')
     expect(coreSql).toContain('Partnerships Manager')
