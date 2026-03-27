@@ -1,17 +1,11 @@
 import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
-import {
-  sanitizeSchema,
-  sanitizeId,
-  sanitizeString,
-  STATUS,
-  saveResults,
-} from '../lib/queries.js'
+import { sanitizeSchema, sanitizeId, sanitizeString, STATUS, saveResults } from '../lib/queries.js'
 import { authenticate, executeSql, acquireRateLimitToken } from '../lib/sxt-client.js'
 import { callModel, parseAndValidate } from '../lib/ai-client.js'
 import { buildPrompt } from '../lib/build-prompt.js'
 import { fetchEmails } from '../lib/email-client.js'
-import { runPool, insertBatchEvent } from '../lib/pipeline.js'
+import { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
 import { WriteBatcher } from '../lib/write-batcher.js'
 
 function toSqlNullable(s) {
@@ -55,7 +49,11 @@ export async function runClassifyPipeline() {
   const execNoRL = (sql) => executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit: true })
 
   // 3. Create write batcher (uses execNoRL — tokens acquired in bulk by workers)
-  const batcher = new WriteBatcher(execNoRL, schema, { flushIntervalMs, flushThreshold, coreSchema })
+  const batcher = new WriteBatcher(execNoRL, schema, {
+    flushIntervalMs,
+    flushThreshold,
+    coreSchema,
+  })
 
   // =========================================================================
   //  CLAIM FUNCTION (inline, same pattern as claim-classify-batch)
@@ -199,7 +197,9 @@ export async function runClassifyPipeline() {
       const unfetchableThreadIds = allBatchThreadIds.filter((tid) => !fetchedThreadIds.has(tid))
 
       if (unfetchableThreadIds.length > 0) {
-        console.log(`[run-classify-pipeline] ${unfetchableThreadIds.length} unfetchable threads, checking previous evaluations`)
+        console.log(
+          `[run-classify-pipeline] ${unfetchableThreadIds.length} unfetchable threads, checking previous evaluations`,
+        )
 
         // Look up existing evaluations for unfetchable threads
         const quotedUnfetchable = unfetchableThreadIds.map((id) => `'${sanitizeId(id)}'`).join(',')
@@ -227,13 +227,21 @@ export async function runClassifyPipeline() {
 
         if (unfetchableDealIds.length > 0) {
           const quotedIds = unfetchableDealIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-          await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`)
-          console.log(`[run-classify-pipeline] ${unfetchableDealIds.length} unfetchable rows → deal (previous eval)`)
+          await execNoRL(
+            `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
+          )
+          console.log(
+            `[run-classify-pipeline] ${unfetchableDealIds.length} unfetchable rows → deal (previous eval)`,
+          )
         }
         if (unfetchableNotDealIds.length > 0) {
           const quotedIds = unfetchableNotDealIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-          await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`)
-          console.log(`[run-classify-pipeline] ${unfetchableNotDealIds.length} unfetchable rows → not_deal`)
+          await execNoRL(
+            `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
+          )
+          console.log(
+            `[run-classify-pipeline] ${unfetchableNotDealIds.length} unfetchable rows → not_deal`,
+          )
         }
       }
 
@@ -466,7 +474,9 @@ export async function runClassifyPipeline() {
         try {
           await batcher.pushCoreContacts(coreContactValues)
         } catch (err) {
-          console.error(`[run-classify-pipeline] core contacts upsert failed (non-fatal): ${err.message}`)
+          console.error(
+            `[run-classify-pipeline] core contacts upsert failed (non-fatal): ${err.message}`,
+          )
         }
       }
 
@@ -474,7 +484,9 @@ export async function runClassifyPipeline() {
         await batcher.pushContacts(dealContactValues)
       }
 
-      console.log(`[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`)
+      console.log(
+        `[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`,
+      )
     }
 
     // -----------------------------------------------------------------------
@@ -517,10 +529,14 @@ export async function runClassifyPipeline() {
 
       const emailIds = threadRows.map((r) => r.EMAIL_METADATA_ID)
       // Check if any row has a previous eval indicating deal
-      const wasDeal = threadRows.some((r) => r.PREVIOUS_IS_DEAL === true || r.PREVIOUS_IS_DEAL === 'true')
+      const wasDeal = threadRows.some(
+        (r) => r.PREVIOUS_IS_DEAL === true || r.PREVIOUS_IS_DEAL === 'true',
+      )
       if (wasDeal) {
         dealEmailIds.push(...emailIds)
-        console.log(`[run-classify-pipeline] unclassified thread ${threadId} → deal (previous eval)`)
+        console.log(
+          `[run-classify-pipeline] unclassified thread ${threadId} → deal (previous eval)`,
+        )
       } else {
         notDealEmailIds.push(...emailIds)
         console.log(`[run-classify-pipeline] unclassified thread ${threadId} → not_deal (default)`)
@@ -530,11 +546,15 @@ export async function runClassifyPipeline() {
     // Write state updates directly (not through batcher) to ensure they commit
     if (dealEmailIds.length > 0) {
       const quotedIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-      await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`)
+      await execNoRL(
+        `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
+      )
     }
     if (notDealEmailIds.length > 0) {
       const quotedIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-      await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`)
+      await execNoRL(
+        `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
+      )
     }
 
     console.log(
@@ -556,17 +576,50 @@ export async function runClassifyPipeline() {
   //  RUN POOL
   // =========================================================================
 
-  const poolResults = await runPool(claimBatch, processClassifyBatch, { maxConcurrent, maxRetries })
+  async function onDeadLetter(batch) {
+    const bid = batch.batch_id
+    if (!bid) return
+    const safeBid = sanitizeId(bid)
+    await execNoRL(
+      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${STATUS.CLASSIFYING}'`,
+    )
+    await insertBatchEvent(execNoRL, schema, {
+      triggerHash: uuidv7(),
+      batchId: bid,
+      batchType: 'classify',
+      eventType: 'dead_letter',
+    })
+    console.log(`[run-classify-pipeline] dead-lettered batch ${bid} → status=failed`)
+  }
+
+  const poolResults = await runPool(claimBatch, processClassifyBatch, {
+    maxConcurrent,
+    maxRetries,
+    onDeadLetter,
+  })
 
   // Drain all pending writes
   await batcher.drain()
 
+  const stuckFailed = await sweepStuckRows(exec, schema, {
+    activeStatus: STATUS.CLASSIFYING,
+    batchType: 'classify',
+    maxRetries,
+  })
+
+  const orphanFailed = await sweepOrphanedRows(exec, schema, {
+    statuses: [STATUS.PENDING_CLASSIFICATION],
+    staleMinutes: 30,
+  })
+
   console.log(
-    `[run-classify-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}`,
+    `[run-classify-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}, stuck_failed=${stuckFailed}, orphan_failed=${orphanFailed}`,
   )
 
   return {
     batches_processed: poolResults.processed,
     batches_failed: poolResults.failed,
+    stuck_failed: stuckFailed,
+    orphan_failed: orphanFailed,
   }
 }

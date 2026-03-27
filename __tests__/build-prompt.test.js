@@ -42,9 +42,8 @@ describe('buildPrompt', () => {
     const { systemPrompt, userPrompt } = buildPrompt(emails)
 
     expect(systemPrompt).toContain('email classifier')
-    expect(userPrompt).toContain('--- THREAD 1 ---')
-    expect(userPrompt).toContain('Thread ID: thread-1')
-    expect(userPrompt).toContain('Previous AI Summary: None')
+    expect(userPrompt).toContain('THREAD_ID_INDEX: 1')
+    expect(userPrompt).toContain('PREVIOUS_AI_SUMMARY: None')
     expect(userPrompt).toContain('[Message 1]')
     expect(userPrompt).toContain('From: alice@example.com')
     expect(userPrompt).toContain('Subject: Partnership Opportunity')
@@ -55,8 +54,8 @@ describe('buildPrompt', () => {
     const emails = [makeEmail({ previousAiSummary: 'Previous deal discussion about sponsorship.' })]
     const { userPrompt } = buildPrompt(emails)
 
-    expect(userPrompt).toContain('Previous AI Summary: Previous deal discussion about sponsorship.')
-    expect(userPrompt).not.toContain('Previous AI Summary: None')
+    expect(userPrompt).toContain('PREVIOUS_AI_SUMMARY: Previous deal discussion about sponsorship.')
+    expect(userPrompt).not.toContain('PREVIOUS_AI_SUMMARY: None')
   })
 
   it('multi-thread batch', () => {
@@ -71,11 +70,9 @@ describe('buildPrompt', () => {
     ]
     const { userPrompt } = buildPrompt(emails)
 
-    expect(userPrompt).toContain('--- THREAD 1 ---')
-    expect(userPrompt).toContain('Thread ID: thread-a')
-    expect(userPrompt).toContain('--- THREAD 2 ---')
-    expect(userPrompt).toContain('Thread ID: thread-b')
-    expect(userPrompt).toContain('Previous AI Summary: Prior eval: brand deal in progress.')
+    expect(userPrompt).toContain('THREAD_ID_INDEX: 1')
+    expect(userPrompt).toContain('THREAD_ID_INDEX: 2')
+    expect(userPrompt).toContain('PREVIOUS_AI_SUMMARY: Prior eval: brand deal in progress.')
   })
 
   it('thread data placeholder is replaced', () => {

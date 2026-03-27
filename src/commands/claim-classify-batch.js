@@ -2,7 +2,7 @@ import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { STATUS, sanitizeSchema } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
-import { insertBatchEvent } from '../lib/pipeline.js'
+import { insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
 
 /**
  * Atomically claims pending_classification deal_states for classification.
@@ -13,7 +13,8 @@ import { insertBatchEvent } from '../lib/pipeline.js'
  * Returns:
  *  - New batch:   { batch_id, count, attempts: 0, rows }
  *  - Stuck batch: { batch_id, count, attempts, rows }
- *  - Nothing:     { batch_id: null, count: 0 }
+ *  - Nothing:     { batch_id: null, count: 0, stuck_failed, orphan_failed } — last two are
+ *    counts from post-claim sweeps when nothing was claimable (each may be 0).
  */
 export async function runClaimClassifyBatch() {
   const authUrl = core.getInput('auth-url')
@@ -92,7 +93,21 @@ export async function runClaimClassifyBatch() {
     }
   }
 
-  // 8. Nothing found
-  console.log('[claim-classify-batch] nothing to claim')
-  return { batch_id: null, count: 0 }
+  const stuckFailed = await sweepStuckRows(exec, schema, {
+    activeStatus: STATUS.CLASSIFYING,
+    batchType: 'classify',
+    maxRetries,
+  })
+  const orphanFailed = await sweepOrphanedRows(exec, schema, {
+    statuses: [STATUS.PENDING_CLASSIFICATION],
+    staleMinutes: 30,
+  })
+  if (stuckFailed > 0 || orphanFailed > 0) {
+    console.log(
+      `[claim-classify-batch] dead-lettered ${stuckFailed} classify row(s), ${orphanFailed} orphan pending_classification row(s)`,
+    )
+  } else {
+    console.log('[claim-classify-batch] nothing to claim')
+  }
+  return { batch_id: null, count: 0, stuck_failed: stuckFailed, orphan_failed: orphanFailed }
 }
