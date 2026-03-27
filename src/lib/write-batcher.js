@@ -14,9 +14,10 @@ export class WriteBatcher {
    * @param {number} opts.flushIntervalMs — timer-based flush interval (default 5000)
    * @param {number} opts.flushThreshold — count-based flush threshold per queue (default 10)
    */
-  constructor(executeSqlFn, schema, { flushIntervalMs = 5000, flushThreshold = 10 } = {}) {
+  constructor(executeSqlFn, schema, { flushIntervalMs = 5000, flushThreshold = 10, coreSchema = 'EMAIL_CORE_STAGING' } = {}) {
     this._executeSqlFn = executeSqlFn
     this._schema = schema
+    this._coreSchema = coreSchema
     this._flushThreshold = flushThreshold
 
     // Each queue: { items: [], waiters: [] }
@@ -26,6 +27,7 @@ export class WriteBatcher {
       deals: { items: [], waiters: [] },
       contactDeletes: { items: [], waiters: [] },
       contacts: { items: [], waiters: [] },
+      coreContacts: { items: [], waiters: [] },
       stateUpdates: { items: [], waiters: [] },
       batchEvents: { items: [], waiters: [] },
     }
@@ -60,6 +62,11 @@ export class WriteBatcher {
   /** Push pre-built VALUES strings for DEAL_CONTACTS insert */
   pushContacts(rows) {
     return this._push('contacts', rows)
+  }
+
+  /** Push pre-built VALUES strings for core contacts upsert (COALESCE ON CONFLICT) */
+  pushCoreContacts(rows) {
+    return this._push('coreContacts', rows)
   }
 
   /**
@@ -205,7 +212,14 @@ export class WriteBatcher {
       }
 
       case 'contacts': {
-        const sql = `INSERT INTO ${s}.DEAL_CONTACTS (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, NAME, EMAIL, COMPANY, TITLE, PHONE_NUMBER, IS_FAVORITE, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')}`
+        const sql = `INSERT INTO ${s}.DEAL_CONTACTS (DEAL_ID, USER_ID, EMAIL, CONTACT_TYPE, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (DEAL_ID, USER_ID, EMAIL) DO UPDATE SET CONTACT_TYPE = COALESCE(EXCLUDED.CONTACT_TYPE, DEAL_CONTACTS.CONTACT_TYPE), UPDATED_AT = CURRENT_TIMESTAMP`
+        await this._executeSqlFn(sql)
+        break
+      }
+
+      case 'coreContacts': {
+        const cs = this._coreSchema
+        const sql = `INSERT INTO ${cs}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = COALESCE(EXCLUDED.NAME, CONTACTS.NAME), COMPANY_NAME = COALESCE(EXCLUDED.COMPANY_NAME, CONTACTS.COMPANY_NAME), TITLE = COALESCE(EXCLUDED.TITLE, CONTACTS.TITLE), PHONE_NUMBER = COALESCE(EXCLUDED.PHONE_NUMBER, CONTACTS.PHONE_NUMBER), UPDATED_AT = CURRENT_TIMESTAMP`
         await this._executeSqlFn(sql)
         break
       }

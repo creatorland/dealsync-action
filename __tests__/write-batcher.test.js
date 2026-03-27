@@ -42,6 +42,7 @@ describe('WriteBatcher', () => {
     expect(batcher._queues.contacts).toBeDefined()
     expect(batcher._queues.stateUpdates).toBeDefined()
     expect(batcher._queues.batchEvents).toBeDefined()
+    expect(batcher._queues.coreContacts).toBeDefined()
     batcher.stop()
   })
 
@@ -129,17 +130,21 @@ describe('WriteBatcher', () => {
   // pushContacts
   // ----------------------------------------------------------
 
-  it('flushes contacts with correct INSERT SQL', async () => {
+  it('flushes contacts with simplified 4-column ON CONFLICT upsert', async () => {
     const batcher = makeBatcher(mockExec, { flushThreshold: 1 })
 
     const p = batcher.pushContacts([
-      "('c1', 'd1', 'email@co.com', 'primary', 'Alice', 'email@co.com', 'Co', 'CEO', '555', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      "('thread-1', 'user-1', 'email@co.com', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     ])
     await p
 
     const sql = mockExec.mock.calls[0][0]
     expect(sql).toContain('INSERT INTO TEST_SCHEMA.DEAL_CONTACTS')
-    expect(sql).toContain('email@co.com')
+    expect(sql).toContain('DEAL_ID, USER_ID, EMAIL, CONTACT_TYPE')
+    expect(sql).toContain('ON CONFLICT (DEAL_ID, USER_ID, EMAIL) DO UPDATE SET')
+    expect(sql).toContain('COALESCE(EXCLUDED.CONTACT_TYPE, DEAL_CONTACTS.CONTACT_TYPE)')
+    expect(sql).not.toContain('CONTACT_ID')
+    expect(sql).not.toContain('IS_FAVORITE')
 
     batcher.stop()
   })
@@ -452,5 +457,54 @@ describe('WriteBatcher', () => {
 
     consoleSpy.mockRestore()
     batcher.stop()
+  })
+
+  // ----------------------------------------------------------
+  // coreContacts queue
+  // ----------------------------------------------------------
+
+  describe('coreContacts queue', () => {
+    it('has coreContacts queue in _queues', () => {
+      const batcher = makeBatcher(mockExec)
+      expect(batcher._queues.coreContacts).toBeDefined()
+      batcher.stop()
+    })
+
+    it('flushes coreContacts with COALESCE ON CONFLICT SQL using coreSchema', async () => {
+      const batcher = new WriteBatcher(mockExec, 'TEST_SCHEMA', {
+        flushIntervalMs: 60000,
+        flushThreshold: 1,
+        coreSchema: 'MY_CORE_SCHEMA',
+      })
+
+      await batcher.pushCoreContacts([
+        "('user-1', 'alice@co.com', 'Alice', NULL, 'CEO', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      ])
+
+      expect(mockExec).toHaveBeenCalledTimes(1)
+      const sql = mockExec.mock.calls[0][0]
+      expect(sql).toContain('INSERT INTO MY_CORE_SCHEMA.CONTACTS')
+      expect(sql).toContain('USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER')
+      expect(sql).toContain('ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET')
+      expect(sql).toContain('COALESCE(EXCLUDED.NAME, CONTACTS.NAME)')
+      expect(sql).toContain('COALESCE(EXCLUDED.COMPANY_NAME, CONTACTS.COMPANY_NAME)')
+      expect(sql).toContain('COALESCE(EXCLUDED.TITLE, CONTACTS.TITLE)')
+      expect(sql).toContain('COALESCE(EXCLUDED.PHONE_NUMBER, CONTACTS.PHONE_NUMBER)')
+
+      batcher.stop()
+    })
+
+    it('defaults coreSchema to EMAIL_CORE_STAGING', async () => {
+      const batcher = makeBatcher(mockExec, { flushThreshold: 1 })
+
+      await batcher.pushCoreContacts([
+        "('user-1', 'bob@co.com', 'Bob', NULL, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      ])
+
+      const sql = mockExec.mock.calls[0][0]
+      expect(sql).toContain('INSERT INTO EMAIL_CORE_STAGING.CONTACTS')
+
+      batcher.stop()
+    })
   })
 })
