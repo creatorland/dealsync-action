@@ -241,7 +241,7 @@ export async function runClassifyPipeline() {
       }
 
       // b. Build prompt via buildPrompt(emails)
-      const { systemPrompt, userPrompt } = buildPrompt(allEmails)
+      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails)
 
       // c. 4-layer AI resilience pipeline
       const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey }
@@ -267,7 +267,7 @@ export async function runClassifyPipeline() {
       if (primaryRaw) {
         // --- Layer 1: Local JSON repair ---
         try {
-          threads = parseAndValidate(primaryRaw)
+          threads = parseAndValidate(primaryRaw, threadOrder)
           console.log(`[run-classify-pipeline] Primary model succeeded: ${threads.length} threads`)
         } catch (parseError) {
           console.log(`[run-classify-pipeline] Primary JSON parse failed: ${parseError.message}`)
@@ -288,7 +288,7 @@ export async function runClassifyPipeline() {
               ...aiOpts,
             })
             const correctedRaw = corrected.content
-            threads = parseAndValidate(correctedRaw)
+            threads = parseAndValidate(correctedRaw, threadOrder)
             modelUsed = `${primaryModel}(corrective-retry)`
             console.log(
               `[run-classify-pipeline] Corrective retry succeeded: ${threads.length} threads`,
@@ -311,7 +311,7 @@ export async function runClassifyPipeline() {
             ...aiOpts,
           })
           const fallbackRaw = fallbackResult.content
-          threads = parseAndValidate(fallbackRaw)
+          threads = parseAndValidate(fallbackRaw, threadOrder)
           console.log(`[run-classify-pipeline] Fallback model succeeded: ${threads.length} threads`)
         } catch (fallbackError) {
           console.error(
@@ -475,6 +475,7 @@ export async function runClassifyPipeline() {
     const classifiedThreadIds = new Set()
 
     for (const thread of threads) {
+      if (!thread.thread_id) continue
       const threadId = sanitizeId(thread.thread_id)
       classifiedThreadIds.add(threadId)
       const threadEmails = metadataByThread[threadId] || []

@@ -34308,16 +34308,18 @@ function groupByThread(emails) {
 function buildThreadData(emails) {
   const threads = groupByThread(emails);
   const parts = [];
+  const threadOrder = [];
   let threadIndex = 0;
 
   for (const [threadId, threadEmails] of Object.entries(threads)) {
     threadIndex++;
-    let section = `--- THREAD ${threadIndex} ---\n`;
-    section += `Thread ID: ${threadId}\n`;
+    threadOrder.push(threadId);
+    let section = `THREAD_ID_INDEX: ${threadIndex}\n`;
+    section += `MODE: FULL_THREAD\n`;
     section += `Message Count: ${threadEmails.length}\n`;
 
     const previousSummary = threadEmails[0].previousAiSummary;
-    section += `Previous AI Summary: ${previousSummary || 'None'}\n\n`;
+    section += `PREVIOUS_AI_SUMMARY: ${previousSummary || 'None'}\n\n`;
 
     threadEmails.forEach((email, i) => {
       const from = getHeader(email, 'from');
@@ -34332,14 +34334,15 @@ function buildThreadData(emails) {
       section += `${body}\n\n`;
     });
 
+    section += '===\n';
     parts.push(section);
   }
 
-  return parts.join('')
+  return { text: parts.join('\n'), threadOrder }
 }
 
 function buildPrompt(emails, { systemOverride, userOverride } = {}) {
-  const threadData = buildThreadData(emails);
+  const { text: threadData, threadOrder } = buildThreadData(emails);
 
   const systemPrompt = (systemOverride || systemTemplate).trim();
 
@@ -34347,7 +34350,7 @@ function buildPrompt(emails, { systemOverride, userOverride } = {}) {
     .replace('{{THREAD_DATA}}', threadData)
     .trim();
 
-  return { systemPrompt, userPrompt }
+  return { systemPrompt, userPrompt, threadOrder }
 }
 
 // --- Constants ---
@@ -34456,9 +34459,10 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
 
 /**
  * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
- * Returns validated array or throws with parse error details.
+ * @param {string} raw — raw AI response
+ * @param {string[]} [threadOrder] — maps thread_index (1-based) to thread_id
  */
-function parseAndValidate(raw) {
+function parseAndValidate(raw, threadOrder) {
   let content = raw.trim();
 
   // Strip markdown fences
@@ -34509,7 +34513,9 @@ function parseAndValidate(raw) {
 
   // Schema validation and coercion
   return parsed.map((r) => ({
-    thread_id: String(r.thread_id || ''),
+    thread_id: threadOrder && r.thread_index != null
+      ? (threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || ''))
+      : String(r.thread_id || ''),
     is_deal: Boolean(r.is_deal),
     is_english: r.is_english !== false,
     language: r.language || null,
@@ -39465,7 +39471,7 @@ async function runClassifyPipeline() {
       }
 
       // b. Build prompt via buildPrompt(emails)
-      const { systemPrompt, userPrompt } = buildPrompt(allEmails);
+      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails);
 
       // c. 4-layer AI resilience pipeline
       const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey };
@@ -39491,7 +39497,7 @@ async function runClassifyPipeline() {
       if (primaryRaw) {
         // --- Layer 1: Local JSON repair ---
         try {
-          threads = parseAndValidate(primaryRaw);
+          threads = parseAndValidate(primaryRaw, threadOrder);
           console.log(`[run-classify-pipeline] Primary model succeeded: ${threads.length} threads`);
         } catch (parseError) {
           console.log(`[run-classify-pipeline] Primary JSON parse failed: ${parseError.message}`);
@@ -39512,7 +39518,7 @@ async function runClassifyPipeline() {
               ...aiOpts,
             });
             const correctedRaw = corrected.content;
-            threads = parseAndValidate(correctedRaw);
+            threads = parseAndValidate(correctedRaw, threadOrder);
             modelUsed = `${primaryModel}(corrective-retry)`;
             console.log(
               `[run-classify-pipeline] Corrective retry succeeded: ${threads.length} threads`,
@@ -39535,7 +39541,7 @@ async function runClassifyPipeline() {
             ...aiOpts,
           });
           const fallbackRaw = fallbackResult.content;
-          threads = parseAndValidate(fallbackRaw);
+          threads = parseAndValidate(fallbackRaw, threadOrder);
           console.log(`[run-classify-pipeline] Fallback model succeeded: ${threads.length} threads`);
         } catch (fallbackError) {
           console.error(
@@ -39699,6 +39705,7 @@ async function runClassifyPipeline() {
     const classifiedThreadIds = new Set();
 
     for (const thread of threads) {
+      if (!thread.thread_id) continue
       const threadId = sanitizeId(thread.thread_id);
       classifiedThreadIds.add(threadId);
       const threadEmails = metadataByThread[threadId] || [];
