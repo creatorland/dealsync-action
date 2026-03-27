@@ -49,13 +49,17 @@ function buildThreadData(emails) {
   return { text: parts.join('\n'), threadOrder }
 }
 
-export function buildPrompt(emails, { systemOverride, userOverride } = {}) {
+export function buildPrompt(emails, { systemOverride, userOverride, creatorEmail } = {}) {
   const { text: threadData, threadOrder } = buildThreadData(emails)
 
   const systemPrompt = (systemOverride || systemTemplate).trim()
 
+  const creatorContext = creatorEmail
+    ? `\n# Creator\n\nYou are classifying emails for: ${creatorEmail}\nEmails from this address are FROM the creator. Emails TO this address are inbound to the creator. Classify from the creator's perspective.\n\n`
+    : `\n# Creator\n\nThe creator's email is unknown. Infer who the creator is from the email exchange patterns — they are typically the recipient of brand outreach and the sender of responses.\n\n`
+
   const userPrompt = (userOverride || classificationInstructions)
-    .replace('{{THREAD_DATA}}', threadData)
+    .replace('{{THREAD_DATA}}', creatorContext + threadData)
     .trim()
 
   return { systemPrompt, userPrompt, threadOrder }

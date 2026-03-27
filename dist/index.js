@@ -34341,13 +34341,17 @@ function buildThreadData(emails) {
   return { text: parts.join('\n'), threadOrder }
 }
 
-function buildPrompt(emails, { systemOverride, userOverride } = {}) {
+function buildPrompt(emails, { systemOverride, userOverride, creatorEmail } = {}) {
   const { text: threadData, threadOrder } = buildThreadData(emails);
 
   const systemPrompt = (systemOverride || systemTemplate).trim();
 
+  const creatorContext = creatorEmail
+    ? `\n# Creator\n\nYou are classifying emails for: ${creatorEmail}\nEmails from this address are FROM the creator. Emails TO this address are inbound to the creator. Classify from the creator's perspective.\n\n`
+    : `\n# Creator\n\nThe creator's email is unknown. Infer who the creator is from the email exchange patterns — they are typically the recipient of brand outreach and the sender of responses.\n\n`;
+
   const userPrompt = (userOverride || classificationInstructions)
-    .replace('{{THREAD_DATA}}', threadData)
+    .replace('{{THREAD_DATA}}', creatorContext + threadData)
     .trim();
 
   return { systemPrompt, userPrompt, threadOrder }
@@ -39296,7 +39300,7 @@ async function runClassifyPipeline() {
 
     // SELECT the claimed rows
     const rows = await exec(
-      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID WHERE ds.BATCH_ID = '${batchId}'`,
+      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${schema}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${batchId}'`,
     );
 
     const count = rows ? rows.length : 0;
@@ -39336,7 +39340,7 @@ async function runClassifyPipeline() {
 
     // SELECT its rows
     const stuckRows = await exec(
-      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID WHERE ds.BATCH_ID = '${stuckBatchId}'`,
+      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${schema}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${stuckBatchId}'`,
     );
 
     // UPDATE UPDATED_AT to prevent other instances from grabbing it
@@ -39471,7 +39475,8 @@ async function runClassifyPipeline() {
       }
 
       // b. Build prompt via buildPrompt(emails)
-      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails);
+      const creatorEmail = rows[0].CREATOR_EMAIL || '';
+      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails, { creatorEmail });
 
       // c. 4-layer AI resilience pipeline
       const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey };
