@@ -39290,7 +39290,7 @@ async function runClassifyPipeline() {
 
     // SELECT the claimed rows
     const rows = await exec(
-      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID WHERE ds.BATCH_ID = '${batchId}'`,
+      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID WHERE ds.BATCH_ID = '${batchId}'`,
     );
 
     const count = rows ? rows.length : 0;
@@ -39330,7 +39330,7 @@ async function runClassifyPipeline() {
 
     // SELECT its rows
     const stuckRows = await exec(
-      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID WHERE ds.BATCH_ID = '${stuckBatchId}'`,
+      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID WHERE ds.BATCH_ID = '${stuckBatchId}'`,
     );
 
     // UPDATE UPDATED_AT to prevent other instances from grabbing it
@@ -39693,12 +39693,14 @@ async function runClassifyPipeline() {
       metadataByThread[row.THREAD_ID].push(row);
     }
 
-    // Collect dealEmailIds and notDealEmailIds
+    // Collect dealEmailIds and notDealEmailIds from AI results
     const dealEmailIds = [];
     const notDealEmailIds = [];
+    const classifiedThreadIds = new Set();
 
     for (const thread of threads) {
       const threadId = sanitizeId(thread.thread_id);
+      classifiedThreadIds.add(threadId);
       const threadEmails = metadataByThread[threadId] || [];
       if (threadEmails.length === 0) continue
 
@@ -39707,6 +39709,25 @@ async function runClassifyPipeline() {
         dealEmailIds.push(...emailIds);
       } else {
         notDealEmailIds.push(...emailIds);
+      }
+    }
+
+    // Handle rows whose threads weren't in the AI response
+    // Use previous evaluation if exists, otherwise default to not_deal
+    for (const [threadId, threadRows] of Object.entries(metadataByThread)) {
+      if (classifiedThreadIds.has(threadId)) continue
+      // Already handled by unfetchable logic earlier
+      if (threadRows.every((r) => r.STATUS === 'deal' || r.STATUS === 'not_deal')) continue
+
+      const emailIds = threadRows.map((r) => r.EMAIL_METADATA_ID);
+      // Check if any row has a previous eval indicating deal
+      const wasDeal = threadRows.some((r) => r.PREVIOUS_IS_DEAL === true || r.PREVIOUS_IS_DEAL === 'true');
+      if (wasDeal) {
+        dealEmailIds.push(...emailIds);
+        console.log(`[run-classify-pipeline] unclassified thread ${threadId} → deal (previous eval)`);
+      } else {
+        notDealEmailIds.push(...emailIds);
+        console.log(`[run-classify-pipeline] unclassified thread ${threadId} → not_deal (default)`);
       }
     }
 
