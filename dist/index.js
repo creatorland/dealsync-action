@@ -39136,7 +39136,22 @@ class WriteBatcher {
       await this._executeQueue(queueName, items);
       for (const w of waiters) w.resolve();
     } catch (err) {
-      for (const w of waiters) w.reject(err);
+      // If combined flush fails, try each item individually to isolate the bad one
+      if (items.length > 1 && err.message.includes('SxT 400')) {
+        console.error(`[write-batcher] combined ${queueName} flush failed, falling back to individual items`);
+        for (let i = 0; i < items.length; i++) {
+          try {
+            await this._executeQueue(queueName, [items[i]]);
+          } catch (itemErr) {
+            console.error(`[write-batcher] ${queueName} item ${i} failed: ${itemErr.message}`);
+          }
+        }
+        // Resolve all waiters — individual items that succeeded are written,
+        // failed items are logged and skipped
+        for (const w of waiters) w.resolve();
+      } else {
+        for (const w of waiters) w.reject(err);
+      }
     }
   }
 
