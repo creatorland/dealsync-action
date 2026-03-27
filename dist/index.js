@@ -39406,15 +39406,71 @@ async function runClassifyPipeline() {
       const syncStateId = rows[0].SYNC_STATE_ID;
       const messageIds = rows.map((r) => r.MESSAGE_ID);
 
-      const allEmails = await fetchEmails(messageIds, metaByMessageId, {
-        contentFetcherUrl,
-        userId,
-        syncStateId,
-        chunkSize,
-        fetchTimeoutMs,
-      });
+      let allEmails;
+      try {
+        allEmails = await fetchEmails(messageIds, metaByMessageId, {
+          contentFetcherUrl,
+          userId,
+          syncStateId,
+          chunkSize,
+          fetchTimeoutMs,
+        });
+      } catch {
+        allEmails = [];
+      }
 
-      if (allEmails.length === 0) throw new Error('No email content fetched')
+      // Handle unfetchable threads — threads with zero emails returned
+      const fetchedThreadIds = new Set(allEmails.map((e) => e.threadId).filter(Boolean));
+      const allBatchThreadIds = [...new Set(rows.map((r) => r.THREAD_ID))];
+      const unfetchableThreadIds = allBatchThreadIds.filter((tid) => !fetchedThreadIds.has(tid));
+
+      if (unfetchableThreadIds.length > 0) {
+        console.log(`[run-classify-pipeline] ${unfetchableThreadIds.length} unfetchable threads, checking previous evaluations`);
+
+        // Look up existing evaluations for unfetchable threads
+        const quotedUnfetchable = unfetchableThreadIds.map((id) => `'${sanitizeId(id)}'`).join(',');
+        const existingEvals = await execNoRL(
+          `SELECT THREAD_ID, IS_DEAL FROM ${schema}.EMAIL_THREAD_EVALUATIONS WHERE THREAD_ID IN (${quotedUnfetchable})`,
+        );
+        const evalByThread = {};
+        for (const e of existingEvals || []) {
+          evalByThread[e.THREAD_ID] = e.IS_DEAL;
+        }
+
+        // Mark unfetchable rows based on previous eval or default to not_deal
+        const unfetchableDealIds = [];
+        const unfetchableNotDealIds = [];
+        for (const tid of unfetchableThreadIds) {
+          const threadRows = rows.filter((r) => r.THREAD_ID === tid);
+          const emailIds = threadRows.map((r) => r.EMAIL_METADATA_ID);
+          const wasDeal = evalByThread[tid] === true || evalByThread[tid] === 'true';
+          if (wasDeal) {
+            unfetchableDealIds.push(...emailIds);
+          } else {
+            unfetchableNotDealIds.push(...emailIds);
+          }
+        }
+
+        if (unfetchableDealIds.length > 0) {
+          const quotedIds = unfetchableDealIds.map((id) => `'${sanitizeId(id)}'`).join(',');
+          await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`);
+          console.log(`[run-classify-pipeline] ${unfetchableDealIds.length} unfetchable rows → deal (previous eval)`);
+        }
+        if (unfetchableNotDealIds.length > 0) {
+          const quotedIds = unfetchableNotDealIds.map((id) => `'${sanitizeId(id)}'`).join(',');
+          await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`);
+          console.log(`[run-classify-pipeline] ${unfetchableNotDealIds.length} unfetchable rows → not_deal`);
+        }
+      }
+
+      if (allEmails.length === 0) {
+        console.log(`[run-classify-pipeline] no fetchable emails, skipping AI`);
+        await batcher.pushBatchEvents([
+          `('${batchId}', '${batchId}', 'classify', 'complete', CURRENT_TIMESTAMP)`,
+        ]);
+        console.log(`[run-classify-pipeline] batch ${batchId} complete (all unfetchable)`);
+        return
+      }
 
       // b. Build prompt via buildPrompt(emails)
       const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails);
