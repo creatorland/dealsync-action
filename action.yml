@@ -89,7 +89,7 @@ inputs:
     default: '5000'
   flush-threshold:
     description: 'Write batcher flush threshold per queue (run-classify-pipeline)'
-    default: '10'
+    default: '5'
 
 outputs:
   success:

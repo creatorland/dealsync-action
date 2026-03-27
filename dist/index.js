@@ -39240,7 +39240,7 @@ async function runClassifyPipeline() {
   const chunkSize = parseInt(coreExports.getInput('chunk-size') || '10', 10);
   const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '120000', 10);
   const flushIntervalMs = parseInt(coreExports.getInput('flush-interval-ms') || '5000', 10);
-  const flushThreshold = parseInt(coreExports.getInput('flush-threshold') || '10', 10);
+  const flushThreshold = parseInt(coreExports.getInput('flush-threshold') || '5', 10);
 
   console.log(
     `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, maxRetries=${maxRetries}, chunkSize=${chunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
