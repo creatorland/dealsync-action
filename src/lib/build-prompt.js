@@ -54,12 +54,12 @@ export function buildPrompt(emails, { systemOverride, userOverride, creatorEmail
 
   const systemPrompt = (systemOverride || systemTemplate).trim()
 
-  const creatorContext = creatorEmail
-    ? `\n# Creator\n\nYou are classifying emails for: ${creatorEmail}\nEmails from this address are FROM the creator. Emails TO this address are inbound to the creator. Classify from the creator's perspective.\n\n`
-    : `\n# Creator\n\nThe creator's email is unknown. Infer who the creator is from the email exchange patterns — they are typically the recipient of brand outreach and the sender of responses.\n\n`
+  const creatorLine = creatorEmail
+    ? `Creator email: ${creatorEmail}\n\n`
+    : ''
 
   const userPrompt = (userOverride || classificationInstructions)
-    .replace('{{THREAD_DATA}}', creatorContext + threadData)
+    .replace('{{THREAD_DATA}}', creatorLine + threadData)
     .trim()
 
   return { systemPrompt, userPrompt, threadOrder }
