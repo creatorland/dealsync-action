@@ -217,7 +217,7 @@ export async function runFetchAndClassify() {
 
   // Save audit checkpoint
   const auditId = uuidv7()
-  const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400))
+  const evaluation = sanitizeString(JSON.stringify(aiOutput))
   try {
     await executeSql(
       apiUrl,

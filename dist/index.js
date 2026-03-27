@@ -34726,7 +34726,7 @@ async function runFetchAndClassify() {
 
   // Save audit checkpoint
   const auditId = v7();
-  const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400));
+  const evaluation = sanitizeString(JSON.stringify(aiOutput));
   try {
     await executeSql(
       apiUrl,
@@ -39474,7 +39474,7 @@ async function runClassifyPipeline() {
       // d. Save audit checkpoint
       const auditId = v7();
       const aiOutput = { threads };
-      const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400));
+      const evaluation = sanitizeString(JSON.stringify(aiOutput));
       try {
         await execNoRL(
           saveResults.insertAudit(schema, {

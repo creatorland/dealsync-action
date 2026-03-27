@@ -270,7 +270,7 @@ export async function runClassifyPipeline() {
       // d. Save audit checkpoint
       const auditId = uuidv7()
       const aiOutput = { threads }
-      const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400))
+      const evaluation = sanitizeString(JSON.stringify(aiOutput))
       try {
         await execNoRL(
           saveResults.insertAudit(schema, {
