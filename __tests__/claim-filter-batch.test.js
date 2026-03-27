@@ -164,13 +164,14 @@ describe('claim-filter-batch command', () => {
       .mockResolvedValueOnce(sxtResponse()) // UPDATE (claim — 0 affected)
       .mockResolvedValueOnce(sxtResponse([])) // SELECT claimed — empty
       .mockResolvedValueOnce(sxtResponse([])) // stuck batches query — empty
+      .mockResolvedValueOnce(sxtResponse([])) // sweep exhausted — empty
 
     const result = await runClaimFilterBatch()
 
-    expect(result).toEqual({ batch_id: null, count: 0 })
+    expect(result).toEqual({ batch_id: null, count: 0, stuck_failed: 0 })
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    expect(sqlCalls).toHaveLength(3) // UPDATE + SELECT + stuck query
+    expect(sqlCalls).toHaveLength(4) // UPDATE + SELECT + stuck + sweep
   })
 
   // ----------------------------------------------------------
@@ -264,6 +265,7 @@ describe('claim-filter-batch command', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
 
     await runClaimFilterBatch()
 
@@ -272,7 +274,7 @@ describe('claim-filter-batch command', () => {
     expect(updateSql).toContain('LIMIT 200')
   })
 
-  it('uses default max-retries of 3 when not specified', async () => {
+  it('uses default max-retries of 6 when not specified', async () => {
     mockInputs({ 'max-retries': '' })
 
     fetchSpy
@@ -280,12 +282,13 @@ describe('claim-filter-batch command', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
 
     await runClaimFilterBatch()
 
     const sqlCalls = getSqlCalls(fetchSpy)
     const stuckSql = getSqlText(sqlCalls[2])
-    expect(stuckSql).toContain('HAVING COUNT(DISTINCT be.TRIGGER_HASH) < 3')
+    expect(stuckSql).toContain('HAVING COUNT(DISTINCT be.TRIGGER_HASH) < 6')
   })
 
   // ----------------------------------------------------------
@@ -309,6 +312,7 @@ describe('claim-filter-batch command', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
 
     await runClaimFilterBatch()
 
@@ -328,6 +332,7 @@ describe('claim-filter-batch command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse())
       .mockResolvedValueOnce(sxtResponse())
+      .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
 
@@ -354,6 +359,7 @@ describe('claim-filter-batch command', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
 
     await runClaimFilterBatch()
 
@@ -373,6 +379,7 @@ describe('claim-filter-batch command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse())
       .mockResolvedValueOnce(sxtResponse())
+      .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
 
@@ -397,6 +404,7 @@ describe('claim-filter-batch command', () => {
       .mockResolvedValueOnce(sxtResponse())
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
+      .mockResolvedValueOnce(sxtResponse([]))
 
     await runClaimFilterBatch()
 
@@ -415,6 +423,7 @@ describe('claim-filter-batch command', () => {
     fetchSpy
       .mockResolvedValueOnce(authResponse())
       .mockResolvedValueOnce(sxtResponse())
+      .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
       .mockResolvedValueOnce(sxtResponse([]))
 

@@ -23,6 +23,7 @@ export const STATUS = {
   DEAL: 'deal',
   NOT_DEAL: 'not_deal',
   FILTER_REJECTED: 'filter_rejected',
+  FAILED: 'failed',
 }
 
 // ============================================================

@@ -27283,6 +27283,7 @@ const STATUS = {
   DEAL: 'deal',
   NOT_DEAL: 'not_deal',
   FILTER_REJECTED: 'filter_rejected',
+  FAILED: 'failed',
 };
 
 // ============================================================
@@ -38434,21 +38435,32 @@ async function runEvalCompare() {
  *
  * @param {Function} claimFn - async function returning a batch or null when exhausted
  * @param {Function} workerFn - async function(batch, { attempt }) to process a batch
- * @param {{ maxConcurrent: number, maxRetries: number }} opts
+ * @param {{ maxConcurrent: number, maxRetries: number, onDeadLetter?: (batch: object) => Promise<void> }} opts
  * @returns {Promise<{ processed: number, failed: number }>}
  */
-async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries }) {
+async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries, onDeadLetter }) {
   const active = new Set();
   const results = { processed: 0, failed: 0 };
+
+  async function deadLetter(batch, reason) {
+    coreExports.error(
+      `Batch ${batch.batch_id} ${reason} (${batch.attempts || 0}/${maxRetries}), dead-lettered`,
+    );
+    if (typeof onDeadLetter === 'function' && batch.batch_id) {
+      try {
+        await onDeadLetter(batch);
+      } catch (e) {
+        coreExports.error(`onDeadLetter failed for ${batch.batch_id}: ${e.message}`);
+      }
+    }
+    results.failed++;
+  }
 
   function runWorker(batch) {
     let currentAttempt = batch.attempts || 0;
     return (async () => {
       if (currentAttempt >= maxRetries) {
-        coreExports.error(
-          `Batch ${batch.batch_id} already exhausted (${currentAttempt}/${maxRetries}), dead-lettered`,
-        );
-        results.failed++;
+        await deadLetter(batch, 'already exhausted');
         return
       }
       while (currentAttempt < maxRetries) {
@@ -38463,7 +38475,7 @@ async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries }) {
           );
           if (currentAttempt >= maxRetries) {
             coreExports.error(`Batch ${batch.batch_id} dead-lettered after ${maxRetries} attempts`);
-            results.failed++;
+            await deadLetter(batch, 'after max retries');
             return
           }
           const delay = Math.min(2000 * Math.pow(2, currentAttempt - 1), 30000);
@@ -38490,6 +38502,84 @@ async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries }) {
   }
 
   return results
+}
+
+const STUCK_INTERVAL_MINUTES = 5;
+
+/**
+ * Fail batches stuck in an active status with exhausted retrigger attempts (>= maxRetries distinct TRIGGER_HASH).
+ *
+ * @param {Function} exec - async (sql) => rows
+ * @param {string} schema
+ * @param {{ activeStatus: string, batchType: string, maxRetries: number }} opts
+ * @returns {Promise<number>} rows transitioned to failed
+ */
+async function sweepStuckRows(exec, schema, { activeStatus, batchType, maxRetries }) {
+  const safeSchema = sanitizeSchema(schema);
+  const statusLiteral = activeStatus;
+
+  const exhausted = await exec(
+    `SELECT ds.BATCH_ID FROM ${safeSchema}.DEAL_STATES ds LEFT JOIN ${safeSchema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${statusLiteral}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${STUCK_INTERVAL_MINUTES}' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) >= ${maxRetries}`,
+  );
+
+  if (!exhausted || exhausted.length === 0) {
+    return 0
+  }
+
+  let totalRows = 0;
+  for (const row of exhausted) {
+    const bid = row.BATCH_ID;
+    const safeBid = sanitizeId(bid);
+    const countRows = await exec(
+      `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE BATCH_ID = '${safeBid}'`,
+    );
+    const n = Number(countRows?.[0]?.C ?? 0) || 0;
+    await exec(
+      `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}'`,
+    );
+    await insertBatchEvent(exec, safeSchema, {
+      triggerHash: v7(),
+      batchId: bid,
+      batchType,
+      eventType: 'dead_letter',
+    });
+    totalRows += n;
+    coreExports.info(
+      `[sweepStuckRows] dead-lettered exhausted batch ${bid} (${n} rows, status=${statusLiteral})`,
+    );
+  }
+
+  return totalRows
+}
+
+/**
+ * Fail rows stuck in intermediate statuses with no batch id (never claimed), older than staleMinutes.
+ *
+ * @param {Function} exec
+ * @param {string} schema
+ * @param {{ statuses: string[], staleMinutes: number }} opts
+ * @returns {Promise<number>} rows transitioned to failed
+ */
+async function sweepOrphanedRows(exec, schema, { statuses, staleMinutes }) {
+  const safeSchema = sanitizeSchema(schema);
+  if (!Array.isArray(statuses) || statuses.length === 0) return 0
+
+  const literals = statuses.map((s) => `'${sanitizeString(s)}'`).join(',');
+
+  const countRows = await exec(
+    `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${staleMinutes}' MINUTE`,
+  );
+  const n = Number(countRows?.[0]?.C ?? 0) || 0;
+  if (n === 0) return 0
+
+  await exec(
+    `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${staleMinutes}' MINUTE`,
+  );
+
+  coreExports.info(
+    `[sweepOrphanedRows] failed ${n} orphaned row(s) (statuses=${statuses.join(',')}, staleMinutes=${staleMinutes})`,
+  );
+  return n
 }
 
 /**
@@ -38572,8 +38662,19 @@ async function runClaimFilterBatch() {
   );
 
   if (!stuckBatches || stuckBatches.length === 0) {
-    console.log(`[claim-filter-batch] no stuck batches found, nothing to do`);
-    return { batch_id: null, count: 0 }
+    const stuckFailed = await sweepStuckRows(exec, schema, {
+      activeStatus: STATUS.FILTERING,
+      batchType: 'filter',
+      maxRetries,
+    });
+    if (stuckFailed > 0) {
+      console.log(
+        `[claim-filter-batch] dead-lettered ${stuckFailed} row(s) in exhausted filter batches (no retrigger-eligible stuck batches)`,
+      );
+    } else {
+      console.log(`[claim-filter-batch] no stuck batches found, nothing to do`);
+    }
+    return { batch_id: null, count: 0, stuck_failed: stuckFailed }
   }
 
   // 7. Re-claim the stuck batch
@@ -38694,9 +38795,23 @@ async function runClaimClassifyBatch() {
     }
   }
 
-  // 8. Nothing found
-  console.log('[claim-classify-batch] nothing to claim');
-  return { batch_id: null, count: 0 }
+  const stuckFailed = await sweepStuckRows(exec, schema, {
+    activeStatus: STATUS.CLASSIFYING,
+    batchType: 'classify',
+    maxRetries,
+  });
+  const orphanFailed = await sweepOrphanedRows(exec, schema, {
+    statuses: [STATUS.PENDING_CLASSIFICATION],
+    staleMinutes: 30,
+  });
+  if (stuckFailed > 0 || orphanFailed > 0) {
+    console.log(
+      `[claim-classify-batch] dead-lettered ${stuckFailed} classify row(s), ${orphanFailed} orphan pending_classification row(s)`,
+    );
+  } else {
+    console.log('[claim-classify-batch] nothing to claim');
+  }
+  return { batch_id: null, count: 0, stuck_failed: stuckFailed, orphan_failed: orphanFailed }
 }
 
 /**
@@ -39011,19 +39126,46 @@ async function runFilterPipeline() {
     totalRejected += rejectedIds.length;
   }
 
-  // 5. Call runPool
-  const poolResults = await runPool(claimBatch, processFilterBatch, { maxConcurrent, maxRetries });
+  // 5. Dead-letter: persist failed status when pool gives up on a batch
+  async function onDeadLetter(batch) {
+    const bid = batch.batch_id;
+    if (!bid) return
+    const safeBid = sanitizeId(bid);
+    await execNoRL(
+      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}'`,
+    );
+    await insertBatchEvent(execNoRL, schema, {
+      triggerHash: v7(),
+      batchId: bid,
+      batchType: 'filter',
+      eventType: 'dead_letter',
+    });
+    console.log(`[run-filter-pipeline] dead-lettered batch ${bid} → status=failed`);
+  }
+
+  const poolResults = await runPool(claimBatch, processFilterBatch, {
+    maxConcurrent,
+    maxRetries,
+    onDeadLetter,
+  });
+
+  // 6. Sweep: DB rows stuck in filtering with exhausted retrigger attempts (Explorer had "nothing to process" but SxT still had leftovers)
+  const stuckFailed = await sweepStuckRows(exec, schema, {
+    activeStatus: STATUS.FILTERING,
+    batchType: 'filter',
+    maxRetries,
+  });
 
   console.log(
-    `[run-filter-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}, total_filtered=${totalFiltered}, total_rejected=${totalRejected}`,
+    `[run-filter-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}, total_filtered=${totalFiltered}, total_rejected=${totalRejected}, stuck_failed=${stuckFailed}`,
   );
 
-  // 6. Return totals
   return {
     batches_processed: poolResults.processed,
     batches_failed: poolResults.failed,
     total_filtered: totalFiltered,
     total_rejected: totalRejected,
+    stuck_failed: stuckFailed,
   }
 }
 
@@ -39334,7 +39476,11 @@ async function runClassifyPipeline() {
   const execNoRL = (sql) => executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit: true });
 
   // 3. Create write batcher (uses execNoRL — tokens acquired in bulk by workers)
-  const batcher = new WriteBatcher(execNoRL, schema, { flushIntervalMs, flushThreshold, coreSchema });
+  const batcher = new WriteBatcher(execNoRL, schema, {
+    flushIntervalMs,
+    flushThreshold,
+    coreSchema,
+  });
 
   // =========================================================================
   //  CLAIM FUNCTION (inline, same pattern as claim-classify-batch)
@@ -39478,7 +39624,9 @@ async function runClassifyPipeline() {
       const unfetchableThreadIds = allBatchThreadIds.filter((tid) => !fetchedThreadIds.has(tid));
 
       if (unfetchableThreadIds.length > 0) {
-        console.log(`[run-classify-pipeline] ${unfetchableThreadIds.length} unfetchable threads, checking previous evaluations`);
+        console.log(
+          `[run-classify-pipeline] ${unfetchableThreadIds.length} unfetchable threads, checking previous evaluations`,
+        );
 
         // Look up existing evaluations for unfetchable threads
         const quotedUnfetchable = unfetchableThreadIds.map((id) => `'${sanitizeId(id)}'`).join(',');
@@ -39506,13 +39654,21 @@ async function runClassifyPipeline() {
 
         if (unfetchableDealIds.length > 0) {
           const quotedIds = unfetchableDealIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-          await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`);
-          console.log(`[run-classify-pipeline] ${unfetchableDealIds.length} unfetchable rows → deal (previous eval)`);
+          await execNoRL(
+            `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
+          );
+          console.log(
+            `[run-classify-pipeline] ${unfetchableDealIds.length} unfetchable rows → deal (previous eval)`,
+          );
         }
         if (unfetchableNotDealIds.length > 0) {
           const quotedIds = unfetchableNotDealIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-          await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`);
-          console.log(`[run-classify-pipeline] ${unfetchableNotDealIds.length} unfetchable rows → not_deal`);
+          await execNoRL(
+            `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
+          );
+          console.log(
+            `[run-classify-pipeline] ${unfetchableNotDealIds.length} unfetchable rows → not_deal`,
+          );
         }
       }
 
@@ -39745,7 +39901,9 @@ async function runClassifyPipeline() {
         try {
           await batcher.pushCoreContacts(coreContactValues);
         } catch (err) {
-          console.error(`[run-classify-pipeline] core contacts upsert failed (non-fatal): ${err.message}`);
+          console.error(
+            `[run-classify-pipeline] core contacts upsert failed (non-fatal): ${err.message}`,
+          );
         }
       }
 
@@ -39753,7 +39911,9 @@ async function runClassifyPipeline() {
         await batcher.pushContacts(dealContactValues);
       }
 
-      console.log(`[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`);
+      console.log(
+        `[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`,
+      );
     }
 
     // -----------------------------------------------------------------------
@@ -39796,10 +39956,14 @@ async function runClassifyPipeline() {
 
       const emailIds = threadRows.map((r) => r.EMAIL_METADATA_ID);
       // Check if any row has a previous eval indicating deal
-      const wasDeal = threadRows.some((r) => r.PREVIOUS_IS_DEAL === true || r.PREVIOUS_IS_DEAL === 'true');
+      const wasDeal = threadRows.some(
+        (r) => r.PREVIOUS_IS_DEAL === true || r.PREVIOUS_IS_DEAL === 'true',
+      );
       if (wasDeal) {
         dealEmailIds.push(...emailIds);
-        console.log(`[run-classify-pipeline] unclassified thread ${threadId} → deal (previous eval)`);
+        console.log(
+          `[run-classify-pipeline] unclassified thread ${threadId} → deal (previous eval)`,
+        );
       } else {
         notDealEmailIds.push(...emailIds);
         console.log(`[run-classify-pipeline] unclassified thread ${threadId} → not_deal (default)`);
@@ -39809,11 +39973,15 @@ async function runClassifyPipeline() {
     // Write state updates directly (not through batcher) to ensure they commit
     if (dealEmailIds.length > 0) {
       const quotedIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-      await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`);
+      await execNoRL(
+        `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
+      );
     }
     if (notDealEmailIds.length > 0) {
       const quotedIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-      await execNoRL(`UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`);
+      await execNoRL(
+        `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
+      );
     }
 
     console.log(
@@ -39835,18 +40003,51 @@ async function runClassifyPipeline() {
   //  RUN POOL
   // =========================================================================
 
-  const poolResults = await runPool(claimBatch, processClassifyBatch, { maxConcurrent, maxRetries });
+  async function onDeadLetter(batch) {
+    const bid = batch.batch_id;
+    if (!bid) return
+    const safeBid = sanitizeId(bid);
+    await execNoRL(
+      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}'`,
+    );
+    await insertBatchEvent(execNoRL, schema, {
+      triggerHash: v7(),
+      batchId: bid,
+      batchType: 'classify',
+      eventType: 'dead_letter',
+    });
+    console.log(`[run-classify-pipeline] dead-lettered batch ${bid} → status=failed`);
+  }
+
+  const poolResults = await runPool(claimBatch, processClassifyBatch, {
+    maxConcurrent,
+    maxRetries,
+    onDeadLetter,
+  });
 
   // Drain all pending writes
   await batcher.drain();
 
+  const stuckFailed = await sweepStuckRows(exec, schema, {
+    activeStatus: STATUS.CLASSIFYING,
+    batchType: 'classify',
+    maxRetries,
+  });
+
+  const orphanFailed = await sweepOrphanedRows(exec, schema, {
+    statuses: [STATUS.PENDING_CLASSIFICATION],
+    staleMinutes: 30,
+  });
+
   console.log(
-    `[run-classify-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}`,
+    `[run-classify-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}, stuck_failed=${stuckFailed}, orphan_failed=${orphanFailed}`,
   );
 
   return {
     batches_processed: poolResults.processed,
     batches_failed: poolResults.failed,
+    stuck_failed: stuckFailed,
+    orphan_failed: orphanFailed,
   }
 }
 

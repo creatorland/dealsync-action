@@ -79,9 +79,13 @@ jest.unstable_mockModule('../src/lib/build-prompt.js', () => ({
 // Mock pipeline
 const mockRunPool = jest.fn()
 const mockInsertBatchEvent = jest.fn()
+const mockSweepStuckRows = jest.fn().mockResolvedValue(0)
+const mockSweepOrphanedRows = jest.fn().mockResolvedValue(0)
 jest.unstable_mockModule('../src/lib/pipeline.js', () => ({
   runPool: mockRunPool,
   insertBatchEvent: mockInsertBatchEvent,
+  sweepStuckRows: mockSweepStuckRows,
+  sweepOrphanedRows: mockSweepOrphanedRows,
 }))
 
 // Mock WriteBatcher
@@ -194,6 +198,8 @@ describe('run-classify-pipeline command', () => {
     mockBatcherInstance.pushStateUpdates.mockResolvedValue(undefined)
     mockBatcherInstance.pushBatchEvents.mockResolvedValue(undefined)
     mockBatcherInstance.drain.mockResolvedValue(undefined)
+    mockSweepStuckRows.mockResolvedValue(0)
+    mockSweepOrphanedRows.mockResolvedValue(0)
   })
 
   // ----------------------------------------------------------
@@ -289,6 +295,8 @@ describe('run-classify-pipeline command', () => {
     expect(result).toEqual({
       batches_processed: 1,
       batches_failed: 0,
+      stuck_failed: 0,
+      orphan_failed: 0,
     })
 
     // Verify authentication
@@ -368,6 +376,8 @@ describe('run-classify-pipeline command', () => {
     expect(result).toEqual({
       batches_processed: 0,
       batches_failed: 0,
+      stuck_failed: 0,
+      orphan_failed: 0,
     })
 
     // No pipeline work should have been done
@@ -494,7 +504,11 @@ describe('run-classify-pipeline command', () => {
     const [claimFn, workerFn, opts] = mockRunPool.mock.calls[0]
     expect(typeof claimFn).toBe('function')
     expect(typeof workerFn).toBe('function')
-    expect(opts).toEqual({ maxConcurrent: 5, maxRetries: 7 })
+    expect(opts).toEqual({
+      maxConcurrent: 5,
+      maxRetries: 7,
+      onDeadLetter: expect.any(Function),
+    })
   })
 
   // ----------------------------------------------------------
@@ -933,7 +947,11 @@ describe('run-classify-pipeline command', () => {
     await runClassifyPipeline()
 
     const [, , opts] = mockRunPool.mock.calls[0]
-    expect(opts).toEqual({ maxConcurrent: 70, maxRetries: 6 })
+    expect(opts).toEqual({
+      maxConcurrent: 70,
+      maxRetries: 6,
+      onDeadLetter: expect.any(Function),
+    })
 
     // WriteBatcher created with defaults
     expect(MockWriteBatcher).toHaveBeenCalledWith(expect.any(Function), expect.any(String), {
@@ -1012,6 +1030,8 @@ describe('run-classify-pipeline command', () => {
     expect(result).toEqual({
       batches_processed: 3,
       batches_failed: 2,
+      stuck_failed: 0,
+      orphan_failed: 0,
     })
   })
 
@@ -1108,18 +1128,44 @@ describe('run-classify-pipeline command', () => {
 
   it('calls pushCoreContacts with (userId, email, name, company, title, phone) values', async () => {
     mockInputs()
-    const rows = [{ EMAIL_METADATA_ID: 'em-1', MESSAGE_ID: 'msg-1', USER_ID: 'user-42', THREAD_ID: 'thread-xyz', SYNC_STATE_ID: 'ss-1', CREATOR_EMAIL: 'creator@test.com' }]
-    const threads = [{
-      thread_id: 'thread-xyz', is_deal: true, ai_score: 9, ai_summary: 'Great deal',
-      category: 'new', deal_name: 'Big Deal', deal_type: 'sponsorship', deal_value: '1000', currency: 'USD',
-      main_contact: { name: 'Alice', email: 'alice@brand.com', company: 'BrandCo', title: 'Manager', phone_number: '555-0101' },
-    }]
+    const rows = [
+      {
+        EMAIL_METADATA_ID: 'em-1',
+        MESSAGE_ID: 'msg-1',
+        USER_ID: 'user-42',
+        THREAD_ID: 'thread-xyz',
+        SYNC_STATE_ID: 'ss-1',
+        CREATOR_EMAIL: 'creator@test.com',
+      },
+    ]
+    const threads = [
+      {
+        thread_id: 'thread-xyz',
+        is_deal: true,
+        ai_score: 9,
+        ai_summary: 'Great deal',
+        category: 'new',
+        deal_name: 'Big Deal',
+        deal_type: 'sponsorship',
+        deal_value: '1000',
+        currency: 'USD',
+        main_contact: {
+          name: 'Alice',
+          email: 'alice@brand.com',
+          company: 'BrandCo',
+          title: 'Manager',
+          phone_number: '555-0101',
+        },
+      },
+    ]
 
     mockRunPool.mockImplementation(async (claimFn, workerFn) => {
       mockExecuteSql.mockResolvedValueOnce([]).mockResolvedValueOnce(rows)
       const batch = await claimFn()
       mockExecuteSql.mockResolvedValueOnce([])
-      mockFetchEmails.mockResolvedValueOnce([{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-xyz', body: 'hi' }])
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-xyz', body: 'hi' },
+      ])
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
       mockParseAndValidate.mockReturnValueOnce(threads)
@@ -1145,18 +1191,44 @@ describe('run-classify-pipeline command', () => {
 
   it('uses NULL literal for missing contact fields in coreContacts', async () => {
     mockInputs()
-    const rows = [{ EMAIL_METADATA_ID: 'em-1', MESSAGE_ID: 'msg-1', USER_ID: 'user-1', THREAD_ID: 'thread-1', SYNC_STATE_ID: 'ss-1', CREATOR_EMAIL: '' }]
-    const threads = [{
-      thread_id: 'thread-1', is_deal: true, ai_score: 7, ai_summary: 'Deal',
-      category: 'new', deal_name: 'Deal', deal_type: 'sponsorship', deal_value: '100', currency: 'USD',
-      main_contact: { name: '', email: 'contact@co.com', company: '', title: '', phone_number: '' },
-    }]
+    const rows = [
+      {
+        EMAIL_METADATA_ID: 'em-1',
+        MESSAGE_ID: 'msg-1',
+        USER_ID: 'user-1',
+        THREAD_ID: 'thread-1',
+        SYNC_STATE_ID: 'ss-1',
+        CREATOR_EMAIL: '',
+      },
+    ]
+    const threads = [
+      {
+        thread_id: 'thread-1',
+        is_deal: true,
+        ai_score: 7,
+        ai_summary: 'Deal',
+        category: 'new',
+        deal_name: 'Deal',
+        deal_type: 'sponsorship',
+        deal_value: '100',
+        currency: 'USD',
+        main_contact: {
+          name: '',
+          email: 'contact@co.com',
+          company: '',
+          title: '',
+          phone_number: '',
+        },
+      },
+    ]
 
     mockRunPool.mockImplementation(async (claimFn, workerFn) => {
       mockExecuteSql.mockResolvedValueOnce([]).mockResolvedValueOnce(rows)
       const batch = await claimFn()
       mockExecuteSql.mockResolvedValueOnce([])
-      mockFetchEmails.mockResolvedValueOnce([{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }])
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
+      ])
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
       mockParseAndValidate.mockReturnValueOnce(threads)
@@ -1177,18 +1249,38 @@ describe('run-classify-pipeline command', () => {
 
   it('does NOT call pushContactDeletes (ON CONFLICT handles idempotency)', async () => {
     mockInputs()
-    const rows = [{ EMAIL_METADATA_ID: 'em-1', MESSAGE_ID: 'msg-1', USER_ID: 'user-1', THREAD_ID: 'thread-1', SYNC_STATE_ID: 'ss-1', CREATOR_EMAIL: '' }]
-    const threads = [{
-      thread_id: 'thread-1', is_deal: true, ai_score: 7, ai_summary: 'Deal',
-      category: 'new', deal_name: 'Deal', deal_type: 'sponsorship', deal_value: '100', currency: 'USD',
-      main_contact: { name: 'X', email: 'x@co.com', company: '', title: '', phone_number: '' },
-    }]
+    const rows = [
+      {
+        EMAIL_METADATA_ID: 'em-1',
+        MESSAGE_ID: 'msg-1',
+        USER_ID: 'user-1',
+        THREAD_ID: 'thread-1',
+        SYNC_STATE_ID: 'ss-1',
+        CREATOR_EMAIL: '',
+      },
+    ]
+    const threads = [
+      {
+        thread_id: 'thread-1',
+        is_deal: true,
+        ai_score: 7,
+        ai_summary: 'Deal',
+        category: 'new',
+        deal_name: 'Deal',
+        deal_type: 'sponsorship',
+        deal_value: '100',
+        currency: 'USD',
+        main_contact: { name: 'X', email: 'x@co.com', company: '', title: '', phone_number: '' },
+      },
+    ]
 
     mockRunPool.mockImplementation(async (claimFn, workerFn) => {
       mockExecuteSql.mockResolvedValueOnce([]).mockResolvedValueOnce(rows)
       const batch = await claimFn()
       mockExecuteSql.mockResolvedValueOnce([])
-      mockFetchEmails.mockResolvedValueOnce([{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }])
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
+      ])
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
       mockParseAndValidate.mockReturnValueOnce(threads)
