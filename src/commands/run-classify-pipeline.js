@@ -436,11 +436,13 @@ export async function runClassifyPipeline() {
 
       for (const thread of dealThreads) {
         const mc = thread.main_contact
-        if (!mc || !mc.email) continue
+        if (!mc) continue
+        const email = (mc.email || '').trim().toLowerCase()
+        if (!email) continue
 
         const threadId = sanitizeId(thread.thread_id)
         const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
-        const contactEmail = sanitizeString(mc.email)
+        const contactEmail = sanitizeString(email)
         const nameVal = toSqlNullable(mc.name)
         const companyVal = toSqlNullable(mc.company)
         const titleVal = toSqlNullable(mc.title)
@@ -458,7 +460,11 @@ export async function runClassifyPipeline() {
       }
 
       if (coreContactValues.length > 0) {
-        await batcher.pushCoreContacts(coreContactValues)
+        try {
+          await batcher.pushCoreContacts(coreContactValues)
+        } catch (err) {
+          console.error(`[run-classify-pipeline] core contacts upsert failed (non-fatal): ${err.message}`)
+        }
       }
 
       if (dealContactValues.length > 0) {
