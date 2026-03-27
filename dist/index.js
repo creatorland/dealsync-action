@@ -39024,9 +39024,10 @@ class WriteBatcher {
    * @param {number} opts.flushIntervalMs — timer-based flush interval (default 5000)
    * @param {number} opts.flushThreshold — count-based flush threshold per queue (default 10)
    */
-  constructor(executeSqlFn, schema, { flushIntervalMs = 5000, flushThreshold = 10 } = {}) {
+  constructor(executeSqlFn, schema, { flushIntervalMs = 5000, flushThreshold = 10, coreSchema = 'EMAIL_CORE_STAGING' } = {}) {
     this._executeSqlFn = executeSqlFn;
     this._schema = schema;
+    this._coreSchema = coreSchema;
     this._flushThreshold = flushThreshold;
 
     // Each queue: { items: [], waiters: [] }
@@ -39036,6 +39037,7 @@ class WriteBatcher {
       deals: { items: [], waiters: [] },
       contactDeletes: { items: [], waiters: [] },
       contacts: { items: [], waiters: [] },
+      coreContacts: { items: [], waiters: [] },
       stateUpdates: { items: [], waiters: [] },
       batchEvents: { items: [], waiters: [] },
     };
@@ -39070,6 +39072,11 @@ class WriteBatcher {
   /** Push pre-built VALUES strings for DEAL_CONTACTS insert */
   pushContacts(rows) {
     return this._push('contacts', rows)
+  }
+
+  /** Push pre-built VALUES strings for core contacts upsert (COALESCE ON CONFLICT) */
+  pushCoreContacts(rows) {
+    return this._push('coreContacts', rows)
   }
 
   /**
@@ -39215,7 +39222,14 @@ class WriteBatcher {
       }
 
       case 'contacts': {
-        const sql = `INSERT INTO ${s}.DEAL_CONTACTS (ID, DEAL_ID, CONTACT_ID, CONTACT_TYPE, NAME, EMAIL, COMPANY, TITLE, PHONE_NUMBER, IS_FAVORITE, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')}`;
+        const sql = `INSERT INTO ${s}.DEAL_CONTACTS (DEAL_ID, USER_ID, EMAIL, CONTACT_TYPE, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (DEAL_ID, USER_ID, EMAIL) DO UPDATE SET CONTACT_TYPE = COALESCE(EXCLUDED.CONTACT_TYPE, DEAL_CONTACTS.CONTACT_TYPE), UPDATED_AT = CURRENT_TIMESTAMP`;
+        await this._executeSqlFn(sql);
+        break
+      }
+
+      case 'coreContacts': {
+        const cs = this._coreSchema;
+        const sql = `INSERT INTO ${cs}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = COALESCE(EXCLUDED.NAME, CONTACTS.NAME), COMPANY_NAME = COALESCE(EXCLUDED.COMPANY_NAME, CONTACTS.COMPANY_NAME), TITLE = COALESCE(EXCLUDED.TITLE, CONTACTS.TITLE), PHONE_NUMBER = COALESCE(EXCLUDED.PHONE_NUMBER, CONTACTS.PHONE_NUMBER), UPDATED_AT = CURRENT_TIMESTAMP`;
         await this._executeSqlFn(sql);
         break
       }
@@ -39248,6 +39262,10 @@ class WriteBatcher {
   }
 }
 
+function toSqlNullable(s) {
+  return s ? `'${sanitizeString(s)}'` : 'NULL'
+}
+
 /**
  * Orchestrator that claims and processes classify batches concurrently,
  * with in-memory audit passing through save-evals, save-deals,
@@ -39259,6 +39277,7 @@ async function runClassifyPipeline() {
   const apiUrl = coreExports.getInput('api-url');
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
+  const coreSchema = sanitizeSchema(coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING');
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
   const hyperbolicKey = coreExports.getInput('hyperbolic-key');
   const primaryModel = coreExports.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
@@ -39284,7 +39303,7 @@ async function runClassifyPipeline() {
   const execNoRL = (sql) => executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit: true });
 
   // 3. Create write batcher (uses execNoRL — tokens acquired in bulk by workers)
-  const batcher = new WriteBatcher(execNoRL, schema, { flushIntervalMs, flushThreshold });
+  const batcher = new WriteBatcher(execNoRL, schema, { flushIntervalMs, flushThreshold, coreSchema });
 
   // =========================================================================
   //  CLAIM FUNCTION (inline, same pattern as claim-classify-batch)
@@ -39639,7 +39658,7 @@ async function runClassifyPipeline() {
       const dealValues = dealThreads.map((thread) => {
         const threadId = sanitizeId(thread.thread_id);
         const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
-        const dealId = v7();
+        const dealId = threadId;
         const dealName = sanitizeString(thread.deal_name || '');
         const dealType = sanitizeString(thread.deal_type || '');
         const dealValue =
@@ -39656,41 +39675,45 @@ async function runClassifyPipeline() {
     }
 
     // -----------------------------------------------------------------------
-    // Step 6: Save deal contacts via batcher (use thread_id as deal_id)
+    // Step 6: Save deal contacts via batcher (two-table upsert)
     // -----------------------------------------------------------------------
 
     if (dealThreads.length > 0) {
-      const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id));
+      const coreContactValues = [];
+      const dealContactValues = [];
 
-      // Build contact rows from thread.main_contact (email required)
-      const contactValues = [];
       for (const thread of dealThreads) {
         const mc = thread.main_contact;
         if (!mc || !mc.email) continue
 
         const threadId = sanitizeId(thread.thread_id);
-        // Use threadId as dealId directly
+        const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
         const contactEmail = sanitizeString(mc.email);
-        const name = sanitizeString(mc.name || '');
-        const company = sanitizeString(mc.company || '');
-        const title = sanitizeString(mc.title || '');
-        const phone = sanitizeString(mc.phone_number || '');
+        const nameVal = toSqlNullable(mc.name);
+        const companyVal = toSqlNullable(mc.company);
+        const titleVal = toSqlNullable(mc.title);
+        const phoneVal = toSqlNullable(mc.phone_number);
 
-        contactValues.push(
-          `('${v7()}', '${threadId}', '${contactEmail}', 'primary', '${name}', '${contactEmail}', '${company}', '${title}', '${phone}', false, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        // Core contacts — COALESCE preserves existing non-null values
+        coreContactValues.push(
+          `('${userId}', '${contactEmail}', ${nameVal}, ${companyVal}, ${titleVal}, ${phoneVal}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        );
+
+        // Deal contacts — simplified 4-column relationship upsert
+        dealContactValues.push(
+          `('${threadId}', '${userId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
         );
       }
 
-      // Delete old contacts using thread_id as deal_id
-      if (dealThreadIds.length > 0) {
-        await batcher.pushContactDeletes(dealThreadIds.map((id) => `'${id}'`));
+      if (coreContactValues.length > 0) {
+        await batcher.pushCoreContacts(coreContactValues);
       }
 
-      if (contactValues.length > 0) {
-        await batcher.pushContacts(contactValues);
+      if (dealContactValues.length > 0) {
+        await batcher.pushContacts(dealContactValues);
       }
 
-      console.log(`[run-classify-pipeline] ${contactValues.length} contacts saved`);
+      console.log(`[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`);
     }
 
     // -----------------------------------------------------------------------
