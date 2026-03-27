@@ -436,13 +436,16 @@ export async function runClassifyPipeline() {
       const quotedIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',')
       const sql = `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`
       console.log(`[run-classify-pipeline] deal UPDATE SQL: ${sql.substring(0, 500)}`)
-      await execNoRL(sql)
+      const dealResult = await execNoRL(sql)
+      console.log(`[run-classify-pipeline] deal UPDATE response: ${JSON.stringify(dealResult)}`)
     }
     if (notDealEmailIds.length > 0) {
       const quotedIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',')
       const sql = `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`
       console.log(`[run-classify-pipeline] not_deal UPDATE SQL: ${sql.substring(0, 500)}`)
-      await execNoRL(sql)
+      const notDealResult = await execNoRL(sql)
+      console.log(`[run-classify-pipeline] not_deal UPDATE response: ${JSON.stringify(notDealResult)}`)
+    }
     }
 
     console.log(
