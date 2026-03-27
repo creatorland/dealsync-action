@@ -3,7 +3,7 @@ export const AI_REQUEST_TIMEOUT_MS = 240000
 export const AI_RETRY_DELAY_MS = 2000
 export const AI_BACKOFF_MULTIPLIER = 2
 export const MAX_HTTP_RETRIES = 3
-export const MAX_TOKENS = 20480
+export const MAX_TOKENS = 51200
 
 // --- Valid categories and deal types for validation ---
 export const VALID_CATEGORIES = new Set([

@@ -34358,7 +34358,7 @@ const AI_REQUEST_TIMEOUT_MS = 240000;
 const AI_RETRY_DELAY_MS = 2000;
 const AI_BACKOFF_MULTIPLIER = 2;
 const MAX_HTTP_RETRIES = 3;
-const MAX_TOKENS = 20480;
+const MAX_TOKENS = 51200;
 
 // --- Valid categories and deal types for validation ---
 const VALID_CATEGORIES = new Set([
