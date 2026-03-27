@@ -506,5 +506,27 @@ describe('WriteBatcher', () => {
 
       batcher.stop()
     })
+
+    it('deduplicates by (USER_ID, EMAIL) within a flush batch', async () => {
+      const batcher = makeBatcher(mockExec, { flushThreshold: 100 })
+
+      // Push duplicate (user-1, alice@co.com) — second push has updated name
+      batcher.pushCoreContacts([
+        "('user-1', 'alice@co.com', 'Alice', NULL, 'CEO', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        "('user-1', 'bob@co.com', 'Bob', NULL, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      ])
+      batcher.pushCoreContacts([
+        "('user-1', 'alice@co.com', 'Alice K', 'Acme Corp', 'CEO', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+      ])
+
+      await batcher.drain()
+
+      expect(mockExec).toHaveBeenCalledTimes(1)
+      const sql = mockExec.mock.calls[0][0]
+      // Should contain only 2 rows (deduped), not 3
+      expect(sql).toContain('bob@co.com')
+      expect(sql).toContain('Alice K') // last write wins
+      expect(sql).not.toContain("'Alice',") // first version replaced
+    })
   })
 })

@@ -39248,8 +39248,19 @@ class WriteBatcher {
       }
 
       case 'coreContacts': {
+        // Dedup by (USER_ID, EMAIL) — concurrent workers may push the same contact
+        const dedupMap = new Map();
+        for (const item of items) {
+          const m = item.match(/^\('([^']*(?:''[^']*)*)',\s*'([^']*(?:''[^']*)*)'/);
+          const key = m ? `${m[1]}|${m[2]}` : item;
+          dedupMap.set(key, item); // last write wins
+        }
+        const uniqueItems = [...dedupMap.values()];
+        if (uniqueItems.length < items.length) {
+          console.log(`[write-batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`);
+        }
         const cs = this._coreSchema;
-        const sql = `INSERT INTO ${cs}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = COALESCE(EXCLUDED.NAME, CONTACTS.NAME), COMPANY_NAME = COALESCE(EXCLUDED.COMPANY_NAME, CONTACTS.COMPANY_NAME), TITLE = COALESCE(EXCLUDED.TITLE, CONTACTS.TITLE), PHONE_NUMBER = COALESCE(EXCLUDED.PHONE_NUMBER, CONTACTS.PHONE_NUMBER), UPDATED_AT = CURRENT_TIMESTAMP`;
+        const sql = `INSERT INTO ${cs}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${uniqueItems.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = COALESCE(EXCLUDED.NAME, CONTACTS.NAME), COMPANY_NAME = COALESCE(EXCLUDED.COMPANY_NAME, CONTACTS.COMPANY_NAME), TITLE = COALESCE(EXCLUDED.TITLE, CONTACTS.TITLE), PHONE_NUMBER = COALESCE(EXCLUDED.PHONE_NUMBER, CONTACTS.PHONE_NUMBER), UPDATED_AT = CURRENT_TIMESTAMP`;
         await this._executeSqlFn(sql);
         break
       }
