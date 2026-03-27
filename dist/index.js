@@ -27555,7 +27555,13 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
 
       if (!resp.ok) {
         const body = await resp.text();
-        console.error(`[sxt-client] SxT ${resp.status} error. SQL: ${sql.substring(0, 1000)}`);
+        const headers = Object.fromEntries(resp.headers.entries());
+        console.error(
+          `[sxt-client] SxT ${resp.status} error\n` +
+          `  SQL: ${sql.substring(0, 1500)}\n` +
+          `  Response body: ${body}\n` +
+          `  Response headers: ${JSON.stringify(headers)}`,
+        );
         throw new Error(`SxT ${resp.status}: ${body}`)
       }
       return resp.json()
@@ -39191,6 +39197,10 @@ class WriteBatcher {
       await this._executeQueue(queueName, items);
       for (const w of waiters) w.resolve();
     } catch (err) {
+      console.error(
+        `[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}\n` +
+        `  First item: ${items[0]?.substring?.(0, 300) || JSON.stringify(items[0])?.substring(0, 300)}`,
+      );
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
         console.error(

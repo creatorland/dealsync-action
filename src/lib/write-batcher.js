@@ -161,6 +161,10 @@ export class WriteBatcher {
       await this._executeQueue(queueName, items)
       for (const w of waiters) w.resolve()
     } catch (err) {
+      console.error(
+        `[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}\n` +
+        `  First item: ${items[0]?.substring?.(0, 300) || JSON.stringify(items[0])?.substring(0, 300)}`,
+      )
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
         console.error(

@@ -207,7 +207,13 @@ export async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = fa
 
       if (!resp.ok) {
         const body = await resp.text()
-        console.error(`[sxt-client] SxT ${resp.status} error. SQL: ${sql.substring(0, 1000)}`)
+        const headers = Object.fromEntries(resp.headers.entries())
+        console.error(
+          `[sxt-client] SxT ${resp.status} error\n` +
+          `  SQL: ${sql.substring(0, 1500)}\n` +
+          `  Response body: ${body}\n` +
+          `  Response headers: ${JSON.stringify(headers)}`,
+        )
         throw new Error(`SxT ${resp.status}: ${body}`)
       }
       return resp.json()
