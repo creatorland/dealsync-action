@@ -1,4 +1,5 @@
-name: dealsync-compact-sync
+name: dealsync-sync
+authority: '0x553b60381dC74493d03b2865C818350f3347Ac7f'
 on:
   workflow_dispatch:
 
