@@ -5,7 +5,8 @@
 
 import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
-import { sanitizeId, sanitizeString, sanitizeSchema, STATUS } from './queries.js'
+import { sanitizeId, sanitizeSchema, STATUS } from './queries.js'
+import { dealStates as dealStatesSql, batchEvents as batchEventsSql } from './sql/index.js'
 
 /**
  * Concurrency pool that claims and processes batches.
@@ -92,10 +93,10 @@ const STUCK_INTERVAL_MINUTES = 5
  */
 export async function sweepStuckRows(exec, schema, { activeStatus, batchType, maxRetries }) {
   const safeSchema = sanitizeSchema(schema)
-  const statusSql = sanitizeString(activeStatus)
+  const statusSql = activeStatus
 
   const exhausted = await exec(
-    `SELECT ds.BATCH_ID FROM ${safeSchema}.DEAL_STATES ds LEFT JOIN ${safeSchema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${statusSql}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${STUCK_INTERVAL_MINUTES}' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) >= ${maxRetries}`,
+    dealStatesSql.findDeadBatches(safeSchema, statusSql, STUCK_INTERVAL_MINUTES, maxRetries),
   )
 
   if (!exhausted || exhausted.length === 0) {
@@ -107,7 +108,7 @@ export async function sweepStuckRows(exec, schema, { activeStatus, batchType, ma
     const bid = row.BATCH_ID
     const safeBid = sanitizeId(bid)
     const countRows = await exec(
-      `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE BATCH_ID = '${safeBid}' AND STATUS = '${statusSql}'`,
+      dealStatesSql.countByBatchAndStatus(safeSchema, safeBid, statusSql),
     )
     const n = Number(countRows?.[0]?.C ?? 0) || 0
     if (n === 0) {
@@ -117,7 +118,7 @@ export async function sweepStuckRows(exec, schema, { activeStatus, batchType, ma
       continue
     }
     await exec(
-      `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${statusSql}'`,
+      dealStatesSql.updateStatusByBatch(safeSchema, safeBid, statusSql, STATUS.FAILED),
     )
     await insertBatchEvent(exec, safeSchema, {
       triggerHash: uuidv7(),
@@ -157,16 +158,14 @@ export async function sweepOrphanedRows(exec, schema, { statuses, staleMinutes }
   }
   const safeStaleMinutes = minutesNumber
 
-  const literals = statuses.map((s) => `'${sanitizeString(s)}'`).join(',')
-
   const countRows = await exec(
-    `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${safeStaleMinutes}' MINUTE`,
+    dealStatesSql.countOrphaned(safeSchema, statuses, safeStaleMinutes),
   )
   const n = Number(countRows?.[0]?.C ?? 0) || 0
   if (n === 0) return 0
 
   await exec(
-    `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${safeStaleMinutes}' MINUTE`,
+    dealStatesSql.markOrphanedAsFailed(safeSchema, statuses, safeStaleMinutes),
   )
 
   core.info(
@@ -187,13 +186,5 @@ export async function insertBatchEvent(
   schema,
   { triggerHash, batchId, batchType, eventType },
 ) {
-  const safeSchema = sanitizeSchema(schema)
-  const safeTriggerHash = sanitizeId(triggerHash)
-  const safeBatchId = sanitizeId(batchId)
-  const safeBatchType = sanitizeString(batchType)
-  const safeEventType = sanitizeString(eventType)
-
-  const sql = `INSERT INTO ${safeSchema}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ('${safeTriggerHash}', '${safeBatchId}', '${safeBatchType}', '${safeEventType}', CURRENT_TIMESTAMP) ON CONFLICT (TRIGGER_HASH) DO UPDATE SET EVENT_TYPE = EXCLUDED.EVENT_TYPE, CREATED_AT = CURRENT_TIMESTAMP`
-
-  await executeSqlFn(sql)
+  await executeSqlFn(batchEventsSql.upsert(schema, triggerHash, batchId, batchType, eventType))
 }
