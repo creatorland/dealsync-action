@@ -1,13 +1,7 @@
 import * as core from '@actions/core'
-import {
-  saveResults,
-  detection,
-  STATUS,
-  sanitizeId,
-  sanitizeSchema,
-  toSqlIdList,
-} from '../lib/queries.js'
+import { saveResults, sanitizeId, sanitizeSchema } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
+import { dealStates as dealStatesSql } from '../lib/sql/index.js'
 
 /**
  * Step 4: Read audit by batch_id → update deal_states to terminal status.
@@ -45,7 +39,7 @@ export async function runUpdateDealStates() {
     apiUrl,
     jwt,
     biscuit,
-    `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+    dealStatesSql.selectEmailAndThreadIdsByBatch(schema, batchId),
   )
 
   const metadataByThread = {}
@@ -73,14 +67,14 @@ export async function runUpdateDealStates() {
 
   // Issue exactly 2 UPDATEs (one for deals, one for not_deals)
   if (dealEmailIds.length > 0) {
-    await executeSql(apiUrl, jwt, biscuit, detection.updateDeals(schema, toSqlIdList(dealEmailIds)))
+    await executeSql(apiUrl, jwt, biscuit, dealStatesSql.updateStatusByIds(schema, dealEmailIds.map(id => `'${sanitizeId(id)}'`), 'deal'))
   }
   if (notDealEmailIds.length > 0) {
     await executeSql(
       apiUrl,
       jwt,
       biscuit,
-      detection.updateNotDeal(schema, toSqlIdList(notDealEmailIds)),
+      dealStatesSql.updateStatusByIds(schema, notDealEmailIds.map(id => `'${sanitizeId(id)}'`), 'not_deal'),
     )
   }
 

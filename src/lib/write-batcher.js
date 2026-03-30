@@ -6,6 +6,15 @@
  * the items have been flushed (or rejects on flush error).
  */
 
+import {
+  evaluations as evalSql,
+  deals as dealsSql,
+  dealContacts as dealContactsSql,
+  contacts as contactsSql,
+  batchEvents as batchEventsSql,
+  dealStates as dealStatesSql,
+} from './sql/index.js'
+
 export class WriteBatcher {
   /**
    * @param {Function} executeSqlFn — bound (sql) => executeSql(apiUrl, jwt, biscuit, sql)
@@ -189,32 +198,27 @@ export class WriteBatcher {
 
     switch (queueName) {
       case 'evals': {
-        const sql = `INSERT INTO ${s}.EMAIL_THREAD_EVALUATIONS (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (THREAD_ID) DO UPDATE SET AI_EVALUATION_AUDIT_ID = EXCLUDED.AI_EVALUATION_AUDIT_ID, AI_INSIGHT = EXCLUDED.AI_INSIGHT, AI_SUMMARY = EXCLUDED.AI_SUMMARY, IS_DEAL = EXCLUDED.IS_DEAL, LIKELY_SCAM = EXCLUDED.LIKELY_SCAM, AI_SCORE = EXCLUDED.AI_SCORE, UPDATED_AT = CURRENT_TIMESTAMP`
-        await this._executeSqlFn(sql)
+        await this._executeSqlFn(evalSql.upsert(s, items))
         break
       }
 
       case 'dealDeletes': {
-        const sql = `DELETE FROM ${s}.DEALS WHERE THREAD_ID IN (${items.join(',')})`
-        await this._executeSqlFn(sql)
+        await this._executeSqlFn(dealsSql.deleteByThreadIds(s, items))
         break
       }
 
       case 'deals': {
-        const sql = `INSERT INTO ${s}.DEALS (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (THREAD_ID) DO UPDATE SET EMAIL_THREAD_EVALUATION_ID = EXCLUDED.EMAIL_THREAD_EVALUATION_ID, DEAL_NAME = EXCLUDED.DEAL_NAME, DEAL_TYPE = EXCLUDED.DEAL_TYPE, CATEGORY = EXCLUDED.CATEGORY, VALUE = EXCLUDED.VALUE, CURRENCY = EXCLUDED.CURRENCY, BRAND = EXCLUDED.BRAND, UPDATED_AT = CURRENT_TIMESTAMP`
-        await this._executeSqlFn(sql)
+        await this._executeSqlFn(dealsSql.upsert(s, items))
         break
       }
 
       case 'contactDeletes': {
-        const sql = `DELETE FROM ${s}.DEAL_CONTACTS WHERE DEAL_ID IN (${items.join(',')})`
-        await this._executeSqlFn(sql)
+        await this._executeSqlFn(dealContactsSql.deleteByDealIds(s, items))
         break
       }
 
       case 'contacts': {
-        const sql = `INSERT INTO ${s}.DEAL_CONTACTS (DEAL_ID, USER_ID, EMAIL, CONTACT_TYPE, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (DEAL_ID, USER_ID, EMAIL) DO UPDATE SET CONTACT_TYPE = EXCLUDED.CONTACT_TYPE, UPDATED_AT = CURRENT_TIMESTAMP`
-        await this._executeSqlFn(sql)
+        await this._executeSqlFn(dealContactsSql.upsert(s, items))
         break
       }
 
@@ -231,8 +235,7 @@ export class WriteBatcher {
           console.log(`[write-batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`)
         }
         const cs = this._coreSchema
-        const sql = `INSERT INTO ${cs}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${uniqueItems.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = EXCLUDED.NAME, COMPANY_NAME = EXCLUDED.COMPANY_NAME, TITLE = EXCLUDED.TITLE, PHONE_NUMBER = EXCLUDED.PHONE_NUMBER, UPDATED_AT = CURRENT_TIMESTAMP`
-        await this._executeSqlFn(sql)
+        await this._executeSqlFn(contactsSql.upsert(cs, uniqueItems))
         break
       }
 
@@ -245,19 +248,16 @@ export class WriteBatcher {
           allNotDealIds.push(...item.notDealEmailIds)
         }
         if (allDealIds.length > 0) {
-          const sql = `UPDATE ${s}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${allDealIds.join(',')})`
-          await this._executeSqlFn(sql)
+          await this._executeSqlFn(dealStatesSql.updateStatusByIds(s, allDealIds, 'deal'))
         }
         if (allNotDealIds.length > 0) {
-          const sql = `UPDATE ${s}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${allNotDealIds.join(',')})`
-          await this._executeSqlFn(sql)
+          await this._executeSqlFn(dealStatesSql.updateStatusByIds(s, allNotDealIds, 'not_deal'))
         }
         break
       }
 
       case 'batchEvents': {
-        const sql = `INSERT INTO ${s}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ${items.join(', ')} ON CONFLICT (TRIGGER_HASH) DO UPDATE SET EVENT_TYPE = EXCLUDED.EVENT_TYPE, CREATED_AT = CURRENT_TIMESTAMP`
-        await this._executeSqlFn(sql)
+        await this._executeSqlFn(batchEventsSql.upsertBulk(s, items))
         break
       }
     }

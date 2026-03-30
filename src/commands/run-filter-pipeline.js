@@ -5,6 +5,7 @@ import { runPool, insertBatchEvent, sweepStuckRows } from '../lib/pipeline.js'
 import { authenticate, executeSql, acquireRateLimitToken } from '../lib/sxt-client.js'
 import { isRejected } from '../lib/filter-rules.js'
 import { fetchEmails } from '../lib/email-client.js'
+import { dealStates as dealStatesSql } from '../lib/sql/index.js'
 
 /**
  * Orchestrator that claims and processes filter batches concurrently
@@ -46,14 +47,10 @@ export async function runFilterPipeline() {
     const batchId = uuidv7()
 
     // Atomically claim pending rows
-    await exec(
-      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTERING}', BATCH_ID = '${batchId}', UPDATED_AT = CURRENT_TIMESTAMP WHERE EMAIL_METADATA_ID IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}' LIMIT ${batchSize})`,
-    )
+    await exec(dealStatesSql.claimFilterBatch(schema, batchId, batchSize))
 
     // SELECT the claimed rows
-    const rows = await exec(
-      `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
-    )
+    const rows = await exec(dealStatesSql.selectEmailsByBatch(schema, batchId))
 
     const count = rows ? rows.length : 0
     console.log(`[run-filter-pipeline] claimed ${count} pending rows`)
@@ -74,7 +71,7 @@ export async function runFilterPipeline() {
     console.log(`[run-filter-pipeline] no pending rows, checking for stuck batches`)
 
     const stuckBatches = await exec(
-      `SELECT ds.BATCH_ID, COUNT(DISTINCT be.TRIGGER_HASH) AS ATTEMPTS FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${STATUS.FILTERING}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '5' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) < ${maxRetries} LIMIT 1`,
+      dealStatesSql.findStuckBatches(schema, STATUS.FILTERING, 5, maxRetries),
     )
 
     if (!stuckBatches || stuckBatches.length === 0) {
@@ -91,14 +88,10 @@ export async function runFilterPipeline() {
     )
 
     // SELECT its rows
-    const stuckRows = await exec(
-      `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${stuckBatchId}'`,
-    )
+    const stuckRows = await exec(dealStatesSql.selectEmailsByBatch(schema, stuckBatchId))
 
     // UPDATE UPDATED_AT to prevent other instances from grabbing it
-    await exec(
-      `UPDATE ${schema}.DEAL_STATES SET UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${stuckBatchId}'`,
-    )
+    await exec(dealStatesSql.refreshBatchTimestamp(schema, stuckBatchId))
 
     // Insert batch event with retrigger type and new trigger hash
     const triggerHash = uuidv7()
@@ -157,18 +150,14 @@ export async function runFilterPipeline() {
 
     // d. UPDATE passed IDs -> pending_classification
     if (filteredIds.length > 0) {
-      const quotedIds = filteredIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-      await execNoRL(
-        `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.PENDING_CLASSIFICATION}', UPDATED_AT = CURRENT_TIMESTAMP WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-      )
+      const quotedIds = filteredIds.map((id) => `'${sanitizeId(id)}'`)
+      await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedIds, STATUS.PENDING_CLASSIFICATION))
     }
 
     // e. UPDATE rejected IDs -> filter_rejected
     if (rejectedIds.length > 0) {
-      const quotedIds = rejectedIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-      await execNoRL(
-        `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTER_REJECTED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-      )
+      const quotedIds = rejectedIds.map((id) => `'${sanitizeId(id)}'`)
+      await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedIds, STATUS.FILTER_REJECTED))
     }
 
     // f. Insert BATCH_EVENTS with eventType: 'complete'
@@ -189,9 +178,7 @@ export async function runFilterPipeline() {
     const bid = batch.batch_id
     if (!bid) return
     const safeBid = sanitizeId(bid)
-    await execNoRL(
-      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${STATUS.FILTERING}'`,
-    )
+    await execNoRL(dealStatesSql.updateStatusByBatch(schema, safeBid, STATUS.FILTERING, STATUS.FAILED))
     await insertBatchEvent(execNoRL, schema, {
       triggerHash: uuidv7(),
       batchId: bid,

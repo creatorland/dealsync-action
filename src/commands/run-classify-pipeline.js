@@ -7,6 +7,7 @@ import { buildPrompt } from '../lib/build-prompt.js'
 import { fetchEmails } from '../lib/email-client.js'
 import { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
 import { WriteBatcher } from '../lib/write-batcher.js'
+import { dealStates as dealStatesSql, evaluations as evalSql } from '../lib/sql/index.js'
 
 function toSqlNullable(s) {
   return s ? `'${sanitizeString(s)}'` : 'NULL'
@@ -63,14 +64,10 @@ export async function runClassifyPipeline() {
     const batchId = uuidv7()
 
     // Atomic UPDATE for pending_classification threads (thread-aware, NOT EXISTS for pending/filtering)
-    const claimSql = `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.CLASSIFYING}', BATCH_ID = '${batchId}', UPDATED_AT = CURRENT_TIMESTAMP WHERE THREAD_ID IN (SELECT DISTINCT ds.THREAD_ID FROM ${schema}.DEAL_STATES ds WHERE ds.STATUS = '${STATUS.PENDING_CLASSIFICATION}' AND NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds2 WHERE ds2.THREAD_ID = ds.THREAD_ID AND ds2.SYNC_STATE_ID = ds.SYNC_STATE_ID AND ds2.STATUS IN ('${STATUS.PENDING}', '${STATUS.FILTERING}')) LIMIT ${classifyBatchSize}) AND STATUS = '${STATUS.PENDING_CLASSIFICATION}'`
-
-    await exec(claimSql)
+    await exec(dealStatesSql.claimClassifyBatch(schema, batchId, classifyBatchSize))
 
     // SELECT the claimed rows
-    const rows = await exec(
-      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${schema}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${batchId}'`,
-    )
+    const rows = await exec(dealStatesSql.selectEmailsWithEvalAndCreator(schema, batchId))
 
     const count = rows ? rows.length : 0
     console.log(`[run-classify-pipeline] claimed ${count} pending rows`)
@@ -91,7 +88,7 @@ export async function runClassifyPipeline() {
     console.log(`[run-classify-pipeline] no pending rows, checking for stuck batches`)
 
     const stuckBatches = await exec(
-      `SELECT ds.BATCH_ID, COUNT(DISTINCT be.TRIGGER_HASH) AS ATTEMPTS FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${STATUS.CLASSIFYING}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '5' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) < ${maxRetries} LIMIT 1`,
+      dealStatesSql.findStuckBatches(schema, STATUS.CLASSIFYING, 5, maxRetries),
     )
 
     if (!stuckBatches || stuckBatches.length === 0) {
@@ -108,14 +105,10 @@ export async function runClassifyPipeline() {
     )
 
     // SELECT its rows
-    const stuckRows = await exec(
-      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${schema}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${stuckBatchId}'`,
-    )
+    const stuckRows = await exec(dealStatesSql.selectEmailsWithEvalAndCreator(schema, stuckBatchId))
 
     // UPDATE UPDATED_AT to prevent other instances from grabbing it
-    await exec(
-      `UPDATE ${schema}.DEAL_STATES SET UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${stuckBatchId}'`,
-    )
+    await exec(dealStatesSql.refreshBatchTimestamp(schema, stuckBatchId))
 
     // Insert batch event with retrigger type and new trigger hash
     const triggerHash = uuidv7()
@@ -202,10 +195,8 @@ export async function runClassifyPipeline() {
         )
 
         // Look up existing evaluations for unfetchable threads
-        const quotedUnfetchable = unfetchableThreadIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-        const existingEvals = await execNoRL(
-          `SELECT THREAD_ID, IS_DEAL FROM ${schema}.EMAIL_THREAD_EVALUATIONS WHERE THREAD_ID IN (${quotedUnfetchable})`,
-        )
+        const quotedUnfetchable = unfetchableThreadIds.map((id) => `'${sanitizeId(id)}'`)
+        const existingEvals = await execNoRL(evalSql.selectByThreadIds(schema, quotedUnfetchable))
         const evalByThread = {}
         for (const e of existingEvals || []) {
           evalByThread[e.THREAD_ID] = e.IS_DEAL
@@ -226,19 +217,15 @@ export async function runClassifyPipeline() {
         }
 
         if (unfetchableDealIds.length > 0) {
-          const quotedIds = unfetchableDealIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-          await execNoRL(
-            `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-          )
+          const quotedDealIds = unfetchableDealIds.map((id) => `'${sanitizeId(id)}'`)
+          await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedDealIds, 'deal'))
           console.log(
             `[run-classify-pipeline] ${unfetchableDealIds.length} unfetchable rows → deal (previous eval)`,
           )
         }
         if (unfetchableNotDealIds.length > 0) {
-          const quotedIds = unfetchableNotDealIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-          await execNoRL(
-            `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-          )
+          const quotedNotDealIds = unfetchableNotDealIds.map((id) => `'${sanitizeId(id)}'`)
+          await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedNotDealIds, 'not_deal'))
           console.log(
             `[run-classify-pipeline] ${unfetchableNotDealIds.length} unfetchable rows → not_deal`,
           )
@@ -545,16 +532,12 @@ export async function runClassifyPipeline() {
 
     // Write state updates directly (not through batcher) to ensure they commit
     if (dealEmailIds.length > 0) {
-      const quotedIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-      await execNoRL(
-        `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-      )
+      const quotedIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`)
+      await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedIds, 'deal'))
     }
     if (notDealEmailIds.length > 0) {
-      const quotedIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',')
-      await execNoRL(
-        `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-      )
+      const quotedNDIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`)
+      await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedNDIds, 'not_deal'))
     }
 
     console.log(
@@ -581,7 +564,7 @@ export async function runClassifyPipeline() {
     if (!bid) return
     const safeBid = sanitizeId(bid)
     await execNoRL(
-      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${STATUS.CLASSIFYING}'`,
+      dealStatesSql.updateStatusByBatch(schema, safeBid, STATUS.CLASSIFYING, STATUS.FAILED),
     )
     await insertBatchEvent(execNoRL, schema, {
       triggerHash: uuidv7(),

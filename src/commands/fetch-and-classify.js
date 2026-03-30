@@ -9,6 +9,7 @@ import {
 } from '../lib/ai-client.js'
 import { saveResults, sanitizeString, sanitizeSchema, sanitizeId } from '../lib/queries.js'
 import { authenticate, executeSql, withTimeout } from '../lib/sxt-client.js'
+import { dealStates as dealStatesSql } from '../lib/sql/index.js'
 
 /**
  * Step 1: Fetch content + call AI + save audit checkpoint.
@@ -47,8 +48,7 @@ export async function runFetchAndClassify() {
     apiUrl,
     jwt,
     biscuit,
-    `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, SYNC_STATE_ID, THREAD_ID
-    FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+    dealStatesSql.selectEmailsByBatch(schema, batchId),
   )
 
   if (!metadataRows || metadataRows.length === 0) {

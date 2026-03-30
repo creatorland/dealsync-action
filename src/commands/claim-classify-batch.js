@@ -3,6 +3,7 @@ import * as core from '@actions/core'
 import { STATUS, sanitizeSchema } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
 import { insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
+import { dealStates as dealStatesSql } from '../lib/sql/index.js'
 
 /**
  * Atomically claims pending_classification deal_states for classification.
@@ -35,13 +36,10 @@ export async function runClaimClassifyBatch() {
   const batchId = uuidv7()
 
   // 3. Claim threads where all messages have cleared filtering
-  const claimSql = `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.CLASSIFYING}', BATCH_ID = '${batchId}', UPDATED_AT = CURRENT_TIMESTAMP WHERE THREAD_ID IN (SELECT DISTINCT ds.THREAD_ID FROM ${schema}.DEAL_STATES ds WHERE ds.STATUS = '${STATUS.PENDING_CLASSIFICATION}' AND NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds2 WHERE ds2.THREAD_ID = ds.THREAD_ID AND ds2.SYNC_STATE_ID = ds.SYNC_STATE_ID AND ds2.STATUS IN ('${STATUS.PENDING}', '${STATUS.FILTERING}')) LIMIT ${batchSize}) AND STATUS = '${STATUS.PENDING_CLASSIFICATION}'`
-
-  await exec(claimSql)
+  await exec(dealStatesSql.claimClassifyBatch(schema, batchId, batchSize))
 
   // 4. SELECT claimed rows
-  const selectSql = `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`
-  const rows = await exec(selectSql)
+  const rows = await exec(dealStatesSql.selectEmailsByBatch(schema, batchId))
 
   // 5. If claimed > 0, insert batch event and return
   if (rows && rows.length > 0) {
@@ -57,21 +55,17 @@ export async function runClaimClassifyBatch() {
 
   // 6. No rows claimed — look for stuck batches
   console.log('[claim-classify-batch] no pending rows, checking for stuck batches')
-  const stuckSql = `SELECT ds.BATCH_ID, COUNT(DISTINCT be.TRIGGER_HASH) AS ATTEMPTS FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${STATUS.CLASSIFYING}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '5' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) < ${maxRetries} LIMIT 1`
-
-  const stuckRows = await exec(stuckSql)
+  const stuckRows = await exec(dealStatesSql.findStuckBatches(schema, STATUS.CLASSIFYING, 5, maxRetries))
 
   if (stuckRows && stuckRows.length > 0) {
     const stuckBatchId = stuckRows[0].BATCH_ID
     const attempts = parseInt(stuckRows[0].ATTEMPTS, 10)
 
     // 7. SELECT its rows
-    const stuckSelectSql = `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${stuckBatchId}'`
-    const stuckBatchRows = await exec(stuckSelectSql)
+    const stuckBatchRows = await exec(dealStatesSql.selectEmailsByBatch(schema, stuckBatchId))
 
     // UPDATE UPDATED_AT to reset the stuck timer
-    const touchSql = `UPDATE ${schema}.DEAL_STATES SET UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${stuckBatchId}'`
-    await exec(touchSql)
+    await exec(dealStatesSql.refreshBatchTimestamp(schema, stuckBatchId))
 
     // Insert batch event with retrigger type and new triggerHash
     const triggerHash = uuidv7()

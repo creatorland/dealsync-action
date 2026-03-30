@@ -2,6 +2,7 @@ import * as core from '@actions/core'
 import { sanitizeSchema, sanitizeId } from '../lib/queries.js'
 import { authenticate, executeSql, withTimeout } from '../lib/sxt-client.js'
 import { isRejected } from '../lib/filter-rules.js'
+import { dealStates as dealStatesSql } from '../lib/sql/index.js'
 
 /**
  * Combined fetch-headers + filter command.
@@ -30,7 +31,7 @@ export async function runFetchAndFilter() {
     apiUrl,
     jwt,
     biscuit,
-    `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, SYNC_STATE_ID, THREAD_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+    dealStatesSql.selectEmailsByBatch(schema, batchId),
   )
 
   if (!metadataRows || metadataRows.length === 0) {
