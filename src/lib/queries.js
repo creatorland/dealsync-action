@@ -12,6 +12,8 @@
  *   filtering | classifying | pending_classification → failed (terminal: dead-letter, stuck sweep, orphan sweep)
  */
 
+import { audits } from './sql/index.js'
+
 // ============================================================
 // STATUS CONSTANTS
 // ============================================================
@@ -46,19 +48,8 @@ export const detection = {
 // ============================================================
 
 export const saveResults = {
-  /** Check if audit already exists for this batch (checkpoint) */
-  getAuditByBatchId: (schema, batchId) =>
-    `SELECT AI_EVALUATION FROM ${schema}.AI_EVALUATION_AUDITS WHERE BATCH_ID = '${batchId}'`,
-
-  /** Insert audit — only after successful AI JSON parse (checkpoint) */
-  insertAudit: (
-    schema,
-    { id, batchId, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation },
-  ) =>
-    `INSERT INTO ${schema}.AI_EVALUATION_AUDITS
-      (ID, BATCH_ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT)
-    VALUES
-      ('${id}', '${batchId}', ${threadCount}, ${emailCount}, ${cost}, ${inputTokens}, ${outputTokens}, '${model}', '${evaluation}', CURRENT_TIMESTAMP)`,
+  getAuditByBatchId: (schema, batchId) => audits.selectByBatch(schema, batchId),
+  insertAudit: (schema, params) => audits.insert(schema, params),
 }
 
 // ============================================================
