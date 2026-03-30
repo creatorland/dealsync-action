@@ -1,6 +1,7 @@
 import * as core from '@actions/core'
 import { sanitizeId, sanitizeString, sanitizeSchema, saveResults } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
+import { deals as dealsSql, contacts as contactsSql, dealContacts as dealContactsSql } from '../lib/sql/index.js'
 
 function toSqlNullable(s) {
   return s ? `'${sanitizeString(s)}'` : 'NULL'
@@ -50,13 +51,13 @@ export async function runSaveDealContacts() {
 
   // Look up deals to get USER_ID per thread
   const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id))
-  const quotedIds = dealThreadIds.map((id) => `'${id}'`).join(',')
+  const quotedIds = dealThreadIds.map((id) => `'${id}'`)
 
   const deals = await executeSql(
     apiUrl,
     jwt,
     biscuit,
-    `SELECT ID, THREAD_ID, USER_ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`,
+    dealsSql.selectByThreadIds(schema, quotedIds),
   )
 
   const dealByThread = {}
@@ -106,7 +107,7 @@ export async function runSaveDealContacts() {
         apiUrl,
         jwt,
         biscuit,
-        `INSERT INTO ${coreSchema}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${coreContactValues.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = EXCLUDED.NAME, COMPANY_NAME = EXCLUDED.COMPANY_NAME, TITLE = EXCLUDED.TITLE, PHONE_NUMBER = EXCLUDED.PHONE_NUMBER, UPDATED_AT = CURRENT_TIMESTAMP`,
+        contactsSql.upsert(coreSchema, coreContactValues),
       )
     } catch (err) {
       console.error(`[save-deal-contacts] core contacts upsert failed (non-fatal): ${err.message}`)
@@ -119,7 +120,7 @@ export async function runSaveDealContacts() {
       apiUrl,
       jwt,
       biscuit,
-      `INSERT INTO ${schema}.DEAL_CONTACTS (DEAL_ID, USER_ID, EMAIL, CONTACT_TYPE, CREATED_AT, UPDATED_AT) VALUES ${dealContactValues.join(', ')} ON CONFLICT (DEAL_ID, USER_ID, EMAIL) DO UPDATE SET CONTACT_TYPE = EXCLUDED.CONTACT_TYPE, UPDATED_AT = CURRENT_TIMESTAMP`,
+      dealContactsSql.upsert(schema, dealContactValues),
     )
   }
 

@@ -1,13 +1,7 @@
 import * as core from '@actions/core'
-import {
-  saveResults,
-  detection,
-  STATUS,
-  sanitizeId,
-  sanitizeSchema,
-  toSqlIdList,
-} from '../lib/queries.js'
+import { saveResults, detection, sanitizeId, sanitizeSchema, toSqlIdList } from '../lib/queries.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
+import { dealStates as dealStatesSql } from '../lib/sql/index.js'
 
 /**
  * Step 4: Read audit by batch_id → update deal_states to terminal status.
@@ -45,7 +39,7 @@ export async function runUpdateDealStates() {
     apiUrl,
     jwt,
     biscuit,
-    `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+    dealStatesSql.selectEmailAndThreadIdsByBatch(schema, batchId),
   )
 
   const metadataByThread = {}
