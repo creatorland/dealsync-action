@@ -27258,72 +27258,8 @@ function requireCore () {
 
 var coreExports = requireCore();
 
-/**
- * Shared SQL queries for Dealsync W3 workflow actions.
- *
- * All queries target DEAL_STATES (not EMAIL_METADATA).
- * All column names UPPERCASE (SxT convention).
- * Schema is passed as a parameter — never hardcoded.
- * IDs must be sanitized before interpolation.
- *
- * Status-based state machine:
- *   pending → filtering → pending_classification → classifying → deal | not_deal
- *   filtering → filter_rejected (terminal)
- *   filtering | classifying | pending_classification → failed (terminal: dead-letter, stuck sweep, orphan sweep)
- */
-
-// ============================================================
-// STATUS CONSTANTS
-// ============================================================
-
-const STATUS = {
-  PENDING: 'pending',
-  FILTERING: 'filtering',
-  PENDING_CLASSIFICATION: 'pending_classification',
-  CLASSIFYING: 'classifying',
-  DEAL: 'deal',
-  NOT_DEAL: 'not_deal',
-  FILTER_REJECTED: 'filter_rejected',
-  FAILED: 'failed',
-};
-
-// ============================================================
-// DETECTION PROCESSOR QUERIES
-// ============================================================
-
-const detection = {
-  /** Move deal deal_states to deal status */
-  updateDeals: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.DEAL}' WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
-
-  /** Move non-deal deal_states to not_deal status */
-  updateNotDeal: (schema, sqlQuotedIds) =>
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.NOT_DEAL}' WHERE EMAIL_METADATA_ID IN (${sqlQuotedIds})`,
-};
-
-// ============================================================
-// SAVE RESULTS QUERIES (detection pipeline DML)
-// ============================================================
-
-const saveResults = {
-  /** Check if audit already exists for this batch (checkpoint) */
-  getAuditByBatchId: (schema, batchId) =>
-    `SELECT AI_EVALUATION FROM ${schema}.AI_EVALUATION_AUDITS WHERE BATCH_ID = '${batchId}'`,
-
-  /** Insert audit — only after successful AI JSON parse (checkpoint) */
-  insertAudit: (
-    schema,
-    { id, batchId, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation },
-  ) =>
-    `INSERT INTO ${schema}.AI_EVALUATION_AUDITS
-      (ID, BATCH_ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT)
-    VALUES
-      ('${id}', '${batchId}', ${threadCount}, ${emailCount}, ${cost}, ${inputTokens}, ${outputTokens}, '${model}', '${evaluation}', CURRENT_TIMESTAMP)`,
-};
-
-// ============================================================
-// UTILITIES
-// ============================================================
+// SQL sanitization utilities.
+// Extracted to break circular dependency between queries.js and sql builders.
 
 function sanitizeId(id) {
   if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
@@ -27340,16 +27276,68 @@ function sanitizeString(s) {
     .replace(/\\/g, '\\\\') // escape backslashes
 }
 
-function toSqlIdList(ids) {
-  return ids.map((id) => `'${sanitizeId(id)}'`).join(',')
-}
-
 function sanitizeSchema(schema) {
   if (!/^[a-zA-Z0-9_]+$/.test(schema)) {
     throw new Error(`Invalid schema: ${schema}`)
   }
   return schema
 }
+
+const audits = {
+  selectByBatch: (schema, batchId) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    return `SELECT AI_EVALUATION FROM ${s}.AI_EVALUATION_AUDITS WHERE BATCH_ID = '${bid}'`
+  },
+
+  insert: (
+    schema,
+    { id, batchId, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation },
+  ) => {
+    const s = sanitizeSchema(schema);
+    const safeId = sanitizeId(id);
+    const safeBid = sanitizeId(batchId);
+    const safeModel = sanitizeString(model);
+    const safeEval = sanitizeString(evaluation);
+    return `INSERT INTO ${s}.AI_EVALUATION_AUDITS (ID, BATCH_ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT) VALUES ('${safeId}', '${safeBid}', ${Number(threadCount)}, ${Number(emailCount)}, ${Number(cost)}, ${Number(inputTokens)}, ${Number(outputTokens)}, '${safeModel}', '${safeEval}', CURRENT_TIMESTAMP)`
+  },
+};
+
+/**
+ * Shared SQL queries for Dealsync W3 workflow actions.
+ *
+ * All queries target DEAL_STATES (not EMAIL_METADATA).
+ * All column names UPPERCASE (SxT convention).
+ * Schema is passed as a parameter — never hardcoded.
+ * IDs must be sanitized before interpolation.
+ *
+ * Status-based state machine:
+ *   pending → filtering → pending_classification → classifying → deal | not_deal
+ *   filtering → filter_rejected (terminal)
+ *   filtering | classifying | pending_classification → failed (terminal: dead-letter, stuck sweep, orphan sweep)
+ */
+
+
+// ============================================================
+// STATUS CONSTANTS
+// ============================================================
+
+const STATUS = {
+  FILTERING: 'filtering',
+  PENDING_CLASSIFICATION: 'pending_classification',
+  CLASSIFYING: 'classifying',
+  FILTER_REJECTED: 'filter_rejected',
+  FAILED: 'failed',
+};
+
+// ============================================================
+// SAVE RESULTS QUERIES (detection pipeline DML)
+// ============================================================
+
+const saveResults = {
+  getAuditByBatchId: (schema, batchId) => audits.selectByBatch(schema, batchId),
+  insertAudit: (schema, params) => audits.insert(schema, params),
+};
 
 /**
  * SxT client for dealsync-action.
@@ -27579,6 +27567,178 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
   throw new Error('SxT query failed after all retries')
 }
 
+// src/lib/sql/deal-states.js
+//
+// DEAL_STATES table SQL builders.
+// Pure functions: params in, SQL string out. No DB connection, no side effects.
+//
+// SxT constraints:
+//   - No CTEs (WITH ... AS)
+//   - No division operator
+//   - INTERVAL syntax: INTERVAL 'N' MINUTE
+//   - ON CONFLICT (...) DO UPDATE supported
+//   - LEFT JOIN on single column only
+
+
+const dealStates = {
+  claimFilterBatch: (schema, batchId, batchSize) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    return `UPDATE ${s}.DEAL_STATES SET STATUS = 'filtering', BATCH_ID = '${bid}', UPDATED_AT = CURRENT_TIMESTAMP WHERE EMAIL_METADATA_ID IN (SELECT EMAIL_METADATA_ID FROM ${s}.DEAL_STATES WHERE STATUS = 'pending' LIMIT ${Number(batchSize)})`
+  },
+
+  claimClassifyBatch: (schema, batchId, batchSize) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    return `UPDATE ${s}.DEAL_STATES SET STATUS = 'classifying', BATCH_ID = '${bid}', UPDATED_AT = CURRENT_TIMESTAMP WHERE THREAD_ID IN (SELECT DISTINCT ds.THREAD_ID FROM ${s}.DEAL_STATES ds WHERE ds.STATUS = 'pending_classification' AND NOT EXISTS (SELECT 1 FROM ${s}.DEAL_STATES ds2 WHERE ds2.THREAD_ID = ds.THREAD_ID AND ds2.SYNC_STATE_ID = ds.SYNC_STATE_ID AND ds2.STATUS IN ('pending', 'filtering')) LIMIT ${Number(batchSize)}) AND STATUS = 'pending_classification'`
+  },
+
+  selectEmailsByBatch: (schema, batchId) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    return `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}'`
+  },
+
+  selectEmailsWithEvalAndCreator: (schema, batchId) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    return `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${s}.DEAL_STATES ds LEFT JOIN ${s}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${s}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${bid}'`
+  },
+
+  selectEmailAndThreadIdsByBatch: (schema, batchId) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    return `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}'`
+  },
+
+  selectDistinctThreadUsers: (schema, batchId) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    return `SELECT DISTINCT THREAD_ID, USER_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}'`
+  },
+
+  updateStatusByIds: (schema, quotedIds, status) => {
+    const s = sanitizeSchema(schema);
+    const st = sanitizeString(status);
+    return `UPDATE ${s}.DEAL_STATES SET STATUS = '${st}', UPDATED_AT = CURRENT_TIMESTAMP WHERE EMAIL_METADATA_ID IN (${quotedIds.join(',')})`
+  },
+
+  updateStatusByBatch: (schema, batchId, fromStatus, toStatus) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    const from = sanitizeString(fromStatus);
+    const to = sanitizeString(toStatus);
+    return `UPDATE ${s}.DEAL_STATES SET STATUS = '${to}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${bid}' AND STATUS = '${from}'`
+  },
+
+  refreshBatchTimestamp: (schema, batchId) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    return `UPDATE ${s}.DEAL_STATES SET UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${bid}'`
+  },
+
+  findStuckBatches: (schema, status, intervalMinutes, maxRetries) => {
+    const s = sanitizeSchema(schema);
+    const st = sanitizeString(status);
+    return `SELECT ds.BATCH_ID, COUNT(DISTINCT be.TRIGGER_HASH) AS ATTEMPTS FROM ${s}.DEAL_STATES ds LEFT JOIN ${s}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${st}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${Number(intervalMinutes)}' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) < ${Number(maxRetries)} LIMIT 1`
+  },
+
+  findDeadBatches: (schema, status, intervalMinutes, maxRetries) => {
+    const s = sanitizeSchema(schema);
+    const st = sanitizeString(status);
+    return `SELECT ds.BATCH_ID FROM ${s}.DEAL_STATES ds LEFT JOIN ${s}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${st}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${Number(intervalMinutes)}' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) >= ${Number(maxRetries)}`
+  },
+
+  countByBatchAndStatus: (schema, batchId, status) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    const st = sanitizeString(status);
+    return `SELECT COUNT(*) AS C FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}' AND STATUS = '${st}'`
+  },
+
+  countOrphaned: (schema, statuses, staleMinutes) => {
+    const s = sanitizeSchema(schema);
+    const literals = statuses.map((st) => `'${sanitizeString(st)}'`).join(',');
+    return `SELECT COUNT(*) AS C FROM ${s}.DEAL_STATES WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${Number(staleMinutes)}' MINUTE`
+  },
+
+  markOrphanedAsFailed: (schema, statuses, staleMinutes) => {
+    const s = sanitizeSchema(schema);
+    const literals = statuses.map((st) => `'${sanitizeString(st)}'`).join(',');
+    return `UPDATE ${s}.DEAL_STATES SET STATUS = 'failed', UPDATED_AT = CURRENT_TIMESTAMP WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${Number(staleMinutes)}' MINUTE`
+  },
+
+  syncFromEmailMetadata: (schema, emailCoreSchema) => {
+    const s = sanitizeSchema(schema);
+    const ecs = sanitizeSchema(emailCoreSchema);
+    return `INSERT INTO ${s}.DEAL_STATES (ID, EMAIL_METADATA_ID, USER_ID, THREAD_ID, MESSAGE_ID, STATUS, CREATED_AT, UPDATED_AT) SELECT gen_random_uuid(), em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM ${ecs}.EMAIL_METADATA em WHERE NOT EXISTS (SELECT 1 FROM ${s}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID) ON CONFLICT (EMAIL_METADATA_ID) DO UPDATE SET UPDATED_AT = CURRENT_TIMESTAMP`
+  },
+};
+
+const batchEvents = {
+  upsert: (schema, triggerHash, batchId, batchType, eventType) => {
+    const s = sanitizeSchema(schema);
+    const th = sanitizeId(triggerHash);
+    const bid = sanitizeId(batchId);
+    const bt = sanitizeString(batchType);
+    const et = sanitizeString(eventType);
+    return `INSERT INTO ${s}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ('${th}', '${bid}', '${bt}', '${et}', CURRENT_TIMESTAMP) ON CONFLICT (TRIGGER_HASH) DO UPDATE SET EVENT_TYPE = EXCLUDED.EVENT_TYPE, CREATED_AT = CURRENT_TIMESTAMP`
+  },
+
+  upsertBulk: (schema, valueTuples) => {
+    const s = sanitizeSchema(schema);
+    return `INSERT INTO ${s}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ${valueTuples.join(', ')} ON CONFLICT (TRIGGER_HASH) DO UPDATE SET EVENT_TYPE = EXCLUDED.EVENT_TYPE, CREATED_AT = CURRENT_TIMESTAMP`
+  },
+};
+
+const evaluations = {
+  upsert: (schema, valueTuples) => {
+    const s = sanitizeSchema(schema);
+    return `INSERT INTO ${s}.EMAIL_THREAD_EVALUATIONS (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT) VALUES ${valueTuples.join(', ')} ON CONFLICT (THREAD_ID) DO UPDATE SET AI_EVALUATION_AUDIT_ID = EXCLUDED.AI_EVALUATION_AUDIT_ID, AI_INSIGHT = EXCLUDED.AI_INSIGHT, AI_SUMMARY = EXCLUDED.AI_SUMMARY, IS_DEAL = EXCLUDED.IS_DEAL, LIKELY_SCAM = EXCLUDED.LIKELY_SCAM, AI_SCORE = EXCLUDED.AI_SCORE, UPDATED_AT = CURRENT_TIMESTAMP`
+  },
+
+  selectByThreadIds: (schema, quotedThreadIds) => {
+    const s = sanitizeSchema(schema);
+    return `SELECT THREAD_ID, IS_DEAL FROM ${s}.EMAIL_THREAD_EVALUATIONS WHERE THREAD_ID IN (${quotedThreadIds.join(',')})`
+  },
+};
+
+const deals = {
+  deleteByThreadIds: (schema, quotedThreadIds) => {
+    const s = sanitizeSchema(schema);
+    return `DELETE FROM ${s}.DEALS WHERE THREAD_ID IN (${quotedThreadIds.join(',')})`
+  },
+
+  upsert: (schema, valueTuples) => {
+    const s = sanitizeSchema(schema);
+    return `INSERT INTO ${s}.DEALS (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT) VALUES ${valueTuples.join(', ')} ON CONFLICT (THREAD_ID) DO UPDATE SET EMAIL_THREAD_EVALUATION_ID = EXCLUDED.EMAIL_THREAD_EVALUATION_ID, DEAL_NAME = EXCLUDED.DEAL_NAME, DEAL_TYPE = EXCLUDED.DEAL_TYPE, CATEGORY = EXCLUDED.CATEGORY, VALUE = EXCLUDED.VALUE, CURRENCY = EXCLUDED.CURRENCY, BRAND = EXCLUDED.BRAND, UPDATED_AT = CURRENT_TIMESTAMP`
+  },
+
+  selectByThreadIds: (schema, quotedThreadIds) => {
+    const s = sanitizeSchema(schema);
+    return `SELECT ID, THREAD_ID, USER_ID FROM ${s}.DEALS WHERE THREAD_ID IN (${quotedThreadIds.join(',')})`
+  },
+};
+
+const dealContacts = {
+  deleteByDealIds: (schema, quotedDealIds) => {
+    const s = sanitizeSchema(schema);
+    return `DELETE FROM ${s}.DEAL_CONTACTS WHERE DEAL_ID IN (${quotedDealIds.join(',')})`
+  },
+
+  upsert: (schema, valueTuples) => {
+    const s = sanitizeSchema(schema);
+    return `INSERT INTO ${s}.DEAL_CONTACTS (DEAL_ID, USER_ID, EMAIL, CONTACT_TYPE, CREATED_AT, UPDATED_AT) VALUES ${valueTuples.join(', ')} ON CONFLICT (DEAL_ID, USER_ID, EMAIL) DO UPDATE SET CONTACT_TYPE = EXCLUDED.CONTACT_TYPE, UPDATED_AT = CURRENT_TIMESTAMP`
+  },
+};
+
+const contacts = {
+  upsert: (schema, valueTuples) => {
+    const s = sanitizeSchema(schema);
+    return `INSERT INTO ${s}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${valueTuples.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = EXCLUDED.NAME, COMPANY_NAME = EXCLUDED.COMPANY_NAME, TITLE = EXCLUDED.TITLE, PHONE_NUMBER = EXCLUDED.PHONE_NUMBER, UPDATED_AT = CURRENT_TIMESTAMP`
+  },
+};
+
 /**
  * Sync email_metadata into deal_states — insert missing rows with status='pending'.
  * Single INSERT...SELECT query, no pagination. Syncs everything in one shot.
@@ -27596,9 +27756,12 @@ async function runSyncDealStates() {
   );
   const jwt = await authenticate(authUrl, authSecret);
 
-  const sql = `INSERT INTO ${schema}.DEAL_STATES (ID, EMAIL_METADATA_ID, USER_ID, THREAD_ID, MESSAGE_ID, STATUS, CREATED_AT, UPDATED_AT) SELECT gen_random_uuid(), em.ID, em.USER_ID, em.THREAD_ID, em.MESSAGE_ID, 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM ${emailCoreSchema}.EMAIL_METADATA em WHERE NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds WHERE ds.EMAIL_METADATA_ID = em.ID) ON CONFLICT (EMAIL_METADATA_ID) DO UPDATE SET UPDATED_AT = CURRENT_TIMESTAMP`;
-
-  const result = await executeSql(apiUrl, jwt, biscuit, sql);
+  const result = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    dealStates.syncFromEmailMetadata(schema, emailCoreSchema),
+  );
 
   const count = Array.isArray(result) ? result.length : 0;
   console.log(`[sync-deal-states] done: ${count} synced (1 query)`);
@@ -34292,7 +34455,7 @@ function sanitizeEmailBody(body) {
   return text
 }
 
-var systemTemplate = "You are an email classifier for a content creator's inbox. Identify brand deals and business opportunities. Return valid JSON only — no markdown, no explanation, no code fences.\n\n# Creator Context\n\nThe user message may specify the creator's email. If provided, use it to distinguish inbound (to creator) from outbound (from creator) emails. If not provided, infer from exchange patterns.\n\n# Classification Rules\n\n**Priority: maximum recall.** If there is a 20% or greater chance something is a brand deal, classify as is_deal: true. When uncertain, use category \"low_confidence\". Missing a real deal costs thousands; a false positive costs 2 seconds to dismiss.\n\n## What IS a deal\n\nA brand, company, agency, platform, or fellow creator wants to work with this creator for their audience, content, reach, or influence. Includes: sponsorships, paid collaborations, product seeding/gifting, affiliate offers, ambassador programs, creator-to-creator collabs, event appearances, paid placements, content licensing, talent agency outreach. Classify regardless of status (new, active, declined, completed, suspicious).\n\n**Strong signals** (any one = is_deal: true): sender from brand/agency/PR firm, mentions sponsorship/collaboration/partnership/campaign, references compensation or budget, proposes deliverables or timeline, references creator's audience/reach, sender has partnership title, requests rate card, mentions exclusivity/licensing, originates from influencer marketing platform.\n\n**Weak signals** (alone = low_confidence): generic \"opportunity\" language, PR press release without ask, event invite without compensation details, vague \"collab\" subject from corporate domain, follow-up referencing unseen conversation.\n\n## What is NOT a deal\n\nInvestor/fundraising conversations, legal/accounting services, internal team discussions, automated notifications (YouTube/Instagram/TikTok/GMass/newsletters), surveys/feedback requests, SaaS pitches (unless proposing to sponsor creator's content), personal messages, calendar-only threads, shipping/order confirmations, password resets, billing notifications, social media alerts, traditional job recruitment, charity requests (unless paid partnership).\n\n# Output Schema\n\nReturn a JSON array with exactly one object per THREAD_ID_INDEX. The array MUST have the same number of elements as threads provided.\n\nFields per object:\n\n- **thread_index** (integer, required): The THREAD_ID_INDEX from the input (1-based)\n- **is_deal** (boolean, required): true if this is or might be a deal\n- **is_english** (boolean, required): true if primary language is English\n- **language** (string or null): ISO 639-1 code when is_english is false, otherwise null\n- **ai_score** (integer 1-10, required): Creator attention priority. 9-10: urgent, respond today. 7-8: high-value, act soon. 5-6: active, no deadline. 3-4: low priority. 1-2: no action needed.\n- **category** (string or null): Required when is_deal is true. One of: \"new\", \"in_progress\", \"completed\", \"not_interested\", \"likely_scam\", \"low_confidence\". Null when is_deal is false.\n- **likely_scam** (boolean, required): true if suspicious patterns detected\n- **ai_insight** (string, required): One-line summary of the opportunity or why it's not a deal\n- **ai_summary** (string, required, max 1000 chars): Context memo for the next AI evaluation (see guidelines below)\n- **main_contact** (object or null): The primary EXTERNAL person relevant to the deal — must NOT be the creator or match the creator's email. If the most relevant contact is the creator, use the next best external contact from the thread instead (e.g. the sender of an inbound deal email, or a CC'd brand representative). Fields: name, email, company, title, phone_number (all string or null). Null when is_deal is false or when no external contact can be identified in the thread.\n- **deal_brand** (string or null): Brand/company name. Null when is_deal is false.\n- **deal_type** (string or null): One of: \"brand_collaboration\", \"sponsorship\", \"affiliate\", \"product_seeding\", \"ambassador\", \"content_partnership\", \"paid_placement\", \"other_business\". Null when is_deal is false.\n- **deal_name** (string or null): Short descriptive name. Null when is_deal is false.\n- **deal_value** (number or null): Only if compensation explicitly mentioned. Null otherwise.\n- **deal_currency** (string or null): ISO 4217 code when deal_value present. Null otherwise.\n\n# AI Summary Guidelines\n\nThe ai_summary is the ONLY context the next classifier will have when new emails arrive. Write it as a factual briefing:\n\n- **Who**: Main contact's full name, email, title, company. Other relevant participants.\n- **What**: Specific proposal, deliverables, content format requested\n- **Status**: Current state of conversation or negotiation\n- **Terms**: Exact compensation figures, rates, budget, currency if mentioned\n- **Dates**: Deadlines, campaign dates, response-by dates\n- **Red flags**: Anything suspicious or noteworthy\n\n# Previous AI Summary\n\nWhen a thread includes PREVIOUS_AI_SUMMARY, it reflects a prior evaluation with fewer emails. New emails may change the classification. Re-evaluate fully — use the prior summary as background context only.\n\n# Examples\n\n## Deal example\n\nThread: Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored YouTube review with 60-day exclusivity.\n\n```json\n{\"thread_index\": 1, \"is_deal\": true, \"is_english\": true, \"ai_score\": 8, \"category\": \"new\", \"likely_scam\": false, \"ai_insight\": \"Beauty Brand X offers $2.5K for sponsored YouTube review\", \"ai_summary\": \"Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.\", \"main_contact\": {\"name\": \"Sarah Kim\", \"email\": \"sarah@beautybrandx.com\", \"company\": \"Beauty Brand X\", \"title\": \"Partnerships Manager\", \"phone_number\": null}, \"deal_brand\": \"Beauty Brand X\", \"deal_type\": \"sponsorship\", \"deal_name\": \"Beauty Brand X YouTube Review\", \"deal_value\": 2500, \"deal_currency\": \"USD\"}\n```\n\n## Non-deal example\n\nThread: noreply@youtube.com sends 100K subscriber milestone notification.\n\n```json\n{\"thread_index\": 2, \"is_deal\": false, \"is_english\": true, \"ai_score\": 1, \"category\": null, \"likely_scam\": false, \"ai_insight\": \"YouTube milestone notification\", \"ai_summary\": \"Automated YouTube notification about 100K subscriber milestone. No deal content.\", \"main_contact\": null, \"deal_brand\": null, \"deal_type\": null, \"deal_name\": null, \"deal_value\": null, \"deal_currency\": null}\n```\n\nOnly classify the threads in the user message. Do NOT classify the examples above.\n\n# Final Rules\n\n1. Return ONLY a valid JSON array\n2. One object per THREAD_ID_INDEX — array length MUST match thread count\n3. When is_deal is false: set category, deal_brand, deal_type, deal_name, deal_value, deal_currency, and main_contact to null\n4. When is_deal is true: deal_type and deal_name are required. deal_brand required when identifiable.\n5. main_contact must be an EXTERNAL person — NEVER the creator. If the creator's email is provided, do NOT use that email in main_contact. Instead, pick the best non-creator contact from the thread (e.g. the inbound sender or a CC'd brand rep). Only set main_contact to null if no external contact exists in the thread at all.\n6. ai_summary is always required for every thread\n7. When uncertain: default to is_deal: true with category \"low_confidence\"\n";
+var systemTemplate = "You are an email classifier for a content creator's inbox. Identify brand deals and business opportunities. Return valid JSON only — no markdown, no explanation, no code fences.\n\n# Creator Context\n\nThe user message may specify the creator's email. If provided, use it to distinguish inbound (to creator) from outbound (from creator) emails. If not provided, infer from exchange patterns.\n\n# Classification Rules\n\n**Priority: maximum recall.** If there is a 20% or greater chance something is a brand deal, classify as is_deal: true. When uncertain, use category \"low_confidence\". Missing a real deal costs thousands; a false positive costs 2 seconds to dismiss.\n\n## What IS a deal\n\nA brand, company, agency, platform, or fellow creator wants to work with this creator for their audience, content, reach, or influence. Includes: sponsorships, paid collaborations, product seeding/gifting, affiliate offers, ambassador programs, creator-to-creator collabs, event appearances, paid placements, content licensing, talent agency outreach. Classify regardless of status (new, active, declined, completed, suspicious).\n\n**Strong signals** (any one = is_deal: true): sender from brand/agency/PR firm, mentions sponsorship/collaboration/partnership/campaign, references compensation or budget, proposes deliverables or timeline, references creator's audience/reach, sender has partnership title, requests rate card, mentions exclusivity/licensing, originates from influencer marketing platform.\n\n**Weak signals** (alone = low_confidence): generic \"opportunity\" language, PR press release without ask, event invite without compensation details, vague \"collab\" subject from corporate domain, follow-up referencing unseen conversation.\n\n## What is NOT a deal\n\nInvestor/fundraising conversations, legal/accounting services, internal team discussions, automated notifications (YouTube/Instagram/TikTok/GMass/newsletters), surveys/feedback requests, SaaS pitches (unless proposing to sponsor creator's content), personal messages, calendar-only threads, shipping/order confirmations, password resets, billing notifications, social media alerts, traditional job recruitment, charity requests (unless paid partnership).\n\n# Output Schema\n\nReturn a JSON array with exactly one object per THREAD_ID_INDEX. The array MUST have the same number of elements as threads provided.\n\nFields per object:\n\n- **thread_index** (integer, required): The THREAD_ID_INDEX from the input (1-based)\n- **is_deal** (boolean, required): true if this is or might be a deal\n- **is_english** (boolean, required): true if primary language is English\n- **language** (string or null): ISO 639-1 code when is_english is false, otherwise null\n- **ai_score** (integer 1-10, required): Creator attention priority. 9-10: urgent, respond today. 7-8: high-value, act soon. 5-6: active, no deadline. 3-4: low priority. 1-2: no action needed.\n- **category** (string or null): Required when is_deal is true. One of: \"new\", \"in_progress\", \"completed\", \"not_interested\", \"likely_scam\", \"low_confidence\". Null when is_deal is false.\n- **likely_scam** (boolean, required): true if suspicious patterns detected\n- **ai_insight** (string, required): One-line summary of the opportunity or why it's not a deal\n- **ai_summary** (string, required, max 1000 chars): Context memo for the next AI evaluation (see guidelines below)\n- **main_contact** (object or null): The primary EXTERNAL person relevant to the deal — must NOT be the creator or match the creator's email. If the most relevant contact is the creator, use the next best external contact from the thread instead (e.g. the sender of an inbound deal email, or a CC'd brand representative). Fields: name, email, company, title, phone_number (all string or null). Null when is_deal is false or when no external contact can be identified in the thread.\n- **deal_brand** (string or null): Brand/company name. Null when is_deal is false.\n- **deal_type** (string or null): One of: \"brand_collaboration\", \"sponsorship\", \"affiliate\", \"product_seeding\", \"ambassador\", \"content_partnership\", \"paid_placement\", \"other_business\". Null when is_deal is false.\n- **deal_name** (string or null): Short descriptive name. Null when is_deal is false.\n- **deal_value** (number or null): Only if compensation explicitly mentioned. Null otherwise.\n- **deal_currency** (string or null): ISO 4217 code when deal_value present. Null otherwise.\n\n# AI Summary Guidelines\n\nThe ai_summary is the ONLY context the next classifier will have when new emails arrive. Write it as a factual briefing:\n\n- **Who**: Main contact's full name, email, title, company. Other relevant participants.\n- **What**: Specific proposal, deliverables, content format requested\n- **Status**: Current state of conversation or negotiation\n- **Terms**: Exact compensation figures, rates, budget, currency if mentioned\n- **Dates**: Deadlines, campaign dates, response-by dates\n- **Red flags**: Anything suspicious or noteworthy\n\n# Previous AI Summary\n\nWhen a thread includes PREVIOUS_AI_SUMMARY, it reflects a prior evaluation with fewer emails. New emails may change the classification. Re-evaluate fully — use the prior summary as background context only.\n\n# Examples\n\n## Deal example\n\nThread: Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored YouTube review with 60-day exclusivity.\n\n```json\n{\n  \"thread_index\": 1,\n  \"is_deal\": true,\n  \"is_english\": true,\n  \"ai_score\": 8,\n  \"category\": \"new\",\n  \"likely_scam\": false,\n  \"ai_insight\": \"Beauty Brand X offers $2.5K for sponsored YouTube review\",\n  \"ai_summary\": \"Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.\",\n  \"main_contact\": {\n    \"name\": \"Sarah Kim\",\n    \"email\": \"sarah@beautybrandx.com\",\n    \"company\": \"Beauty Brand X\",\n    \"title\": \"Partnerships Manager\",\n    \"phone_number\": null\n  },\n  \"deal_brand\": \"Beauty Brand X\",\n  \"deal_type\": \"sponsorship\",\n  \"deal_name\": \"Beauty Brand X YouTube Review\",\n  \"deal_value\": 2500,\n  \"deal_currency\": \"USD\"\n}\n```\n\n## Non-deal example\n\nThread: noreply@youtube.com sends 100K subscriber milestone notification.\n\n```json\n{\n  \"thread_index\": 2,\n  \"is_deal\": false,\n  \"is_english\": true,\n  \"ai_score\": 1,\n  \"category\": null,\n  \"likely_scam\": false,\n  \"ai_insight\": \"YouTube milestone notification\",\n  \"ai_summary\": \"Automated YouTube notification about 100K subscriber milestone. No deal content.\",\n  \"main_contact\": null,\n  \"deal_brand\": null,\n  \"deal_type\": null,\n  \"deal_name\": null,\n  \"deal_value\": null,\n  \"deal_currency\": null\n}\n```\n\nOnly classify the threads in the user message. Do NOT classify the examples above.\n\n# Final Rules\n\n1. Return ONLY a valid JSON array\n2. One object per THREAD_ID_INDEX — array length MUST match thread count\n3. When is_deal is false: set category, deal_brand, deal_type, deal_name, deal_value, deal_currency, and main_contact to null\n4. When is_deal is true: deal_type and deal_name are required. deal_brand required when identifiable.\n5. main_contact must be an EXTERNAL person — NEVER the creator. If the creator's email is provided, do NOT use that email in main_contact. Instead, pick the best non-creator contact from the thread (e.g. the inbound sender or a CC'd brand rep). Only set main_contact to null if no external contact exists in the thread at all.\n6. ai_summary is always required for every thread\n7. When uncertain: default to is_deal: true with category \"low_confidence\"\n";
 
 var classificationInstructions = "Classify the email threads below. Return one JSON object per thread in a JSON array.\n\n# Threads to Classify\n\n{{THREAD_DATA}}\n";
 
@@ -34347,9 +34510,7 @@ function buildPrompt(emails, { systemOverride, userOverride, creatorEmail } = {}
 
   const systemPrompt = (systemOverride || systemTemplate).trim();
 
-  const creatorLine = creatorEmail
-    ? `Creator email: ${creatorEmail}\n\n`
-    : '';
+  const creatorLine = creatorEmail ? `Creator email: ${creatorEmail}\n\n` : '';
 
   const userPrompt = (userOverride || classificationInstructions)
     .replace('{{THREAD_DATA}}', creatorLine + threadData)
@@ -34518,9 +34679,10 @@ function parseAndValidate(raw, threadOrder) {
 
   // Schema validation and coercion
   return parsed.map((r) => ({
-    thread_id: threadOrder && r.thread_index != null
-      ? (threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || ''))
-      : String(r.thread_id || ''),
+    thread_id:
+      threadOrder && r.thread_index != null
+        ? threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || '')
+        : String(r.thread_id || ''),
     is_deal: Boolean(r.is_deal),
     is_english: r.is_english !== false,
     language: r.language || null,
@@ -34579,8 +34741,7 @@ async function runFetchAndClassify() {
     apiUrl,
     jwt,
     biscuit,
-    `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, SYNC_STATE_ID, THREAD_ID
-    FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+    dealStates.selectEmailsByBatch(schema, batchId),
   );
 
   if (!metadataRows || metadataRows.length === 0) {
@@ -35004,7 +35165,7 @@ async function runFetchAndFilter() {
     apiUrl,
     jwt,
     biscuit,
-    `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, SYNC_STATE_ID, THREAD_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+    dealStates.selectEmailsByBatch(schema, batchId),
   );
 
   if (!metadataRows || metadataRows.length === 0) {
@@ -35149,17 +35310,17 @@ async function runSaveDealContacts() {
 
   // Look up deals to get USER_ID per thread
   const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id));
-  const quotedIds = dealThreadIds.map((id) => `'${id}'`).join(',');
+  const quotedIds = dealThreadIds.map((id) => `'${id}'`);
 
-  const deals = await executeSql(
+  const deals$1 = await executeSql(
     apiUrl,
     jwt,
     biscuit,
-    `SELECT ID, THREAD_ID, USER_ID FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`,
+    deals.selectByThreadIds(schema, quotedIds),
   );
 
   const dealByThread = {};
-  for (const row of deals) {
+  for (const row of deals$1) {
     dealByThread[row.THREAD_ID] = row;
   }
 
@@ -35201,12 +35362,7 @@ async function runSaveDealContacts() {
   // Upsert core contacts (non-fatal — table may not exist yet)
   if (coreContactValues.length > 0) {
     try {
-      await executeSql(
-        apiUrl,
-        jwt,
-        biscuit,
-        `INSERT INTO ${coreSchema}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${coreContactValues.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = EXCLUDED.NAME, COMPANY_NAME = EXCLUDED.COMPANY_NAME, TITLE = EXCLUDED.TITLE, PHONE_NUMBER = EXCLUDED.PHONE_NUMBER, UPDATED_AT = CURRENT_TIMESTAMP`,
-      );
+      await executeSql(apiUrl, jwt, biscuit, contacts.upsert(coreSchema, coreContactValues));
     } catch (err) {
       console.error(`[save-deal-contacts] core contacts upsert failed (non-fatal): ${err.message}`);
     }
@@ -35214,12 +35370,7 @@ async function runSaveDealContacts() {
 
   // Upsert deal contacts
   if (dealContactValues.length > 0) {
-    await executeSql(
-      apiUrl,
-      jwt,
-      biscuit,
-      `INSERT INTO ${schema}.DEAL_CONTACTS (DEAL_ID, USER_ID, EMAIL, CONTACT_TYPE, CREATED_AT, UPDATED_AT) VALUES ${dealContactValues.join(', ')} ON CONFLICT (DEAL_ID, USER_ID, EMAIL) DO UPDATE SET CONTACT_TYPE = EXCLUDED.CONTACT_TYPE, UPDATED_AT = CURRENT_TIMESTAMP`,
-    );
+    await executeSql(apiUrl, jwt, biscuit, dealContacts.upsert(schema, dealContactValues));
   }
 
   console.log(`[save-deal-contacts] ${dealContactValues.length} contacts saved (core + deal)`);
@@ -35262,7 +35413,7 @@ async function runSaveDeals() {
     apiUrl,
     jwt,
     biscuit,
-    `SELECT DISTINCT THREAD_ID, USER_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+    dealStates.selectDistinctThreadUsers(schema, batchId),
   );
   const userByThread = {};
   for (const row of metadataRows) {
@@ -35283,13 +35434,8 @@ async function runSaveDeals() {
 
   // Batch DELETE non-deal threads (single query)
   if (notDealThreadIds.length > 0) {
-    const quotedIds = notDealThreadIds.map((id) => `'${id}'`).join(',');
-    await executeSql(
-      apiUrl,
-      jwt,
-      biscuit,
-      `DELETE FROM ${schema}.DEALS WHERE THREAD_ID IN (${quotedIds})`,
-    );
+    const quotedIds = notDealThreadIds.map((id) => `'${id}'`);
+    await executeSql(apiUrl, jwt, biscuit, deals.deleteByThreadIds(schema, quotedIds));
     console.log(`[save-deals] deleted ${notDealThreadIds.length} non-deal threads (1 query)`);
   }
 
@@ -35299,39 +35445,20 @@ async function runSaveDeals() {
   }
 
   // Batch upsert deals (single multi-row INSERT)
-  const dealValues = dealThreads
-    .map((thread) => {
-      const threadId = sanitizeId(thread.thread_id);
-      const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
-      const dealId = v7();
-      const dealName = sanitizeString(thread.deal_name || '');
-      const dealType = sanitizeString(thread.deal_type || '');
-      const dealValue =
-        typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
-      const currency = sanitizeString(thread.currency || 'USD');
-      const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
-      const category = sanitizeString(thread.category || '');
-      return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-    })
-    .join(', ');
+  const dealTuples = dealThreads.map((thread) => {
+    const threadId = sanitizeId(thread.thread_id);
+    const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
+    const dealId = v7();
+    const dealName = sanitizeString(thread.deal_name || '');
+    const dealType = sanitizeString(thread.deal_type || '');
+    const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
+    const currency = sanitizeString(thread.currency || 'USD');
+    const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
+    const category = sanitizeString(thread.category || '');
+    return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+  });
 
-  await executeSql(
-    apiUrl,
-    jwt,
-    biscuit,
-    `INSERT INTO ${schema}.DEALS
-      (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT)
-    VALUES ${dealValues}
-    ON CONFLICT (THREAD_ID) DO UPDATE SET
-      EMAIL_THREAD_EVALUATION_ID = EXCLUDED.EMAIL_THREAD_EVALUATION_ID,
-      DEAL_NAME = EXCLUDED.DEAL_NAME,
-      DEAL_TYPE = EXCLUDED.DEAL_TYPE,
-      CATEGORY = EXCLUDED.CATEGORY,
-      VALUE = EXCLUDED.VALUE,
-      CURRENCY = EXCLUDED.CURRENCY,
-      BRAND = EXCLUDED.BRAND,
-      UPDATED_AT = CURRENT_TIMESTAMP`,
-  );
+  await executeSql(apiUrl, jwt, biscuit, deals.upsert(schema, dealTuples));
 
   console.log(`[save-deals] ${dealThreads.length} deals upserted`);
   return { deals_created: dealThreads.length }
@@ -35374,33 +35501,18 @@ async function runSaveEvals() {
   }
 
   // Build batched VALUES for all threads
-  const values = threads
-    .map((thread) => {
-      const threadId = sanitizeId(thread.thread_id);
-      const evalId = v7();
-      const category = sanitizeString(thread.category || '');
-      const aiSummary = sanitizeString(thread.ai_summary || '');
-      const isDeal = thread.is_deal ? 'true' : 'false';
-      const isLikelyScam =
-        (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false';
-      const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0;
-      return `('${evalId}', '${threadId}', '', '${category}', '${aiSummary}', ${isDeal}, ${isLikelyScam}, ${aiScore}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-    })
-    .join(', ');
+  const valueTuples = threads.map((thread) => {
+    const threadId = sanitizeId(thread.thread_id);
+    const evalId = v7();
+    const category = sanitizeString(thread.category || '');
+    const aiSummary = sanitizeString(thread.ai_summary || '');
+    const isDeal = thread.is_deal ? 'true' : 'false';
+    const isLikelyScam = (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false';
+    const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0;
+    return `('${evalId}', '${threadId}', '', '${category}', '${aiSummary}', ${isDeal}, ${isLikelyScam}, ${aiScore}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+  });
 
-  const sql = `INSERT INTO ${schema}.EMAIL_THREAD_EVALUATIONS
-    (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT)
-  VALUES ${values}
-  ON CONFLICT (THREAD_ID) DO UPDATE SET
-    AI_EVALUATION_AUDIT_ID = EXCLUDED.AI_EVALUATION_AUDIT_ID,
-    AI_INSIGHT = EXCLUDED.AI_INSIGHT,
-    AI_SUMMARY = EXCLUDED.AI_SUMMARY,
-    IS_DEAL = EXCLUDED.IS_DEAL,
-    LIKELY_SCAM = EXCLUDED.LIKELY_SCAM,
-    AI_SCORE = EXCLUDED.AI_SCORE,
-    UPDATED_AT = CURRENT_TIMESTAMP`;
-
-  await executeSql(apiUrl, jwt, biscuit, sql);
+  await executeSql(apiUrl, jwt, biscuit, evaluations.upsert(schema, valueTuples));
 
   console.log(`[save-evals] upserted ${threads.length} thread evaluations (1 query)`);
   return { upserted: threads.length, total: threads.length }
@@ -35464,7 +35576,7 @@ async function runUpdateDealStates() {
     apiUrl,
     jwt,
     biscuit,
-    `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
+    dealStates.selectEmailAndThreadIdsByBatch(schema, batchId),
   );
 
   const metadataByThread = {};
@@ -35492,14 +35604,27 @@ async function runUpdateDealStates() {
 
   // Issue exactly 2 UPDATEs (one for deals, one for not_deals)
   if (dealEmailIds.length > 0) {
-    await executeSql(apiUrl, jwt, biscuit, detection.updateDeals(schema, toSqlIdList(dealEmailIds)));
+    await executeSql(
+      apiUrl,
+      jwt,
+      biscuit,
+      dealStates.updateStatusByIds(
+        schema,
+        dealEmailIds.map((id) => `'${sanitizeId(id)}'`),
+        'deal',
+      ),
+    );
   }
   if (notDealEmailIds.length > 0) {
     await executeSql(
       apiUrl,
       jwt,
       biscuit,
-      detection.updateNotDeal(schema, toSqlIdList(notDealEmailIds)),
+      dealStates.updateStatusByIds(
+        schema,
+        notDealEmailIds.map((id) => `'${sanitizeId(id)}'`),
+        'not_deal',
+      ),
     );
   }
 
@@ -38516,10 +38641,10 @@ const STUCK_INTERVAL_MINUTES = 5;
  */
 async function sweepStuckRows(exec, schema, { activeStatus, batchType, maxRetries }) {
   const safeSchema = sanitizeSchema(schema);
-  const statusSql = sanitizeString(activeStatus);
+  const statusSql = activeStatus;
 
   const exhausted = await exec(
-    `SELECT ds.BATCH_ID FROM ${safeSchema}.DEAL_STATES ds LEFT JOIN ${safeSchema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${statusSql}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${STUCK_INTERVAL_MINUTES}' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) >= ${maxRetries}`,
+    dealStates.findDeadBatches(safeSchema, statusSql, STUCK_INTERVAL_MINUTES, maxRetries),
   );
 
   if (!exhausted || exhausted.length === 0) {
@@ -38531,7 +38656,7 @@ async function sweepStuckRows(exec, schema, { activeStatus, batchType, maxRetrie
     const bid = row.BATCH_ID;
     const safeBid = sanitizeId(bid);
     const countRows = await exec(
-      `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE BATCH_ID = '${safeBid}' AND STATUS = '${statusSql}'`,
+      dealStates.countByBatchAndStatus(safeSchema, safeBid, statusSql),
     );
     const n = Number(countRows?.[0]?.C ?? 0) || 0;
     if (n === 0) {
@@ -38540,9 +38665,7 @@ async function sweepStuckRows(exec, schema, { activeStatus, batchType, maxRetrie
       );
       continue
     }
-    await exec(
-      `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${statusSql}'`,
-    );
+    await exec(dealStates.updateStatusByBatch(safeSchema, safeBid, statusSql, STATUS.FAILED));
     await insertBatchEvent(exec, safeSchema, {
       triggerHash: v7(),
       batchId: bid,
@@ -38579,17 +38702,11 @@ async function sweepOrphanedRows(exec, schema, { statuses, staleMinutes }) {
   }
   const safeStaleMinutes = minutesNumber;
 
-  const literals = statuses.map((s) => `'${sanitizeString(s)}'`).join(',');
-
-  const countRows = await exec(
-    `SELECT COUNT(*) AS C FROM ${safeSchema}.DEAL_STATES WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${safeStaleMinutes}' MINUTE`,
-  );
+  const countRows = await exec(dealStates.countOrphaned(safeSchema, statuses, safeStaleMinutes));
   const n = Number(countRows?.[0]?.C ?? 0) || 0;
   if (n === 0) return 0
 
-  await exec(
-    `UPDATE ${safeSchema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${safeStaleMinutes}' MINUTE`,
-  );
+  await exec(dealStates.markOrphanedAsFailed(safeSchema, statuses, safeStaleMinutes));
 
   coreExports.info(
     `[sweepOrphanedRows] failed ${n} orphaned row(s) (statuses=${statuses.join(',')}, staleMinutes=${safeStaleMinutes})`,
@@ -38609,15 +38726,7 @@ async function insertBatchEvent(
   schema,
   { triggerHash, batchId, batchType, eventType },
 ) {
-  const safeSchema = sanitizeSchema(schema);
-  const safeTriggerHash = sanitizeId(triggerHash);
-  const safeBatchId = sanitizeId(batchId);
-  const safeBatchType = sanitizeString(batchType);
-  const safeEventType = sanitizeString(eventType);
-
-  const sql = `INSERT INTO ${safeSchema}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ('${safeTriggerHash}', '${safeBatchId}', '${safeBatchType}', '${safeEventType}', CURRENT_TIMESTAMP) ON CONFLICT (TRIGGER_HASH) DO UPDATE SET EVENT_TYPE = EXCLUDED.EVENT_TYPE, CREATED_AT = CURRENT_TIMESTAMP`;
-
-  await executeSqlFn(sql);
+  await executeSqlFn(batchEvents.upsert(schema, triggerHash, batchId, batchType, eventType));
 }
 
 /**
@@ -38654,14 +38763,10 @@ async function runClaimFilterBatch() {
   const batchId = v7();
 
   // 3. Atomically claim pending rows
-  await exec(
-    `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTERING}', BATCH_ID = '${batchId}', UPDATED_AT = CURRENT_TIMESTAMP WHERE EMAIL_METADATA_ID IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}' LIMIT ${batchSize})`,
-  );
+  await exec(dealStates.claimFilterBatch(schema, batchId, batchSize));
 
   // 4. SELECT the claimed rows
-  const rows = await exec(
-    `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
-  );
+  const rows = await exec(dealStates.selectEmailsByBatch(schema, batchId));
 
   const count = rows ? rows.length : 0;
   console.log(`[claim-filter-batch] claimed ${count} pending rows`);
@@ -38682,7 +38787,7 @@ async function runClaimFilterBatch() {
   console.log(`[claim-filter-batch] no pending rows, checking for stuck batches`);
 
   const stuckBatches = await exec(
-    `SELECT ds.BATCH_ID, COUNT(DISTINCT be.TRIGGER_HASH) AS ATTEMPTS FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${STATUS.FILTERING}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '5' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) < ${maxRetries} LIMIT 1`,
+    dealStates.findStuckBatches(schema, STATUS.FILTERING, 5, maxRetries),
   );
 
   if (!stuckBatches || stuckBatches.length === 0) {
@@ -38708,14 +38813,10 @@ async function runClaimFilterBatch() {
   console.log(`[claim-filter-batch] re-claiming stuck batch ${stuckBatchId} (attempts=${attempts})`);
 
   // SELECT its rows
-  const stuckRows = await exec(
-    `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${stuckBatchId}'`,
-  );
+  const stuckRows = await exec(dealStates.selectEmailsByBatch(schema, stuckBatchId));
 
   // UPDATE UPDATED_AT to prevent other instances from grabbing it
-  await exec(
-    `UPDATE ${schema}.DEAL_STATES SET UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${stuckBatchId}'`,
-  );
+  await exec(dealStates.refreshBatchTimestamp(schema, stuckBatchId));
 
   // Insert batch event with retrigger type and new trigger hash
   const triggerHash = v7();
@@ -38762,13 +38863,10 @@ async function runClaimClassifyBatch() {
   const batchId = v7();
 
   // 3. Claim threads where all messages have cleared filtering
-  const claimSql = `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.CLASSIFYING}', BATCH_ID = '${batchId}', UPDATED_AT = CURRENT_TIMESTAMP WHERE THREAD_ID IN (SELECT DISTINCT ds.THREAD_ID FROM ${schema}.DEAL_STATES ds WHERE ds.STATUS = '${STATUS.PENDING_CLASSIFICATION}' AND NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds2 WHERE ds2.THREAD_ID = ds.THREAD_ID AND ds2.SYNC_STATE_ID = ds.SYNC_STATE_ID AND ds2.STATUS IN ('${STATUS.PENDING}', '${STATUS.FILTERING}')) LIMIT ${batchSize}) AND STATUS = '${STATUS.PENDING_CLASSIFICATION}'`;
-
-  await exec(claimSql);
+  await exec(dealStates.claimClassifyBatch(schema, batchId, batchSize));
 
   // 4. SELECT claimed rows
-  const selectSql = `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`;
-  const rows = await exec(selectSql);
+  const rows = await exec(dealStates.selectEmailsByBatch(schema, batchId));
 
   // 5. If claimed > 0, insert batch event and return
   if (rows && rows.length > 0) {
@@ -38784,21 +38882,19 @@ async function runClaimClassifyBatch() {
 
   // 6. No rows claimed — look for stuck batches
   console.log('[claim-classify-batch] no pending rows, checking for stuck batches');
-  const stuckSql = `SELECT ds.BATCH_ID, COUNT(DISTINCT be.TRIGGER_HASH) AS ATTEMPTS FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${STATUS.CLASSIFYING}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '5' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) < ${maxRetries} LIMIT 1`;
-
-  const stuckRows = await exec(stuckSql);
+  const stuckRows = await exec(
+    dealStates.findStuckBatches(schema, STATUS.CLASSIFYING, 5, maxRetries),
+  );
 
   if (stuckRows && stuckRows.length > 0) {
     const stuckBatchId = stuckRows[0].BATCH_ID;
     const attempts = parseInt(stuckRows[0].ATTEMPTS, 10);
 
     // 7. SELECT its rows
-    const stuckSelectSql = `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${stuckBatchId}'`;
-    const stuckBatchRows = await exec(stuckSelectSql);
+    const stuckBatchRows = await exec(dealStates.selectEmailsByBatch(schema, stuckBatchId));
 
     // UPDATE UPDATED_AT to reset the stuck timer
-    const touchSql = `UPDATE ${schema}.DEAL_STATES SET UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${stuckBatchId}'`;
-    await exec(touchSql);
+    await exec(dealStates.refreshBatchTimestamp(schema, stuckBatchId));
 
     // Insert batch event with retrigger type and new triggerHash
     const triggerHash = v7();
@@ -39013,14 +39109,10 @@ async function runFilterPipeline() {
     const batchId = v7();
 
     // Atomically claim pending rows
-    await exec(
-      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTERING}', BATCH_ID = '${batchId}', UPDATED_AT = CURRENT_TIMESTAMP WHERE EMAIL_METADATA_ID IN (SELECT EMAIL_METADATA_ID FROM ${schema}.DEAL_STATES WHERE STATUS = '${STATUS.PENDING}' LIMIT ${batchSize})`,
-    );
+    await exec(dealStates.claimFilterBatch(schema, batchId, batchSize));
 
     // SELECT the claimed rows
-    const rows = await exec(
-      `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${batchId}'`,
-    );
+    const rows = await exec(dealStates.selectEmailsByBatch(schema, batchId));
 
     const count = rows ? rows.length : 0;
     console.log(`[run-filter-pipeline] claimed ${count} pending rows`);
@@ -39041,7 +39133,7 @@ async function runFilterPipeline() {
     console.log(`[run-filter-pipeline] no pending rows, checking for stuck batches`);
 
     const stuckBatches = await exec(
-      `SELECT ds.BATCH_ID, COUNT(DISTINCT be.TRIGGER_HASH) AS ATTEMPTS FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${STATUS.FILTERING}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '5' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) < ${maxRetries} LIMIT 1`,
+      dealStates.findStuckBatches(schema, STATUS.FILTERING, 5, maxRetries),
     );
 
     if (!stuckBatches || stuckBatches.length === 0) {
@@ -39058,14 +39150,10 @@ async function runFilterPipeline() {
     );
 
     // SELECT its rows
-    const stuckRows = await exec(
-      `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${schema}.DEAL_STATES WHERE BATCH_ID = '${stuckBatchId}'`,
-    );
+    const stuckRows = await exec(dealStates.selectEmailsByBatch(schema, stuckBatchId));
 
     // UPDATE UPDATED_AT to prevent other instances from grabbing it
-    await exec(
-      `UPDATE ${schema}.DEAL_STATES SET UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${stuckBatchId}'`,
-    );
+    await exec(dealStates.refreshBatchTimestamp(schema, stuckBatchId));
 
     // Insert batch event with retrigger type and new trigger hash
     const triggerHash = v7();
@@ -39124,18 +39212,16 @@ async function runFilterPipeline() {
 
     // d. UPDATE passed IDs -> pending_classification
     if (filteredIds.length > 0) {
-      const quotedIds = filteredIds.map((id) => `'${sanitizeId(id)}'`).join(',');
+      const quotedIds = filteredIds.map((id) => `'${sanitizeId(id)}'`);
       await execNoRL(
-        `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.PENDING_CLASSIFICATION}', UPDATED_AT = CURRENT_TIMESTAMP WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
+        dealStates.updateStatusByIds(schema, quotedIds, STATUS.PENDING_CLASSIFICATION),
       );
     }
 
     // e. UPDATE rejected IDs -> filter_rejected
     if (rejectedIds.length > 0) {
-      const quotedIds = rejectedIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-      await execNoRL(
-        `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FILTER_REJECTED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-      );
+      const quotedIds = rejectedIds.map((id) => `'${sanitizeId(id)}'`);
+      await execNoRL(dealStates.updateStatusByIds(schema, quotedIds, STATUS.FILTER_REJECTED));
     }
 
     // f. Insert BATCH_EVENTS with eventType: 'complete'
@@ -39157,7 +39243,7 @@ async function runFilterPipeline() {
     if (!bid) return
     const safeBid = sanitizeId(bid);
     await execNoRL(
-      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${STATUS.FILTERING}'`,
+      dealStates.updateStatusByBatch(schema, safeBid, STATUS.FILTERING, STATUS.FAILED),
     );
     await insertBatchEvent(execNoRL, schema, {
       triggerHash: v7(),
@@ -39202,6 +39288,7 @@ async function runFilterPipeline() {
  * the items have been flushed (or rejects on flush error).
  */
 
+
 class WriteBatcher {
   /**
    * @param {Function} executeSqlFn — bound (sql) => executeSql(apiUrl, jwt, biscuit, sql)
@@ -39210,7 +39297,11 @@ class WriteBatcher {
    * @param {number} opts.flushIntervalMs — timer-based flush interval (default 5000)
    * @param {number} opts.flushThreshold — count-based flush threshold per queue (default 10)
    */
-  constructor(executeSqlFn, schema, { flushIntervalMs = 5000, flushThreshold = 10, coreSchema = 'EMAIL_CORE_STAGING' } = {}) {
+  constructor(
+    executeSqlFn,
+    schema,
+    { flushIntervalMs = 5000, flushThreshold = 10, coreSchema = 'EMAIL_CORE_STAGING' } = {},
+  ) {
     this._executeSqlFn = executeSqlFn;
     this._schema = schema;
     this._coreSchema = coreSchema;
@@ -39357,7 +39448,9 @@ class WriteBatcher {
       await this._executeQueue(queueName, items);
       for (const w of waiters) w.resolve();
     } catch (err) {
-      console.error(`[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}`);
+      console.error(
+        `[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}`,
+      );
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
         console.error(
@@ -39385,32 +39478,27 @@ class WriteBatcher {
 
     switch (queueName) {
       case 'evals': {
-        const sql = `INSERT INTO ${s}.EMAIL_THREAD_EVALUATIONS (ID, THREAD_ID, AI_EVALUATION_AUDIT_ID, AI_INSIGHT, AI_SUMMARY, IS_DEAL, LIKELY_SCAM, AI_SCORE, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (THREAD_ID) DO UPDATE SET AI_EVALUATION_AUDIT_ID = EXCLUDED.AI_EVALUATION_AUDIT_ID, AI_INSIGHT = EXCLUDED.AI_INSIGHT, AI_SUMMARY = EXCLUDED.AI_SUMMARY, IS_DEAL = EXCLUDED.IS_DEAL, LIKELY_SCAM = EXCLUDED.LIKELY_SCAM, AI_SCORE = EXCLUDED.AI_SCORE, UPDATED_AT = CURRENT_TIMESTAMP`;
-        await this._executeSqlFn(sql);
+        await this._executeSqlFn(evaluations.upsert(s, items));
         break
       }
 
       case 'dealDeletes': {
-        const sql = `DELETE FROM ${s}.DEALS WHERE THREAD_ID IN (${items.join(',')})`;
-        await this._executeSqlFn(sql);
+        await this._executeSqlFn(deals.deleteByThreadIds(s, items));
         break
       }
 
       case 'deals': {
-        const sql = `INSERT INTO ${s}.DEALS (ID, USER_ID, THREAD_ID, EMAIL_THREAD_EVALUATION_ID, DEAL_NAME, DEAL_TYPE, CATEGORY, VALUE, CURRENCY, BRAND, IS_AI_SORTED, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (THREAD_ID) DO UPDATE SET EMAIL_THREAD_EVALUATION_ID = EXCLUDED.EMAIL_THREAD_EVALUATION_ID, DEAL_NAME = EXCLUDED.DEAL_NAME, DEAL_TYPE = EXCLUDED.DEAL_TYPE, CATEGORY = EXCLUDED.CATEGORY, VALUE = EXCLUDED.VALUE, CURRENCY = EXCLUDED.CURRENCY, BRAND = EXCLUDED.BRAND, UPDATED_AT = CURRENT_TIMESTAMP`;
-        await this._executeSqlFn(sql);
+        await this._executeSqlFn(deals.upsert(s, items));
         break
       }
 
       case 'contactDeletes': {
-        const sql = `DELETE FROM ${s}.DEAL_CONTACTS WHERE DEAL_ID IN (${items.join(',')})`;
-        await this._executeSqlFn(sql);
+        await this._executeSqlFn(dealContacts.deleteByDealIds(s, items));
         break
       }
 
       case 'contacts': {
-        const sql = `INSERT INTO ${s}.DEAL_CONTACTS (DEAL_ID, USER_ID, EMAIL, CONTACT_TYPE, CREATED_AT, UPDATED_AT) VALUES ${items.join(', ')} ON CONFLICT (DEAL_ID, USER_ID, EMAIL) DO UPDATE SET CONTACT_TYPE = EXCLUDED.CONTACT_TYPE, UPDATED_AT = CURRENT_TIMESTAMP`;
-        await this._executeSqlFn(sql);
+        await this._executeSqlFn(dealContacts.upsert(s, items));
         break
       }
 
@@ -39424,11 +39512,12 @@ class WriteBatcher {
         }
         const uniqueItems = [...dedupMap.values()];
         if (uniqueItems.length < items.length) {
-          console.log(`[write-batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`);
+          console.log(
+            `[write-batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`,
+          );
         }
         const cs = this._coreSchema;
-        const sql = `INSERT INTO ${cs}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${uniqueItems.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = EXCLUDED.NAME, COMPANY_NAME = EXCLUDED.COMPANY_NAME, TITLE = EXCLUDED.TITLE, PHONE_NUMBER = EXCLUDED.PHONE_NUMBER, UPDATED_AT = CURRENT_TIMESTAMP`;
-        await this._executeSqlFn(sql);
+        await this._executeSqlFn(contacts.upsert(cs, uniqueItems));
         break
       }
 
@@ -39441,19 +39530,16 @@ class WriteBatcher {
           allNotDealIds.push(...item.notDealEmailIds);
         }
         if (allDealIds.length > 0) {
-          const sql = `UPDATE ${s}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${allDealIds.join(',')})`;
-          await this._executeSqlFn(sql);
+          await this._executeSqlFn(dealStates.updateStatusByIds(s, allDealIds, 'deal'));
         }
         if (allNotDealIds.length > 0) {
-          const sql = `UPDATE ${s}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${allNotDealIds.join(',')})`;
-          await this._executeSqlFn(sql);
+          await this._executeSqlFn(dealStates.updateStatusByIds(s, allNotDealIds, 'not_deal'));
         }
         break
       }
 
       case 'batchEvents': {
-        const sql = `INSERT INTO ${s}.BATCH_EVENTS (TRIGGER_HASH, BATCH_ID, BATCH_TYPE, EVENT_TYPE, CREATED_AT) VALUES ${items.join(', ')} ON CONFLICT (TRIGGER_HASH) DO UPDATE SET EVENT_TYPE = EXCLUDED.EVENT_TYPE, CREATED_AT = CURRENT_TIMESTAMP`;
-        await this._executeSqlFn(sql);
+        await this._executeSqlFn(batchEvents.upsertBulk(s, items));
         break
       }
     }
@@ -39515,14 +39601,10 @@ async function runClassifyPipeline() {
     const batchId = v7();
 
     // Atomic UPDATE for pending_classification threads (thread-aware, NOT EXISTS for pending/filtering)
-    const claimSql = `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.CLASSIFYING}', BATCH_ID = '${batchId}', UPDATED_AT = CURRENT_TIMESTAMP WHERE THREAD_ID IN (SELECT DISTINCT ds.THREAD_ID FROM ${schema}.DEAL_STATES ds WHERE ds.STATUS = '${STATUS.PENDING_CLASSIFICATION}' AND NOT EXISTS (SELECT 1 FROM ${schema}.DEAL_STATES ds2 WHERE ds2.THREAD_ID = ds.THREAD_ID AND ds2.SYNC_STATE_ID = ds.SYNC_STATE_ID AND ds2.STATUS IN ('${STATUS.PENDING}', '${STATUS.FILTERING}')) LIMIT ${classifyBatchSize}) AND STATUS = '${STATUS.PENDING_CLASSIFICATION}'`;
-
-    await exec(claimSql);
+    await exec(dealStates.claimClassifyBatch(schema, batchId, classifyBatchSize));
 
     // SELECT the claimed rows
-    const rows = await exec(
-      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${schema}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${batchId}'`,
-    );
+    const rows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, batchId));
 
     const count = rows ? rows.length : 0;
     console.log(`[run-classify-pipeline] claimed ${count} pending rows`);
@@ -39543,7 +39625,7 @@ async function runClassifyPipeline() {
     console.log(`[run-classify-pipeline] no pending rows, checking for stuck batches`);
 
     const stuckBatches = await exec(
-      `SELECT ds.BATCH_ID, COUNT(DISTINCT be.TRIGGER_HASH) AS ATTEMPTS FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.BATCH_EVENTS be ON be.BATCH_ID = ds.BATCH_ID WHERE ds.STATUS = '${STATUS.CLASSIFYING}' AND ds.BATCH_ID IS NOT NULL AND ds.UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '5' MINUTE GROUP BY ds.BATCH_ID HAVING COUNT(DISTINCT be.TRIGGER_HASH) < ${maxRetries} LIMIT 1`,
+      dealStates.findStuckBatches(schema, STATUS.CLASSIFYING, 5, maxRetries),
     );
 
     if (!stuckBatches || stuckBatches.length === 0) {
@@ -39560,14 +39642,10 @@ async function runClassifyPipeline() {
     );
 
     // SELECT its rows
-    const stuckRows = await exec(
-      `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${schema}.DEAL_STATES ds LEFT JOIN ${schema}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${schema}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${stuckBatchId}'`,
-    );
+    const stuckRows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, stuckBatchId));
 
     // UPDATE UPDATED_AT to prevent other instances from grabbing it
-    await exec(
-      `UPDATE ${schema}.DEAL_STATES SET UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${stuckBatchId}'`,
-    );
+    await exec(dealStates.refreshBatchTimestamp(schema, stuckBatchId));
 
     // Insert batch event with retrigger type and new trigger hash
     const triggerHash = v7();
@@ -39654,10 +39732,8 @@ async function runClassifyPipeline() {
         );
 
         // Look up existing evaluations for unfetchable threads
-        const quotedUnfetchable = unfetchableThreadIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-        const existingEvals = await execNoRL(
-          `SELECT THREAD_ID, IS_DEAL FROM ${schema}.EMAIL_THREAD_EVALUATIONS WHERE THREAD_ID IN (${quotedUnfetchable})`,
-        );
+        const quotedUnfetchable = unfetchableThreadIds.map((id) => `'${sanitizeId(id)}'`);
+        const existingEvals = await execNoRL(evaluations.selectByThreadIds(schema, quotedUnfetchable));
         const evalByThread = {};
         for (const e of existingEvals || []) {
           evalByThread[e.THREAD_ID] = e.IS_DEAL;
@@ -39678,19 +39754,15 @@ async function runClassifyPipeline() {
         }
 
         if (unfetchableDealIds.length > 0) {
-          const quotedIds = unfetchableDealIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-          await execNoRL(
-            `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-          );
+          const quotedDealIds = unfetchableDealIds.map((id) => `'${sanitizeId(id)}'`);
+          await execNoRL(dealStates.updateStatusByIds(schema, quotedDealIds, 'deal'));
           console.log(
             `[run-classify-pipeline] ${unfetchableDealIds.length} unfetchable rows → deal (previous eval)`,
           );
         }
         if (unfetchableNotDealIds.length > 0) {
-          const quotedIds = unfetchableNotDealIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-          await execNoRL(
-            `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-          );
+          const quotedNotDealIds = unfetchableNotDealIds.map((id) => `'${sanitizeId(id)}'`);
+          await execNoRL(dealStates.updateStatusByIds(schema, quotedNotDealIds, 'not_deal'));
           console.log(
             `[run-classify-pipeline] ${unfetchableNotDealIds.length} unfetchable rows → not_deal`,
           );
@@ -39997,16 +40069,12 @@ async function runClassifyPipeline() {
 
     // Write state updates directly (not through batcher) to ensure they commit
     if (dealEmailIds.length > 0) {
-      const quotedIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-      await execNoRL(
-        `UPDATE ${schema}.DEAL_STATES SET STATUS = 'deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-      );
+      const quotedIds = dealEmailIds.map((id) => `'${sanitizeId(id)}'`);
+      await execNoRL(dealStates.updateStatusByIds(schema, quotedIds, 'deal'));
     }
     if (notDealEmailIds.length > 0) {
-      const quotedIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-      await execNoRL(
-        `UPDATE ${schema}.DEAL_STATES SET STATUS = 'not_deal' WHERE EMAIL_METADATA_ID IN (${quotedIds})`,
-      );
+      const quotedNDIds = notDealEmailIds.map((id) => `'${sanitizeId(id)}'`);
+      await execNoRL(dealStates.updateStatusByIds(schema, quotedNDIds, 'not_deal'));
     }
 
     console.log(
@@ -40033,7 +40101,7 @@ async function runClassifyPipeline() {
     if (!bid) return
     const safeBid = sanitizeId(bid);
     await execNoRL(
-      `UPDATE ${schema}.DEAL_STATES SET STATUS = '${STATUS.FAILED}', UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${safeBid}' AND STATUS = '${STATUS.CLASSIFYING}'`,
+      dealStates.updateStatusByBatch(schema, safeBid, STATUS.CLASSIFYING, STATUS.FAILED),
     );
     await insertBatchEvent(execNoRL, schema, {
       triggerHash: v7(),

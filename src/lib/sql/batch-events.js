@@ -1,4 +1,4 @@
-import { sanitizeId, sanitizeString, sanitizeSchema } from '../queries.js'
+import { sanitizeId, sanitizeString, sanitizeSchema } from './sanitize.js'
 
 export const batchEvents = {
   upsert: (schema, triggerHash, batchId, batchType, eventType) => {

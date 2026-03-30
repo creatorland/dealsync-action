@@ -10,7 +10,7 @@
 //   - ON CONFLICT (...) DO UPDATE supported
 //   - LEFT JOIN on single column only
 
-import { sanitizeId, sanitizeString, sanitizeSchema } from '../queries.js'
+import { sanitizeId, sanitizeString, sanitizeSchema } from './sanitize.js'
 
 export const dealStates = {
   claimFilterBatch: (schema, batchId, batchSize) => {

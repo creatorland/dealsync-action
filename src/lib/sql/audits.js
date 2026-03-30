@@ -1,4 +1,4 @@
-import { sanitizeId, sanitizeString, sanitizeSchema } from '../queries.js'
+import { sanitizeId, sanitizeString, sanitizeSchema } from './sanitize.js'
 
 export const audits = {
   selectByBatch: (schema, batchId) => {
@@ -7,7 +7,10 @@ export const audits = {
     return `SELECT AI_EVALUATION FROM ${s}.AI_EVALUATION_AUDITS WHERE BATCH_ID = '${bid}'`
   },
 
-  insert: (schema, { id, batchId, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation }) => {
+  insert: (
+    schema,
+    { id, batchId, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation },
+  ) => {
     const s = sanitizeSchema(schema)
     const safeId = sanitizeId(id)
     const safeBid = sanitizeId(batchId)

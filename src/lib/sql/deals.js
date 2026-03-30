@@ -1,4 +1,4 @@
-import { sanitizeSchema } from '../queries.js'
+import { sanitizeSchema } from './sanitize.js'
 
 export const deals = {
   deleteByThreadIds: (schema, quotedThreadIds) => {
