@@ -39574,6 +39574,7 @@ async function runClassifyPipeline() {
   async function processClassifyBatch(batch) {
     const { batch_id: batchId, rows } = batch;
     const creatorEmail = rows[0].CREATOR_EMAIL || '';
+    const alreadyEvaluatedThreadIds = new Set();
 
     console.log(`[run-classify-pipeline] processing batch ${batchId} (${rows.length} rows)`);
 
@@ -39720,6 +39721,7 @@ async function runClassifyPipeline() {
 
             if (latestEmailDate <= new Date(dealUpdatedAt)) {
               // All emails are older than the deal — skip classification
+              alreadyEvaluatedThreadIds.add(threadId);
               skippedThreadIds.push(threadId);
               const threadRows = rows.filter((r) => r.THREAD_ID === threadId);
               skippedEmailIds.push(...threadRows.map((r) => r.EMAIL_METADATA_ID));
@@ -40017,6 +40019,7 @@ async function runClassifyPipeline() {
     // Use previous evaluation if exists, otherwise default to not_deal
     for (const [threadId, threadRows] of Object.entries(metadataByThread)) {
       if (classifiedThreadIds.has(threadId)) continue
+      if (alreadyEvaluatedThreadIds.has(threadId)) continue
       // Already handled by unfetchable logic earlier
       if (threadRows.every((r) => r.STATUS === STATUS.DEAL || r.STATUS === STATUS.NOT_DEAL))
         continue
