@@ -64,7 +64,28 @@ When a thread includes PREVIOUS_AI_SUMMARY, it reflects a prior evaluation with 
 Thread: Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored YouTube review with 60-day exclusivity.
 
 ```json
-{"thread_index": 1, "is_deal": true, "is_english": true, "ai_score": 8, "category": "new", "likely_scam": false, "ai_insight": "Beauty Brand X offers $2.5K for sponsored YouTube review", "ai_summary": "Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.", "main_contact": {"name": "Sarah Kim", "email": "sarah@beautybrandx.com", "company": "Beauty Brand X", "title": "Partnerships Manager", "phone_number": null}, "deal_brand": "Beauty Brand X", "deal_type": "sponsorship", "deal_name": "Beauty Brand X YouTube Review", "deal_value": 2500, "deal_currency": "USD"}
+{
+  "thread_index": 1,
+  "is_deal": true,
+  "is_english": true,
+  "ai_score": 8,
+  "category": "new",
+  "likely_scam": false,
+  "ai_insight": "Beauty Brand X offers $2.5K for sponsored YouTube review",
+  "ai_summary": "Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.",
+  "main_contact": {
+    "name": "Sarah Kim",
+    "email": "sarah@beautybrandx.com",
+    "company": "Beauty Brand X",
+    "title": "Partnerships Manager",
+    "phone_number": null
+  },
+  "deal_brand": "Beauty Brand X",
+  "deal_type": "sponsorship",
+  "deal_name": "Beauty Brand X YouTube Review",
+  "deal_value": 2500,
+  "deal_currency": "USD"
+}
 ```
 
 ## Non-deal example
@@ -72,7 +93,22 @@ Thread: Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X)
 Thread: noreply@youtube.com sends 100K subscriber milestone notification.
 
 ```json
-{"thread_index": 2, "is_deal": false, "is_english": true, "ai_score": 1, "category": null, "likely_scam": false, "ai_insight": "YouTube milestone notification", "ai_summary": "Automated YouTube notification about 100K subscriber milestone. No deal content.", "main_contact": null, "deal_brand": null, "deal_type": null, "deal_name": null, "deal_value": null, "deal_currency": null}
+{
+  "thread_index": 2,
+  "is_deal": false,
+  "is_english": true,
+  "ai_score": 1,
+  "category": null,
+  "likely_scam": false,
+  "ai_insight": "YouTube milestone notification",
+  "ai_summary": "Automated YouTube notification about 100K subscriber milestone. No deal content.",
+  "main_contact": null,
+  "deal_brand": null,
+  "deal_type": null,
+  "deal_name": null,
+  "deal_value": null,
+  "deal_currency": null
+}
 ```
 
 Only classify the threads in the user message. Do NOT classify the examples above.

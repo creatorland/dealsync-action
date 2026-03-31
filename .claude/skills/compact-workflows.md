@@ -118,18 +118,18 @@ git add -A && git commit -m "message" && git push origin main
 
 ## Key Config Defaults
 
-| Setting | Filter | Classify |
-|---------|--------|----------|
-| max-concurrent | 5 | 70 |
-| batch-size | 200 | 5 (threads) |
-| max-retries | 6 | 6 |
-| chunk-size | 50 | 10 |
-| fetch-timeout-ms | 240000 | 240000 |
-| flush-interval-ms | n/a | 5000 |
-| flush-threshold | n/a | 5 |
-| primary-model | n/a | Qwen/Qwen3-235B-A22B-Instruct-2507 |
-| fallback-model | n/a | deepseek-ai/DeepSeek-V3 |
-| timeout-minutes | 10 | 10 |
+| Setting           | Filter | Classify                           |
+| ----------------- | ------ | ---------------------------------- |
+| max-concurrent    | 5      | 70                                 |
+| batch-size        | 200    | 5 (threads)                        |
+| max-retries       | 6      | 6                                  |
+| chunk-size        | 50     | 10                                 |
+| fetch-timeout-ms  | 240000 | 240000                             |
+| flush-interval-ms | n/a    | 5000                               |
+| flush-threshold   | n/a    | 5                                  |
+| primary-model     | n/a    | Qwen/Qwen3-235B-A22B-Instruct-2507 |
+| fallback-model    | n/a    | deepseek-ai/DeepSeek-V3            |
+| timeout-minutes   | 10     | 10                                 |
 
 ## Common Issues
 

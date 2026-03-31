@@ -27,32 +27,21 @@ This is a **GitHub Action** (Node 24, ESM) that implements a multi-stage email d
 
 ### Command Dispatch Pattern
 
-Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command` GitHub Action input selects which handler runs. All commands are async, return a JSON result, and set `success`/`result`/`error` outputs via `@actions/core`.
+Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command` GitHub Action input selects which handler runs. Available commands: `run-filter-pipeline`, `run-classify-pipeline`, `sync-deal-states`, `eval`, `eval-compare`. All commands are async, return a JSON result, and set `success`/`result`/`error` outputs via `@actions/core`.
 
-### Pipeline Stages
+### Pipeline Commands
 
-The pipeline processes emails through two parallel jobs:
+**`run-filter-pipeline`** — Claims batches of pending emails, fetches headers from content fetcher, applies 6 static rejection rules from `src/lib/emails.js` (configs in `config/*.json`), updates DEAL_STATES to `pending_classification` or `filter_rejected`. Runs batches concurrently via `runPool()`.
 
-**Filter job** (stateless, headers only):
+**`run-classify-pipeline`** — Claims batches of pending_classification emails, fetches bodies, calls AI classification, saves audit checkpoint to AI_EVALUATION_AUDITS, upserts evaluations/deals/contacts, and sets terminal deal states. Uses `WriteBatcher` (`src/lib/batcher.js`) for batched SQL writes. Runs batches concurrently via `runPool()`.
 
-1. `fetch-and-filter` — fetch email headers from content fetcher, apply 6 static rules from `src/lib/filter-rules.js` (configs in `config/*.json`), return pass/reject ID lists
-2. Two `sxt-execute` calls update DEAL_STATES to `pending_classification` or `filter_rejected`
+**`sync-deal-states`** — Paginated sync of deal states.
 
-**Classify job** (AI, sequential):
+**`eval` / `eval-compare`** — Evaluation system (see below).
 
-1. `fetch-and-classify` — fetch email bodies, call AI via 4-layer resilience pipeline, save audit checkpoint to AI_EVALUATION_AUDITS
-2. `save-evals` — read audit, upsert EMAIL_THREAD_EVALUATIONS
-3. `save-deals` — upsert DEALS, delete non-deal threads
-4. `save-deal-contacts` — insert DEAL_CONTACTS from AI main_contact
-5. `update-deal-states` — set terminal status (deal/not_deal)
+### AI Resilience Pipeline (ai.js)
 
-### Checkpoint/Audit Pattern
-
-`fetch-and-classify` saves AI results to AI_EVALUATION_AUDITS as a checkpoint. All downstream commands (save-evals, save-deals, save-deal-contacts, update-deal-states) read from this audit table, not from the AI. This makes the pipeline resumable — if a downstream step fails, re-running it reads the existing audit.
-
-### AI Resilience Pipeline (ai-client.js)
-
-4-layer fallback for `fetch-and-classify`:
+4-layer fallback for classification:
 
 - **Layer 0**: Primary model (Qwen3-235B) with HTTP retries + exponential backoff
 - **Layer 1**: Local JSON repair (strip markdown fences, extract array, unwrap wrapper objects, coerce schema)
@@ -61,11 +50,11 @@ The pipeline processes emails through two parallel jobs:
 
 `parseAndValidate()` handles schema coercion: clamps ai_score to 1-10, validates category/deal_type against enum sets, enforces string limits.
 
-### SxT Client (sxt-client.js)
+### Database Client (db.js)
 
 Auth via proxy with shared secret → JWT. All SQL goes through `executeSql()` which acquires a rate-limit token (fail-open), executes against SxT REST API, and handles 401 re-auth. All column names are UPPERCASE (SxT convention).
 
-### State Machine (queries.js)
+### State Machine (deal-states.js)
 
 ```
 pending → filtering → filter_rejected (terminal)
@@ -79,7 +68,7 @@ pending → filtering → filter_rejected (terminal)
 
 ### Prompt System
 
-Prompts live in `prompts/system.md` and `prompts/user.md`, imported as strings via rollup-plugin-string. `buildPrompt()` groups emails by thread, sanitizes bodies, and injects thread data into `{{THREAD_DATA}}` placeholder. The `eval` command can fetch prompts from a specific git commit via `prompt-hash`.
+Prompts live in `prompts/system.md` and `prompts/user.md`, imported as strings via rollup-plugin-string. `buildPrompt()` in `src/lib/ai.js` groups emails by thread, sanitizes bodies, and injects thread data into `{{THREAD_DATA}}` placeholder. The `eval` command can fetch prompts from a specific git commit via `prompt-hash`.
 
 ## Key Conventions
 
@@ -88,5 +77,4 @@ Prompts live in `prompts/system.md` and `prompts/user.md`, imported as strings v
 - Schema names sanitized via `sanitizeSchema()` (alphanumeric, underscore only)
 - String values escaped via `sanitizeString()` (single quotes doubled)
 - Batch SQL operations — entire batches in single statements, no row-by-row loops
-- `dispatch` and `retrigger-stuck` commands exist in action.yml but are handled at the W3 runtime level, not in `src/commands/`
 - YAML gotcha: hex environment names (0x...) must be quoted in workflow files to prevent YAML integer parsing

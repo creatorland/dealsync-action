@@ -1,29 +1,26 @@
 import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
+import { authenticate, executeSql, acquireRateLimitToken } from '../lib/db.js'
+import { callModel, parseAndValidate, buildPrompt } from '../lib/ai.js'
+import { fetchEmails } from '../lib/emails.js'
+import { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
+import { WriteBatcher } from '../lib/batcher.js'
 import {
   sanitizeSchema,
   sanitizeId,
   sanitizeString,
   toSqlNullable,
   STATUS,
-  saveResults,
-} from '../lib/constants.js'
-import { authenticate, executeSql, acquireRateLimitToken } from '../lib/sxt-client.js'
-import { callModel, parseAndValidate } from '../lib/ai-client.js'
-import { buildPrompt } from '../lib/prompt.js'
-import { fetchEmails } from '../lib/email-client.js'
-import { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
-import { WriteBatcher } from '../lib/write-batcher.js'
-import {
   dealStates as dealStatesSql,
+  audits as auditsSql,
   evaluations as evalSql,
   deals as dealsSql,
 } from '../lib/sql/index.js'
 
 /**
  * Orchestrator that claims and processes classify batches concurrently,
- * with in-memory audit passing through save-evals, save-deals,
- * save-deal-contacts, and update-deal-states.
+ * with in-memory audit passing through eval upserts, deal upserts,
+ * contact inserts, and terminal state updates.
  */
 export async function runClassifyPipeline() {
   const authUrl = core.getInput('auth-url')
@@ -152,7 +149,7 @@ export async function runClassifyPipeline() {
 
     let threads = null
 
-    const existingAudit = await execNoRL(saveResults.getAuditByBatchId(schema, batchId))
+    const existingAudit = await execNoRL(auditsSql.selectByBatch(schema, batchId))
 
     if (existingAudit && existingAudit.length > 0 && existingAudit[0].AI_EVALUATION) {
       try {
@@ -402,7 +399,7 @@ export async function runClassifyPipeline() {
       const evaluation = sanitizeString(JSON.stringify(aiOutput))
       try {
         await execNoRL(
-          saveResults.insertAudit(schema, {
+          auditsSql.insert(schema, {
             id: auditId,
             batchId,
             threadCount: threads.length,

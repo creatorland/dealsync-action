@@ -1,7 +1,6 @@
 import * as core from '@actions/core'
-import { sanitizeSchema } from '../lib/constants.js'
-import { authenticate, executeSql } from '../lib/sxt-client.js'
-import { dealStates as dealStatesSql } from '../lib/sql/index.js'
+import { authenticate, executeSql } from '../lib/db.js'
+import { sanitizeSchema, dealStates as dealStatesSql } from '../lib/sql/index.js'
 
 /**
  * Sync email_metadata into deal_states — insert missing rows with status='pending'.
@@ -20,7 +19,12 @@ export async function runSyncDealStates() {
   )
   const jwt = await authenticate(authUrl, authSecret)
 
-  const result = await executeSql(apiUrl, jwt, biscuit, dealStatesSql.syncFromEmailMetadata(schema, emailCoreSchema))
+  const result = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    dealStatesSql.syncFromEmailMetadata(schema, emailCoreSchema),
+  )
 
   const count = Array.isArray(result) ? result.length : 0
   console.log(`[sync-deal-states] done: ${count} synced (1 query)`)

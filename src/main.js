@@ -1,32 +1,14 @@
 import * as core from '@actions/core'
 import { runSyncDealStates } from './commands/sync-deal-states.js'
-import { runFetchAndClassify } from './commands/fetch-and-classify.js'
-import { runFetchAndFilter } from './commands/fetch-and-filter.js'
-import { runSaveDealContacts } from './commands/save-deal-contacts.js'
-import { runSaveDeals } from './commands/save-deals.js'
-import { runSaveEvals } from './commands/save-evals.js'
-import { runSxtQuery } from './commands/sxt-execute.js'
-import { runUpdateDealStates } from './commands/update-deal-states.js'
 import { runEval } from './commands/eval.js'
 import { runEvalCompare } from './commands/eval-compare.js'
-import { runClaimFilterBatch } from './commands/claim-filter-batch.js'
-import { runClaimClassifyBatch } from './commands/claim-classify-batch.js'
 import { runFilterPipeline } from './commands/run-filter-pipeline.js'
 import { runClassifyPipeline } from './commands/run-classify-pipeline.js'
 
 const COMMANDS = {
-  'sxt-execute': runSxtQuery,
-  'fetch-and-filter': runFetchAndFilter,
-  'fetch-and-classify': runFetchAndClassify,
-  'save-evals': runSaveEvals,
-  'save-deal-contacts': runSaveDealContacts,
-  'save-deals': runSaveDeals,
-  'update-deal-states': runUpdateDealStates,
   'sync-deal-states': runSyncDealStates,
   eval: runEval,
   'eval-compare': runEvalCompare,
-  'claim-filter-batch': runClaimFilterBatch,
-  'claim-classify-batch': runClaimClassifyBatch,
   'run-filter-pipeline': runFilterPipeline,
   'run-classify-pipeline': runClassifyPipeline,
 }

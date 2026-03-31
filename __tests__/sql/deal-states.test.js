@@ -148,7 +148,9 @@ describe('dealStates', () => {
     })
 
     it('sanitizeSchema rejects malicious schema names', () => {
-      expect(() => dealStates.claimFilterBatch("BAD SCHEMA; --", 'b1', 10)).toThrow('Invalid schema')
+      expect(() => dealStates.claimFilterBatch('BAD SCHEMA; --', 'b1', 10)).toThrow(
+        'Invalid schema',
+      )
     })
   })
 })

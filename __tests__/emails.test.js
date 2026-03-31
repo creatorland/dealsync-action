@@ -1,7 +1,7 @@
 import { jest } from '@jest/globals'
 
 // Mock withTimeout from sxt-client
-jest.unstable_mockModule('../src/lib/sxt-client.js', () => ({
+jest.unstable_mockModule('../src/lib/db.js', () => ({
   withTimeout: jest.fn((ms) => {
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), ms || 120000)
@@ -23,8 +23,8 @@ afterEach(() => {
   jest.restoreAllMocks()
 })
 
-const { fetchEmails } = await import('../src/lib/email-client.js')
-const sxtClient = await import('../src/lib/sxt-client.js')
+const { fetchEmails } = await import('../src/lib/emails.js')
+const sxtClient = await import('../src/lib/db.js')
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals'
-import { WriteBatcher } from '../src/lib/write-batcher.js'
+import { WriteBatcher } from '../src/lib/batcher.js'
 
 // ============================================================
 // Helpers
@@ -452,7 +452,7 @@ describe('WriteBatcher', () => {
     ])
 
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('[write-batcher] flushing deals: 1 items'),
+      expect.stringContaining('[batcher] flushing deals: 1 items'),
     )
 
     consoleSpy.mockRestore()

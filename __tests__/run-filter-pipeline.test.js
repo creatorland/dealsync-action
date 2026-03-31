@@ -28,7 +28,7 @@ jest.unstable_mockModule('uuid', () => ({
 const mockAuthenticate = jest.fn()
 const mockExecuteSql = jest.fn()
 const mockAcquireRateLimitToken = jest.fn().mockResolvedValue(undefined)
-jest.unstable_mockModule('../src/lib/sxt-client.js', () => ({
+jest.unstable_mockModule('../src/lib/db.js', () => ({
   authenticate: mockAuthenticate,
   executeSql: mockExecuteSql,
   acquireRateLimitToken: mockAcquireRateLimitToken,
@@ -38,15 +38,11 @@ jest.unstable_mockModule('../src/lib/sxt-client.js', () => ({
   })),
 }))
 
-// Mock email-client
+// Mock emails (email-client + filter-rules)
 const mockFetchEmails = jest.fn()
-jest.unstable_mockModule('../src/lib/email-client.js', () => ({
-  fetchEmails: mockFetchEmails,
-}))
-
-// Mock filter-rules
 const mockIsRejected = jest.fn()
-jest.unstable_mockModule('../src/lib/filter-rules.js', () => ({
+jest.unstable_mockModule('../src/lib/emails.js', () => ({
+  fetchEmails: mockFetchEmails,
   isRejected: mockIsRejected,
 }))
 

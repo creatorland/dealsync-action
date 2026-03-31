@@ -1,11 +1,9 @@
 import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
-import { sanitizeSchema, sanitizeId, STATUS } from '../lib/constants.js'
 import { runPool, insertBatchEvent, sweepStuckRows } from '../lib/pipeline.js'
-import { authenticate, executeSql, acquireRateLimitToken } from '../lib/sxt-client.js'
-import { isRejected } from '../lib/filter-rules.js'
-import { fetchEmails } from '../lib/email-client.js'
-import { dealStates as dealStatesSql } from '../lib/sql/index.js'
+import { authenticate, executeSql, acquireRateLimitToken } from '../lib/db.js'
+import { isRejected, fetchEmails } from '../lib/emails.js'
+import { sanitizeSchema, sanitizeId, STATUS, dealStates as dealStatesSql } from '../lib/sql/index.js'
 
 /**
  * Orchestrator that claims and processes filter batches concurrently
@@ -42,7 +40,7 @@ export async function runFilterPipeline() {
   let totalFiltered = 0
   let totalRejected = 0
 
-  // 3. Define claimBatch() inline — same logic as claim-filter-batch.js
+  // 3. Define claimBatch() inline
   async function claimBatch() {
     const batchId = uuidv7()
 
@@ -151,7 +149,9 @@ export async function runFilterPipeline() {
     // d. UPDATE passed IDs -> pending_classification
     if (filteredIds.length > 0) {
       const quotedIds = filteredIds.map((id) => `'${sanitizeId(id)}'`)
-      await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedIds, STATUS.PENDING_CLASSIFICATION))
+      await execNoRL(
+        dealStatesSql.updateStatusByIds(schema, quotedIds, STATUS.PENDING_CLASSIFICATION),
+      )
     }
 
     // e. UPDATE rejected IDs -> filter_rejected
@@ -178,7 +178,9 @@ export async function runFilterPipeline() {
     const bid = batch.batch_id
     if (!bid) return
     const safeBid = sanitizeId(bid)
-    await execNoRL(dealStatesSql.updateStatusByBatch(schema, safeBid, STATUS.FILTERING, STATUS.FAILED))
+    await execNoRL(
+      dealStatesSql.updateStatusByBatch(schema, safeBid, STATUS.FILTERING, STATUS.FAILED),
+    )
     await insertBatchEvent(execNoRL, schema, {
       triggerHash: uuidv7(),
       batchId: bid,

@@ -12,6 +12,17 @@
 
 import { sanitizeId, sanitizeString, sanitizeSchema } from './sanitize.js'
 
+export const STATUS = {
+  PENDING: 'pending',
+  FILTERING: 'filtering',
+  PENDING_CLASSIFICATION: 'pending_classification',
+  CLASSIFYING: 'classifying',
+  DEAL: 'deal',
+  NOT_DEAL: 'not_deal',
+  FILTER_REJECTED: 'filter_rejected',
+  FAILED: 'failed',
+}
+
 export const dealStates = {
   claimFilterBatch: (schema, batchId, batchSize) => {
     const s = sanitizeSchema(schema)

@@ -1,10 +1,10 @@
 name: 'Dealsync'
-description: 'Dealsync pipeline action — fetch-and-filter, fetch-and-classify, save-evals, save-deals, save-deal-contacts, update-deal-states, sxt-execute, sync-deal-states'
+description: 'Dealsync pipeline action — run-filter-pipeline, run-classify-pipeline, sync-deal-states, eval, eval-compare'
 author: 'creatorland'
 
 inputs:
   command:
-    description: 'Operation: fetch-and-filter, fetch-and-classify, save-evals, save-deals, save-deal-contacts, update-deal-states, sxt-execute, sync-deal-states, claim-filter-batch, claim-classify-batch, run-filter-pipeline, run-classify-pipeline'
+    description: 'Operation: run-filter-pipeline, run-classify-pipeline, sync-deal-states, eval, eval-compare'
     required: true
   auth-url:
     description: 'SxT auth proxy URL'
@@ -24,23 +24,19 @@ inputs:
   rate-limiter-api-key:
     description: 'SxT API key for rate limiter token acquisition'
   content-fetcher-url:
-    description: 'Content fetcher service URL (fetch-and-filter, fetch-and-classify)'
-  sql:
-    description: 'SQL statement (sxt-execute)'
-  sxt-command:
-    description: 'SxT operation type: query or execute (sxt-execute)'
+    description: 'Content fetcher service URL (run-filter-pipeline, run-classify-pipeline)'
   batch-id:
-    description: 'Batch ID for processor commands (fetch-and-filter, fetch-and-classify, save-evals, save-deals, update-deal-states)'
+    description: 'Batch ID for processor commands (run-filter-pipeline, run-classify-pipeline)'
   hyperbolic-key:
-    description: 'Hyperbolic API key for AI classification (fetch-and-classify)'
+    description: 'Hyperbolic API key for AI classification (run-classify-pipeline)'
   primary-model:
-    description: 'Primary AI model ID (fetch-and-classify)'
+    description: 'Primary AI model ID (run-classify-pipeline)'
     default: 'Qwen/Qwen3-235B-A22B-Instruct-2507'
   fallback-model:
-    description: 'Fallback AI model ID (fetch-and-classify)'
+    description: 'Fallback AI model ID (run-classify-pipeline)'
     default: 'deepseek-ai/DeepSeek-V3'
   ai-api-url:
-    description: 'AI API URL (fetch-and-classify)'
+    description: 'AI API URL (run-classify-pipeline)'
     default: 'https://api.hyperbolic.xyz/v1/chat/completions'
   chunk-size:
     description: 'Content fetcher chunk size per request'
@@ -76,10 +72,10 @@ inputs:
     description: 'Max parallel batch workers (run-filter-pipeline, run-classify-pipeline)'
     default: '5'
   filter-batch-size:
-    description: 'Items per filter batch (run-filter-pipeline, claim-filter-batch)'
+    description: 'Items per filter batch (run-filter-pipeline)'
     default: '200'
   classify-batch-size:
-    description: 'Threads per classify batch (run-classify-pipeline, claim-classify-batch)'
+    description: 'Threads per classify batch (run-classify-pipeline)'
     default: '5'
   max-retries:
     description: 'Max attempts per batch before dead letter (run-filter-pipeline, run-classify-pipeline)'

@@ -1,7 +1,6 @@
 import * as core from '@actions/core'
-import { buildPrompt } from '../lib/prompt.js'
-import { callModel, parseAndValidate } from '../lib/ai-client.js'
-import { isRejected } from '../lib/filter-rules.js'
+import { buildPrompt, callModel, parseAndValidate } from '../lib/ai.js'
+import { isRejected } from '../lib/emails.js'
 import {
   computeDetectionMetrics,
   computeCategoryAccuracy,

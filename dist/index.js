@@ -27258,104 +27258,6 @@ function requireCore () {
 
 var coreExports = requireCore();
 
-// SQL sanitization utilities.
-// Extracted to break circular dependency between constants.js and sql builders.
-
-function sanitizeId(id) {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
-    throw new Error(`Invalid ID format: ${id}`)
-  }
-  return id
-}
-
-function sanitizeString(s) {
-  return (s || '')
-    .replace(/[\u2018\u2019\u201A\u201B]/g, "'") // curly single quotes → straight
-    .replace(/[\u201C\u201D\u201E\u201F]/g, '"') // curly double quotes → straight
-    .replace(/'/g, "''") // escape single quotes for SQL
-    .replace(/\\/g, '\\\\') // escape backslashes
-}
-
-function toSqlNullable(s) {
-  return s ? `'${sanitizeString(s)}'` : 'NULL'
-}
-
-function sanitizeSchema(schema) {
-  if (!/^[a-zA-Z0-9_]+$/.test(schema)) {
-    throw new Error(`Invalid schema: ${schema}`)
-  }
-  return schema
-}
-
-const audits = {
-  selectByBatch: (schema, batchId) => {
-    const s = sanitizeSchema(schema);
-    const bid = sanitizeId(batchId);
-    return `SELECT AI_EVALUATION FROM ${s}.AI_EVALUATION_AUDITS WHERE BATCH_ID = '${bid}'`
-  },
-
-  insert: (
-    schema,
-    { id, batchId, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation },
-  ) => {
-    const s = sanitizeSchema(schema);
-    const safeId = sanitizeId(id);
-    const safeBid = sanitizeId(batchId);
-    const safeModel = sanitizeString(model);
-    const safeEval = sanitizeString(evaluation);
-    return `INSERT INTO ${s}.AI_EVALUATION_AUDITS (ID, BATCH_ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT) VALUES ('${safeId}', '${safeBid}', ${Number(threadCount)}, ${Number(emailCount)}, ${Number(cost)}, ${Number(inputTokens)}, ${Number(outputTokens)}, '${safeModel}', '${safeEval}', CURRENT_TIMESTAMP)`
-  },
-};
-
-/**
- * Shared SQL queries for Dealsync W3 workflow actions.
- *
- * All queries target DEAL_STATES (not EMAIL_METADATA).
- * All column names UPPERCASE (SxT convention).
- * Schema is passed as a parameter — never hardcoded.
- * IDs must be sanitized before interpolation.
- *
- * Status-based state machine:
- *   pending → filtering → pending_classification → classifying → deal | not_deal
- *   filtering → filter_rejected (terminal)
- *   filtering | classifying | pending_classification → failed (terminal: dead-letter, stuck sweep, orphan sweep)
- */
-
-
-// ============================================================
-// STATUS CONSTANTS
-// ============================================================
-
-const STATUS = {
-  FILTERING: 'filtering',
-  PENDING_CLASSIFICATION: 'pending_classification',
-  CLASSIFYING: 'classifying',
-  DEAL: 'deal',
-  NOT_DEAL: 'not_deal',
-  FILTER_REJECTED: 'filter_rejected',
-  FAILED: 'failed',
-};
-
-// ============================================================
-// SAVE RESULTS QUERIES (detection pipeline DML)
-// ============================================================
-
-const saveResults = {
-  getAuditByBatchId: (schema, batchId) => audits.selectByBatch(schema, batchId),
-  insertAudit: (schema, params) => audits.insert(schema, params),
-};
-
-/**
- * Fetch and parse audit threads for a batch.
- * Returns the threads array, or null if no audit exists.
- */
-async function readAuditThreads(executeSqlFn, schema, batchId) {
-  const rows = await executeSqlFn(saveResults.getAuditByBatchId(schema, batchId));
-  if (!rows || rows.length === 0 || !rows[0].AI_EVALUATION) return null
-  const aiOutput = JSON.parse(rows[0].AI_EVALUATION);
-  return aiOutput.threads || []
-}
-
 // Shared retry utilities: sleep + exponential backoff.
 
 function sleep(ms) {
@@ -27594,6 +27496,35 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
   throw new Error('SxT query failed after all retries')
 }
 
+// SQL sanitization utilities.
+// Extracted to break circular dependency between constants.js and sql builders.
+
+function sanitizeId(id) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+    throw new Error(`Invalid ID format: ${id}`)
+  }
+  return id
+}
+
+function sanitizeString(s) {
+  return (s || '')
+    .replace(/[\u2018\u2019\u201A\u201B]/g, "'") // curly single quotes → straight
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"') // curly double quotes → straight
+    .replace(/'/g, "''") // escape single quotes for SQL
+    .replace(/\\/g, '\\\\') // escape backslashes
+}
+
+function toSqlNullable(s) {
+  return s ? `'${sanitizeString(s)}'` : 'NULL'
+}
+
+function sanitizeSchema(schema) {
+  if (!/^[a-zA-Z0-9_]+$/.test(schema)) {
+    throw new Error(`Invalid schema: ${schema}`)
+  }
+  return schema
+}
+
 // src/lib/sql/deal-states.js
 //
 // DEAL_STATES table SQL builders.
@@ -27606,6 +27537,16 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
 //   - ON CONFLICT (...) DO UPDATE supported
 //   - LEFT JOIN on single column only
 
+
+const STATUS = {
+  FILTERING: 'filtering',
+  PENDING_CLASSIFICATION: 'pending_classification',
+  CLASSIFYING: 'classifying',
+  DEAL: 'deal',
+  NOT_DEAL: 'not_deal',
+  FILTER_REJECTED: 'filter_rejected',
+  FAILED: 'failed',
+};
 
 const dealStates = {
   claimFilterBatch: (schema, batchId, batchSize) => {
@@ -27718,6 +27659,26 @@ const batchEvents = {
   },
 };
 
+const audits = {
+  selectByBatch: (schema, batchId) => {
+    const s = sanitizeSchema(schema);
+    const bid = sanitizeId(batchId);
+    return `SELECT AI_EVALUATION FROM ${s}.AI_EVALUATION_AUDITS WHERE BATCH_ID = '${bid}'`
+  },
+
+  insert: (
+    schema,
+    { id, batchId, threadCount, emailCount, cost, inputTokens, outputTokens, model, evaluation },
+  ) => {
+    const s = sanitizeSchema(schema);
+    const safeId = sanitizeId(id);
+    const safeBid = sanitizeId(batchId);
+    const safeModel = sanitizeString(model);
+    const safeEval = sanitizeString(evaluation);
+    return `INSERT INTO ${s}.AI_EVALUATION_AUDITS (ID, BATCH_ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT) VALUES ('${safeId}', '${safeBid}', ${Number(threadCount)}, ${Number(emailCount)}, ${Number(cost)}, ${Number(inputTokens)}, ${Number(outputTokens)}, '${safeModel}', '${safeEval}', CURRENT_TIMESTAMP)`
+  },
+};
+
 const evaluations = {
   upsert: (schema, valueTuples) => {
     const s = sanitizeSchema(schema);
@@ -27793,105 +27754,6 @@ async function runSyncDealStates() {
   const count = Array.isArray(result) ? result.length : 0;
   console.log(`[sync-deal-states] done: ${count} synced (1 query)`);
   return { synced_count: count }
-}
-
-const byteToHex = [];
-for (let i = 0; i < 256; ++i) {
-    byteToHex.push((i + 0x100).toString(16).slice(1));
-}
-function unsafeStringify(arr, offset = 0) {
-    return (byteToHex[arr[offset + 0]] +
-        byteToHex[arr[offset + 1]] +
-        byteToHex[arr[offset + 2]] +
-        byteToHex[arr[offset + 3]] +
-        '-' +
-        byteToHex[arr[offset + 4]] +
-        byteToHex[arr[offset + 5]] +
-        '-' +
-        byteToHex[arr[offset + 6]] +
-        byteToHex[arr[offset + 7]] +
-        '-' +
-        byteToHex[arr[offset + 8]] +
-        byteToHex[arr[offset + 9]] +
-        '-' +
-        byteToHex[arr[offset + 10]] +
-        byteToHex[arr[offset + 11]] +
-        byteToHex[arr[offset + 12]] +
-        byteToHex[arr[offset + 13]] +
-        byteToHex[arr[offset + 14]] +
-        byteToHex[arr[offset + 15]]).toLowerCase();
-}
-
-let getRandomValues;
-const rnds8 = new Uint8Array(16);
-function rng() {
-    if (!getRandomValues) {
-        if (typeof crypto === 'undefined' || !crypto.getRandomValues) {
-            throw new Error('crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported');
-        }
-        getRandomValues = crypto.getRandomValues.bind(crypto);
-    }
-    return getRandomValues(rnds8);
-}
-
-const _state = {};
-function v7(options, buf, offset) {
-    let bytes;
-    {
-        const now = Date.now();
-        const rnds = rng();
-        updateV7State(_state, now, rnds);
-        bytes = v7Bytes(rnds, _state.msecs, _state.seq, buf, offset);
-    }
-    return unsafeStringify(bytes);
-}
-function updateV7State(state, now, rnds) {
-    state.msecs ??= -Infinity;
-    state.seq ??= 0;
-    if (now > state.msecs) {
-        state.seq = (rnds[6] << 23) | (rnds[7] << 16) | (rnds[8] << 8) | rnds[9];
-        state.msecs = now;
-    }
-    else {
-        state.seq = (state.seq + 1) | 0;
-        if (state.seq === 0) {
-            state.msecs++;
-        }
-    }
-    return state;
-}
-function v7Bytes(rnds, msecs, seq, buf, offset = 0) {
-    if (rnds.length < 16) {
-        throw new Error('Random bytes length must be >= 16');
-    }
-    if (!buf) {
-        buf = new Uint8Array(16);
-        offset = 0;
-    }
-    else {
-        if (offset < 0 || offset + 16 > buf.length) {
-            throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
-        }
-    }
-    msecs ??= Date.now();
-    seq ??= ((rnds[6] * 0x7f) << 24) | (rnds[7] << 16) | (rnds[8] << 8) | rnds[9];
-    buf[offset++] = (msecs / 0x10000000000) & 0xff;
-    buf[offset++] = (msecs / 0x100000000) & 0xff;
-    buf[offset++] = (msecs / 0x1000000) & 0xff;
-    buf[offset++] = (msecs / 0x10000) & 0xff;
-    buf[offset++] = (msecs / 0x100) & 0xff;
-    buf[offset++] = msecs & 0xff;
-    buf[offset++] = 0x70 | ((seq >>> 28) & 0x0f);
-    buf[offset++] = (seq >>> 20) & 0xff;
-    buf[offset++] = 0x80 | ((seq >>> 14) & 0x3f);
-    buf[offset++] = (seq >>> 6) & 0xff;
-    buf[offset++] = ((seq << 2) & 0xff) | (rnds[10] & 0x03);
-    buf[offset++] = rnds[11];
-    buf[offset++] = rnds[12];
-    buf[offset++] = rnds[13];
-    buf[offset++] = rnds[14];
-    buf[offset++] = rnds[15];
-    return buf;
 }
 
 /** Types of elements found in htmlparser2's DOM */
@@ -34409,17 +34271,126 @@ class EmailReplyParser {
     }
 }
 
+var blockedDomains = [
+	".gov",
+	"automations.",
+	"crm.",
+	"email.",
+	"mailer.",
+	"marketing.",
+	"news.",
+	"newsletter.",
+	"transactional.",
+	"updates.",
+	"mailer-"
+];
+
+var blockedPrefixes = [
+	"accountservices@",
+	"accounts@",
+	"admin@",
+	"alerts@",
+	"auto@",
+	"automated@",
+	"billing@",
+	"care@",
+	"contact@",
+	"customerservice@",
+	"do-not-reply@",
+	"do_not_reply@",
+	"donotreply@",
+	"edm.support@",
+	"help@",
+	"imports@",
+	"info@",
+	"invitations@",
+	"mailer@",
+	"marketing@",
+	"meetings-noreply@google.com",
+	"no-reply@",
+	"noreply@",
+	"notification@",
+	"notify@",
+	"promotions@",
+	"quickbooks@",
+	"robot@",
+	"sales@",
+	"service@",
+	"social@",
+	"socials@",
+	"subscriptions@",
+	"support@",
+	"team@",
+	"updates@",
+	"verify@",
+	"welcome@"
+];
+
+var automatedSubjects = [
+	"newsletter",
+	"order confirmation",
+	"promo",
+	"promotion",
+	"receipt for your purchase",
+	"special offer",
+	"subscription confirmation",
+	"thank you for your order",
+	"updates",
+	"weekly digest"
+];
+
+var freeEmailPatterns = [
+	"^(info|support|updates|no-?reply|notifications|newsletter|promo)[a-z0-9]*@(gmail|yahoo|outlook|hotmail)\\.(com|net)$"
+];
+
+var nonPersonalizedNames = [
+	"ad",
+	"customer support",
+	"daily update",
+	"digest",
+	"mailing list",
+	"newsletter",
+	"promo",
+	"subscription",
+	"system notifications",
+	"the team",
+	"updates team",
+	"weekly update"
+];
+
+var headers = [
+	"list-id",
+	"precedence",
+	"x-mailing-list"
+];
+var values = [
+	"auto_reply",
+	"bulk"
+];
+var tools = [
+	"activecampaign",
+	"constantcontact",
+	"hubspot",
+	"mailchimp",
+	"sendgrid"
+];
+var marketingHeaders = {
+	headers: headers,
+	values: values,
+	tools: tools
+};
+
 /**
- * Email body sanitization and header utilities for AI classification.
+ * Email utilities — sanitization, header helpers, filter rules, and content fetching.
  *
- * Cleans raw email content before sending to the classifier:
- * 1. HTML → plaintext (preserves structure, strips tags)
- * 2. Strip quoted replies and forwarded content
- * 3. Strip email signatures
- * 4. Collapse excessive whitespace
- * 5. Truncate to max character limit
+ * Combines email-sanitizer, filter-rules, and email-client into a single module
+ * since they form a tight unit operating on email data.
  */
 
+
+// ---------------------------------------------------------------------------
+// Header utilities & body sanitization
+// ---------------------------------------------------------------------------
 
 function getHeader(email, name) {
   const header = email.topLevelHeaders?.find((h) => h.name.toLowerCase() === name.toLowerCase());
@@ -34478,9 +34449,218 @@ function sanitizeEmailBody(body) {
   return text
 }
 
+// ---------------------------------------------------------------------------
+// Filter rules
+// ---------------------------------------------------------------------------
+
+function extractEmailAddress(from) {
+  const match = from.match(/<([^>]+)>/);
+  return (match ? match[1] : from).trim().toLowerCase()
+}
+
+function extractDisplayName(from) {
+  const match = from.match(/^(.+?)\s*</);
+  return match
+    ? match[1]
+        .trim()
+        .replace(/^["']|["']$/g, '')
+        .toLowerCase()
+    : ''
+}
+
+function isRejected(email) {
+  // Rule 1: Authentication results
+  const authResults = getHeader(email, 'authentication-results');
+  if (authResults) {
+    const hasDkim = authResults.includes('dkim=pass');
+    const hasSpf = authResults.includes('spf=pass');
+    const hasDmarc = authResults.includes('dmarc=pass');
+    if (!hasDkim && !hasSpf && !hasDmarc) return true
+  }
+
+  // Rule 2: Blocked sender
+  const fromValue = getHeader(email, 'from');
+  if (fromValue) {
+    const emailAddr = extractEmailAddress(fromValue);
+    for (const prefix of blockedPrefixes) {
+      if (emailAddr.startsWith(prefix)) return true
+    }
+    const atIndex = emailAddr.indexOf('@');
+    if (atIndex !== -1) {
+      const domain = emailAddr.slice(atIndex + 1);
+      for (const blockedDomain of blockedDomains) {
+        if (domain.includes(blockedDomain)) return true
+      }
+    }
+  }
+
+  // Rule 3: Bulk headers
+  const headers = email.topLevelHeaders || [];
+  for (const bulkHeader of marketingHeaders.headers) {
+    if (headers.find((h) => h.name.toLowerCase() === bulkHeader.toLowerCase())) return true
+  }
+  for (const header of headers) {
+    const value = (header.value || '').toLowerCase();
+    for (const tool of marketingHeaders.tools) {
+      if (value.includes(tool)) return true
+    }
+  }
+  const precedence = getHeader(email, 'precedence').toLowerCase();
+  for (const val of marketingHeaders.values) {
+    if (precedence.includes(val)) return true
+  }
+
+  // Rule 4: Automated subject
+  const subject = getHeader(email, 'subject').toLowerCase();
+  if (subject) {
+    for (const term of automatedSubjects) {
+      if (subject.includes(term.toLowerCase())) return true
+    }
+  }
+
+  // Rule 5: Non-personalized sender name
+  if (fromValue) {
+    const displayName = extractDisplayName(fromValue);
+    if (displayName && nonPersonalizedNames.some((name) => displayName === name.toLowerCase())) {
+      return true
+    }
+  }
+
+  // Rule 6: Free email with non-personal prefix
+  if (fromValue) {
+    const emailAddr = extractEmailAddress(fromValue);
+    for (const pattern of freeEmailPatterns) {
+      if (new RegExp(pattern, 'i').test(emailAddr)) return true
+    }
+  }
+
+  return false
+}
+
+// ---------------------------------------------------------------------------
+// Email content fetcher
+// ---------------------------------------------------------------------------
+
+const DEFAULT_MAX_RETRIES = 3;
+
+/**
+ * Fetch email content from the content-fetcher service in chunks,
+ * enriching each email with metadata from the provided map.
+ *
+ * @param {string[]} messageIds - message IDs to fetch
+ * @param {Map} metaByMessageId - Map<messageId, { EMAIL_METADATA_ID, THREAD_ID, PREVIOUS_AI_SUMMARY? }>
+ * @param {object} opts
+ * @param {string} opts.contentFetcherUrl - base URL for content fetcher
+ * @param {string} opts.userId - user ID for the request
+ * @param {string} [opts.syncStateId] - optional sync state ID
+ * @param {number} opts.chunkSize - messages per request
+ * @param {number} opts.fetchTimeoutMs - timeout per request
+ * @param {number} [opts.maxRetries=3] - retries per chunk
+ * @param {string} [opts.format] - 'metadata' (headers only) or undefined (full content)
+ * @returns {Promise<object[]>} enriched email objects
+ */
+async function fetchEmails(messageIds, metaByMessageId, opts) {
+  const {
+    contentFetcherUrl,
+    userId,
+    syncStateId,
+    chunkSize,
+    fetchTimeoutMs,
+    maxRetries = DEFAULT_MAX_RETRIES,
+    format,
+  } = opts;
+
+  if (!messageIds || messageIds.length === 0) {
+    return []
+  }
+
+  const allEmails = [];
+
+  for (let i = 0; i < messageIds.length; i += chunkSize) {
+    const chunk = messageIds.slice(i, i + chunkSize);
+    const chunkIndex = Math.floor(i / chunkSize) + 1;
+    let fetched = false;
+
+    for (let attempt = 0; attempt < maxRetries && !fetched; attempt++) {
+      try {
+        const { signal, clear } = withTimeout(fetchTimeoutMs);
+        try {
+          const body = {
+            userId,
+            ...(syncStateId ? { syncStateId } : {}),
+            messageIds: chunk,
+            ...(format ? { format } : {}),
+          };
+
+          const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal,
+          });
+          clear();
+
+          // Handle 429 rate limiting
+          if (resp.status === 429) {
+            const retryBody = await resp.json().catch(() => ({}));
+            const retryAfterMs = retryBody.retryAfterMs || backoffMs(attempt, { base: 1000 });
+            console.log(
+              `[email-client] 429 rate limited, waiting ${retryAfterMs}ms ` +
+                `(chunk ${chunkIndex}, attempt ${attempt + 1}/${maxRetries})`,
+            );
+            await sleep(retryAfterMs);
+            continue
+          }
+
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+          }
+
+          const result = await resp.json();
+          const emails = result.data || result;
+
+          for (const email of emails) {
+            const meta = metaByMessageId.get(email.messageId);
+            if (meta) {
+              email.id = meta.EMAIL_METADATA_ID;
+              email.threadId = meta.THREAD_ID;
+              if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY;
+            }
+            allEmails.push(email);
+          }
+
+          fetched = true;
+        } catch (err) {
+          clear();
+          throw err
+        }
+      } catch (err) {
+        console.log(
+          `[email-client] chunk ${chunkIndex} fetch failed ` +
+            `(attempt ${attempt + 1}/${maxRetries}): ${err.message}`,
+        );
+
+        // If not the last attempt, wait with exponential backoff before retry
+        if (attempt < maxRetries - 1) {
+          const waitMs = backoffMs(attempt, { base: 1000 });
+          await sleep(waitMs);
+        }
+      }
+    }
+  }
+
+  if (allEmails.length === 0 && messageIds.length > 0) {
+    throw new Error(`All content fetches failed — 0/${messageIds.length} emails retrieved`)
+  }
+
+  return allEmails
+}
+
 var systemTemplate = "You are an email classifier for a content creator's inbox. Identify brand deals and business opportunities. Return valid JSON only — no markdown, no explanation, no code fences.\n\n# Creator Context\n\nThe user message may specify the creator's email. If provided, use it to distinguish inbound (to creator) from outbound (from creator) emails. If not provided, infer from exchange patterns.\n\n# Classification Rules\n\n**Priority: maximum recall.** If there is a 20% or greater chance something is a brand deal, classify as is_deal: true. When uncertain, use category \"low_confidence\". Missing a real deal costs thousands; a false positive costs 2 seconds to dismiss.\n\n## What IS a deal\n\nA brand, company, agency, platform, or fellow creator wants to work with this creator for their audience, content, reach, or influence. Includes: sponsorships, paid collaborations, product seeding/gifting, affiliate offers, ambassador programs, creator-to-creator collabs, event appearances, paid placements, content licensing, talent agency outreach. Classify regardless of status (new, active, declined, completed, suspicious).\n\n**Strong signals** (any one = is_deal: true): sender from brand/agency/PR firm, mentions sponsorship/collaboration/partnership/campaign, references compensation or budget, proposes deliverables or timeline, references creator's audience/reach, sender has partnership title, requests rate card, mentions exclusivity/licensing, originates from influencer marketing platform.\n\n**Weak signals** (alone = low_confidence): generic \"opportunity\" language, PR press release without ask, event invite without compensation details, vague \"collab\" subject from corporate domain, follow-up referencing unseen conversation.\n\n## What is NOT a deal\n\nInvestor/fundraising conversations, legal/accounting services, internal team discussions, automated notifications (YouTube/Instagram/TikTok/GMass/newsletters), surveys/feedback requests, SaaS pitches (unless proposing to sponsor creator's content), personal messages, calendar-only threads, shipping/order confirmations, password resets, billing notifications, social media alerts, traditional job recruitment, charity requests (unless paid partnership).\n\n# Output Schema\n\nReturn a JSON array with exactly one object per THREAD_ID_INDEX. The array MUST have the same number of elements as threads provided.\n\nFields per object:\n\n- **thread_index** (integer, required): The THREAD_ID_INDEX from the input (1-based)\n- **is_deal** (boolean, required): true if this is or might be a deal\n- **is_english** (boolean, required): true if primary language is English\n- **language** (string or null): ISO 639-1 code when is_english is false, otherwise null\n- **ai_score** (integer 1-10, required): Creator attention priority. 9-10: urgent, respond today. 7-8: high-value, act soon. 5-6: active, no deadline. 3-4: low priority. 1-2: no action needed.\n- **category** (string or null): Required when is_deal is true. One of: \"new\", \"in_progress\", \"completed\", \"not_interested\", \"likely_scam\", \"low_confidence\". Null when is_deal is false.\n- **likely_scam** (boolean, required): true if suspicious patterns detected\n- **ai_insight** (string, required): One-line summary of the opportunity or why it's not a deal\n- **ai_summary** (string, required, max 1000 chars): Context memo for the next AI evaluation (see guidelines below)\n- **main_contact** (object or null): The primary EXTERNAL person relevant to the deal — must NOT be the creator or match the creator's email. If the most relevant contact is the creator, use the next best external contact from the thread instead (e.g. the sender of an inbound deal email, or a CC'd brand representative). Fields: name, email, company, title, phone_number (all string or null). Null when is_deal is false or when no external contact can be identified in the thread.\n- **deal_brand** (string or null): Brand/company name. Null when is_deal is false.\n- **deal_type** (string or null): One of: \"brand_collaboration\", \"sponsorship\", \"affiliate\", \"product_seeding\", \"ambassador\", \"content_partnership\", \"paid_placement\", \"other_business\". Null when is_deal is false.\n- **deal_name** (string or null): Short descriptive name. Null when is_deal is false.\n- **deal_value** (number or null): Only if compensation explicitly mentioned. Null otherwise.\n- **deal_currency** (string or null): ISO 4217 code when deal_value present. Null otherwise.\n\n# AI Summary Guidelines\n\nThe ai_summary is the ONLY context the next classifier will have when new emails arrive. Write it as a factual briefing:\n\n- **Who**: Main contact's full name, email, title, company. Other relevant participants.\n- **What**: Specific proposal, deliverables, content format requested\n- **Status**: Current state of conversation or negotiation\n- **Terms**: Exact compensation figures, rates, budget, currency if mentioned\n- **Dates**: Deadlines, campaign dates, response-by dates\n- **Red flags**: Anything suspicious or noteworthy\n\n# Previous AI Summary\n\nWhen a thread includes PREVIOUS_AI_SUMMARY, it reflects a prior evaluation with fewer emails. New emails may change the classification. Re-evaluate fully — use the prior summary as background context only.\n\n# Examples\n\n## Deal example\n\nThread: Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored YouTube review with 60-day exclusivity.\n\n```json\n{\n  \"thread_index\": 1,\n  \"is_deal\": true,\n  \"is_english\": true,\n  \"ai_score\": 8,\n  \"category\": \"new\",\n  \"likely_scam\": false,\n  \"ai_insight\": \"Beauty Brand X offers $2.5K for sponsored YouTube review\",\n  \"ai_summary\": \"Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.\",\n  \"main_contact\": {\n    \"name\": \"Sarah Kim\",\n    \"email\": \"sarah@beautybrandx.com\",\n    \"company\": \"Beauty Brand X\",\n    \"title\": \"Partnerships Manager\",\n    \"phone_number\": null\n  },\n  \"deal_brand\": \"Beauty Brand X\",\n  \"deal_type\": \"sponsorship\",\n  \"deal_name\": \"Beauty Brand X YouTube Review\",\n  \"deal_value\": 2500,\n  \"deal_currency\": \"USD\"\n}\n```\n\n## Non-deal example\n\nThread: noreply@youtube.com sends 100K subscriber milestone notification.\n\n```json\n{\n  \"thread_index\": 2,\n  \"is_deal\": false,\n  \"is_english\": true,\n  \"ai_score\": 1,\n  \"category\": null,\n  \"likely_scam\": false,\n  \"ai_insight\": \"YouTube milestone notification\",\n  \"ai_summary\": \"Automated YouTube notification about 100K subscriber milestone. No deal content.\",\n  \"main_contact\": null,\n  \"deal_brand\": null,\n  \"deal_type\": null,\n  \"deal_name\": null,\n  \"deal_value\": null,\n  \"deal_currency\": null\n}\n```\n\nOnly classify the threads in the user message. Do NOT classify the examples above.\n\n# Final Rules\n\n1. Return ONLY a valid JSON array\n2. One object per THREAD_ID_INDEX — array length MUST match thread count\n3. When is_deal is false: set category, deal_brand, deal_type, deal_name, deal_value, deal_currency, and main_contact to null\n4. When is_deal is true: deal_type and deal_name are required. deal_brand required when identifiable.\n5. main_contact must be an EXTERNAL person — NEVER the creator. If the creator's email is provided, do NOT use that email in main_contact. Instead, pick the best non-creator contact from the thread (e.g. the inbound sender or a CC'd brand rep). Only set main_contact to null if no external contact exists in the thread at all.\n6. ai_summary is always required for every thread\n7. When uncertain: default to is_deal: true with category \"low_confidence\"\n";
 
 var classificationInstructions = "Classify the email threads below. Return one JSON object per thread in a JSON array.\n\n# Threads to Classify\n\n{{THREAD_DATA}}\n";
+
+// --- Prompt building ---
 
 function groupByThread(emails) {
   const threads = {};
@@ -34567,6 +34747,8 @@ const VALID_DEAL_TYPES = new Set([
   'paid_placement',
   'other_business',
 ]);
+
+// --- AI client ---
 
 /**
  * Call a model with HTTP retries + exponential backoff.
@@ -34723,959 +34905,6 @@ function parseAndValidate(raw, threadOrder) {
     deal_value: r.deal_value != null ? Number(r.deal_value) : null,
     deal_currency: r.deal_currency || null,
   }))
-}
-
-/**
- * Shared email content fetcher with standardized retry logic.
- *
- * Extracts the duplicated HTTP fetch+enrich pattern from
- * fetch-and-filter.js and fetch-and-classify.js into a single
- * reusable function with exponential backoff and 429 handling.
- */
-
-
-const DEFAULT_MAX_RETRIES = 3;
-
-/**
- * Fetch email content from the content-fetcher service in chunks,
- * enriching each email with metadata from the provided map.
- *
- * @param {string[]} messageIds - message IDs to fetch
- * @param {Map} metaByMessageId - Map<messageId, { EMAIL_METADATA_ID, THREAD_ID, PREVIOUS_AI_SUMMARY? }>
- * @param {object} opts
- * @param {string} opts.contentFetcherUrl - base URL for content fetcher
- * @param {string} opts.userId - user ID for the request
- * @param {string} [opts.syncStateId] - optional sync state ID
- * @param {number} opts.chunkSize - messages per request
- * @param {number} opts.fetchTimeoutMs - timeout per request
- * @param {number} [opts.maxRetries=3] - retries per chunk
- * @param {string} [opts.format] - 'metadata' (headers only) or undefined (full content)
- * @returns {Promise<object[]>} enriched email objects
- */
-async function fetchEmails(messageIds, metaByMessageId, opts) {
-  const {
-    contentFetcherUrl,
-    userId,
-    syncStateId,
-    chunkSize,
-    fetchTimeoutMs,
-    maxRetries = DEFAULT_MAX_RETRIES,
-    format,
-  } = opts;
-
-  if (!messageIds || messageIds.length === 0) {
-    return []
-  }
-
-  const allEmails = [];
-
-  for (let i = 0; i < messageIds.length; i += chunkSize) {
-    const chunk = messageIds.slice(i, i + chunkSize);
-    const chunkIndex = Math.floor(i / chunkSize) + 1;
-    let fetched = false;
-
-    for (let attempt = 0; attempt < maxRetries && !fetched; attempt++) {
-      try {
-        const { signal, clear } = withTimeout(fetchTimeoutMs);
-        try {
-          const body = {
-            userId,
-            ...(syncStateId ? { syncStateId } : {}),
-            messageIds: chunk,
-            ...(format ? { format } : {}),
-          };
-
-          const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-            signal,
-          });
-          clear();
-
-          // Handle 429 rate limiting
-          if (resp.status === 429) {
-            const retryBody = await resp.json().catch(() => ({}));
-            const retryAfterMs = retryBody.retryAfterMs || backoffMs(attempt, { base: 1000 });
-            console.log(
-              `[email-client] 429 rate limited, waiting ${retryAfterMs}ms ` +
-                `(chunk ${chunkIndex}, attempt ${attempt + 1}/${maxRetries})`,
-            );
-            await sleep(retryAfterMs);
-            continue
-          }
-
-          if (!resp.ok) {
-            throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-          }
-
-          const result = await resp.json();
-          const emails = result.data || result;
-
-          for (const email of emails) {
-            const meta = metaByMessageId.get(email.messageId);
-            if (meta) {
-              email.id = meta.EMAIL_METADATA_ID;
-              email.threadId = meta.THREAD_ID;
-              if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY;
-            }
-            allEmails.push(email);
-          }
-
-          fetched = true;
-        } catch (err) {
-          clear();
-          throw err
-        }
-      } catch (err) {
-        console.log(
-          `[email-client] chunk ${chunkIndex} fetch failed ` +
-            `(attempt ${attempt + 1}/${maxRetries}): ${err.message}`,
-        );
-
-        // If not the last attempt, wait with exponential backoff before retry
-        if (attempt < maxRetries - 1) {
-          const waitMs = backoffMs(attempt, { base: 1000 });
-          await sleep(waitMs);
-        }
-      }
-    }
-  }
-
-  if (allEmails.length === 0 && messageIds.length > 0) {
-    throw new Error(`All content fetches failed — 0/${messageIds.length} emails retrieved`)
-  }
-
-  return allEmails
-}
-
-/**
- * Step 1: Fetch content + call AI + save audit checkpoint.
- *
- * Resilience pipeline:
- *   Layer 0: Primary model call (with HTTP retries + exponential backoff)
- *   Layer 1: Local JSON repair (strip fences, extract array, coerce schema)
- *   Layer 2: Corrective retry (send broken output back to same model with error)
- *   Layer 3: Fallback model (same prompt, different model)
- */
-async function runFetchAndClassify() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const batchId = sanitizeId(coreExports.getInput('batch-id'));
-  const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
-  const hyperbolicKey = coreExports.getInput('hyperbolic-key');
-  const primaryModel = coreExports.getInput('primary-model') || 'Qwen/Qwen3-235B-A22B-Instruct-2507';
-  const fallbackModel = coreExports.getInput('fallback-model') || 'deepseek-ai/DeepSeek-V3';
-  const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
-  const chunkSize = parseInt(coreExports.getInput('chunk-size') || '10', 10);
-  const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '120000', 10);
-
-  if (!batchId) throw new Error('batch-id is required')
-
-  console.log(
-    `[classify] starting batch ${batchId} (chunk=${chunkSize}, timeout=${fetchTimeoutMs}ms)`,
-  );
-
-  const jwt = await authenticate(authUrl, authSecret);
-  const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
-
-  // Check metadata exists
-  const metadataRows = await exec(dealStates.selectEmailsByBatch(schema, batchId));
-
-  if (!metadataRows || metadataRows.length === 0) {
-    console.log('[classify] no rows for batch (already completed?)');
-    return { skipped: true, thread_count: 0 }
-  }
-
-  console.log(`[classify] ${metadataRows.length} deal_states`);
-
-  // Check for existing audit (checkpoint)
-  const existingAudit = await exec(saveResults.getAuditByBatchId(schema, batchId));
-
-  if (existingAudit.length > 0 && existingAudit[0].AI_EVALUATION) {
-    console.log('[classify] audit exists — skipping AI call');
-    try {
-      const parsed = JSON.parse(existingAudit[0].AI_EVALUATION);
-      return { skipped: true, thread_count: (parsed.threads || parsed || []).length }
-    } catch {
-      console.log('[classify] existing audit has invalid JSON, re-running AI');
-    }
-  }
-
-  // Fetch content
-  const messageIds = metadataRows.map((r) => r.MESSAGE_ID);
-  const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]));
-
-  let allEmails = await fetchEmails(messageIds, metaByMessageId, {
-    contentFetcherUrl,
-    userId: metadataRows[0].USER_ID,
-    syncStateId: metadataRows[0].SYNC_STATE_ID,
-    chunkSize,
-    fetchTimeoutMs,
-  });
-
-  // Already-evaluated skip: threads with existing deals + no newer emails
-  const fetchedThreadIds = [...new Set(allEmails.map((e) => e.threadId).filter(Boolean))];
-
-  if (fetchedThreadIds.length > 0) {
-    const quotedFetched = fetchedThreadIds.map((id) => `'${sanitizeId(id)}'`);
-    const existingDeals = await exec(deals.selectByThreadIds(schema, quotedFetched));
-
-    if (existingDeals && existingDeals.length > 0) {
-      const dealByThread = {};
-      for (const d of existingDeals) {
-        dealByThread[d.THREAD_ID] = d.UPDATED_AT;
-      }
-
-      const emailsByThread = {};
-      for (const email of allEmails) {
-        if (!email.threadId) continue
-        if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = [];
-        emailsByThread[email.threadId].push(email);
-      }
-
-      const skippedEmailIds = [];
-      const skippedThreadIds = [];
-
-      for (const [threadId, dealUpdatedAt] of Object.entries(dealByThread)) {
-        const threadEmails = emailsByThread[threadId];
-        if (!threadEmails || threadEmails.length === 0) continue
-
-        const emailDates = threadEmails
-          .map((e) => new Date(e.date))
-          .filter((d) => !isNaN(d.getTime()));
-
-        // No valid dates — can't determine, classify normally
-        if (emailDates.length === 0) continue
-
-        const latestEmailDate = emailDates.reduce(
-          (latest, d) => (d > latest ? d : latest),
-          new Date(0),
-        );
-
-        if (latestEmailDate <= new Date(dealUpdatedAt)) {
-          skippedThreadIds.push(threadId);
-          const threadRows = metadataRows.filter((r) => r.THREAD_ID === threadId);
-          skippedEmailIds.push(...threadRows.map((r) => r.EMAIL_METADATA_ID));
-          allEmails = allEmails.filter((e) => e.threadId !== threadId);
-        }
-      }
-
-      if (skippedEmailIds.length > 0) {
-        const quotedSkipped = skippedEmailIds.map((id) => `'${sanitizeId(id)}'`);
-        await exec(dealStates.updateStatusByIds(schema, quotedSkipped, STATUS.DEAL));
-        console.log(
-          `[classify] ${skippedEmailIds.length} rows skipped → deal (already evaluated, ${skippedThreadIds.length} threads)`,
-        );
-      }
-    }
-  }
-
-  if (allEmails.length === 0) {
-    console.log('[classify] all threads already evaluated — skipping AI');
-    return { skipped: true, thread_count: 0 }
-  }
-
-  // Build prompt
-  const { systemPrompt, userPrompt } = buildPrompt(allEmails);
-
-  // =========================================================================
-  //  AI RESILIENCE PIPELINE (callModel + parseAndValidate from ai-client.js)
-  // =========================================================================
-
-  const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey };
-
-  const classifyMessages = [
-    { role: 'system', content: systemPrompt },
-    { role: 'user', content: userPrompt },
-  ];
-
-  let threads = null;
-  let modelUsed = primaryModel;
-
-  // --- Layer 0: Primary model call ---
-  let primaryRaw;
-  try {
-    const result = await callModel(primaryModel, classifyMessages, { temperature: 0, ...aiOpts });
-    primaryRaw = result.content;
-  } catch (primaryApiError) {
-    console.log(`[classify] Primary model API failed: ${primaryApiError.message}`);
-    primaryRaw = null;
-  }
-
-  if (primaryRaw) {
-    // --- Layer 1: Local JSON repair ---
-    try {
-      threads = parseAndValidate(primaryRaw);
-      console.log(`[classify] Primary model succeeded: ${threads.length} threads`);
-    } catch (parseError) {
-      console.log(`[classify] Primary JSON parse failed: ${parseError.message}`);
-
-      // --- Layer 2: Corrective retry (same model, send broken output back) ---
-      try {
-        console.log(`[classify] Attempting corrective retry with ${primaryModel}`);
-        const correctiveMessages = [
-          ...classifyMessages,
-          { role: 'assistant', content: primaryRaw },
-          {
-            role: 'user',
-            content: `Your previous classification response could not be parsed as valid JSON.\n\nParse error:\n${parseError.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting issue. Do not change any classification decisions. Return ONLY the JSON array with no other text.`,
-          },
-        ];
-        const corrected = await callModel(primaryModel, correctiveMessages, {
-          temperature: 0,
-          ...aiOpts,
-        });
-        const correctedRaw = corrected.content;
-        threads = parseAndValidate(correctedRaw);
-        modelUsed = `${primaryModel}(corrective-retry)`;
-        console.log(`[classify] Corrective retry succeeded: ${threads.length} threads`);
-      } catch (correctiveError) {
-        console.log(`[classify] Corrective retry failed: ${correctiveError.message}`);
-      }
-    }
-  }
-
-  // --- Layer 3: Fallback model ---
-  if (!threads) {
-    console.log(`[classify] Falling back to ${fallbackModel}`);
-    modelUsed = fallbackModel;
-    try {
-      const fallbackResult = await callModel(fallbackModel, classifyMessages, {
-        temperature: 0.6,
-        ...aiOpts,
-      });
-      const fallbackRaw = fallbackResult.content;
-      threads = parseAndValidate(fallbackRaw);
-      console.log(`[classify] Fallback model succeeded: ${threads.length} threads`);
-    } catch (fallbackError) {
-      console.error(`[classify] All layers exhausted. Primary and fallback both failed.`);
-      throw new Error(
-        `Classification failed: primary and fallback models both returned no valid JSON. Last error: ${fallbackError.message}`,
-      )
-    }
-  }
-
-  // Wrap in { threads: [...] } for downstream compatibility
-  const aiOutput = { threads };
-
-  // Save audit checkpoint
-  const auditId = v7();
-  const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400));
-  try {
-    await exec(
-      saveResults.insertAudit(schema, {
-        id: auditId,
-        batchId,
-        threadCount: threads.length,
-        emailCount: metadataRows.length,
-        cost: 0,
-        inputTokens: 0,
-        outputTokens: 0,
-        model: modelUsed,
-        evaluation,
-      }),
-    );
-    console.log(`[classify] audit saved: ${auditId} (model: ${modelUsed})`);
-  } catch (err) {
-    if (
-      err.message.includes('integrity constraint') ||
-      err.message.includes('unique') ||
-      err.message.includes('duplicate')
-    ) {
-      console.log(`[classify] audit already exists for batch (concurrent run), continuing`);
-    } else {
-      throw err
-    }
-  }
-
-  console.log(`[classify] ${threads.length} threads ready for processing`);
-  return { skipped: false, thread_count: threads.length }
-}
-
-var blockedDomains = [
-	".gov",
-	"automations.",
-	"crm.",
-	"email.",
-	"mailer.",
-	"marketing.",
-	"news.",
-	"newsletter.",
-	"transactional.",
-	"updates.",
-	"mailer-"
-];
-
-var blockedPrefixes = [
-	"accountservices@",
-	"accounts@",
-	"admin@",
-	"alerts@",
-	"auto@",
-	"automated@",
-	"billing@",
-	"care@",
-	"contact@",
-	"customerservice@",
-	"do-not-reply@",
-	"do_not_reply@",
-	"donotreply@",
-	"edm.support@",
-	"help@",
-	"imports@",
-	"info@",
-	"invitations@",
-	"mailer@",
-	"marketing@",
-	"meetings-noreply@google.com",
-	"no-reply@",
-	"noreply@",
-	"notification@",
-	"notify@",
-	"promotions@",
-	"quickbooks@",
-	"robot@",
-	"sales@",
-	"service@",
-	"social@",
-	"socials@",
-	"subscriptions@",
-	"support@",
-	"team@",
-	"updates@",
-	"verify@",
-	"welcome@"
-];
-
-var automatedSubjects = [
-	"newsletter",
-	"order confirmation",
-	"promo",
-	"promotion",
-	"receipt for your purchase",
-	"special offer",
-	"subscription confirmation",
-	"thank you for your order",
-	"updates",
-	"weekly digest"
-];
-
-var freeEmailPatterns = [
-	"^(info|support|updates|no-?reply|notifications|newsletter|promo)[a-z0-9]*@(gmail|yahoo|outlook|hotmail)\\.(com|net)$"
-];
-
-var nonPersonalizedNames = [
-	"ad",
-	"customer support",
-	"daily update",
-	"digest",
-	"mailing list",
-	"newsletter",
-	"promo",
-	"subscription",
-	"system notifications",
-	"the team",
-	"updates team",
-	"weekly update"
-];
-
-var headers = [
-	"list-id",
-	"precedence",
-	"x-mailing-list"
-];
-var values = [
-	"auto_reply",
-	"bulk"
-];
-var tools = [
-	"activecampaign",
-	"constantcontact",
-	"hubspot",
-	"mailchimp",
-	"sendgrid"
-];
-var marketingHeaders = {
-	headers: headers,
-	values: values,
-	tools: tools
-};
-
-function extractEmailAddress(from) {
-  const match = from.match(/<([^>]+)>/);
-  return (match ? match[1] : from).trim().toLowerCase()
-}
-
-function extractDisplayName(from) {
-  const match = from.match(/^(.+?)\s*</);
-  return match
-    ? match[1]
-        .trim()
-        .replace(/^["']|["']$/g, '')
-        .toLowerCase()
-    : ''
-}
-
-function isRejected(email) {
-  // Rule 1: Authentication results
-  const authResults = getHeader(email, 'authentication-results');
-  if (authResults) {
-    const hasDkim = authResults.includes('dkim=pass');
-    const hasSpf = authResults.includes('spf=pass');
-    const hasDmarc = authResults.includes('dmarc=pass');
-    if (!hasDkim && !hasSpf && !hasDmarc) return true
-  }
-
-  // Rule 2: Blocked sender
-  const fromValue = getHeader(email, 'from');
-  if (fromValue) {
-    const emailAddr = extractEmailAddress(fromValue);
-    for (const prefix of blockedPrefixes) {
-      if (emailAddr.startsWith(prefix)) return true
-    }
-    const atIndex = emailAddr.indexOf('@');
-    if (atIndex !== -1) {
-      const domain = emailAddr.slice(atIndex + 1);
-      for (const blockedDomain of blockedDomains) {
-        if (domain.includes(blockedDomain)) return true
-      }
-    }
-  }
-
-  // Rule 3: Bulk headers
-  const headers = email.topLevelHeaders || [];
-  for (const bulkHeader of marketingHeaders.headers) {
-    if (headers.find((h) => h.name.toLowerCase() === bulkHeader.toLowerCase())) return true
-  }
-  for (const header of headers) {
-    const value = (header.value || '').toLowerCase();
-    for (const tool of marketingHeaders.tools) {
-      if (value.includes(tool)) return true
-    }
-  }
-  const precedence = getHeader(email, 'precedence').toLowerCase();
-  for (const val of marketingHeaders.values) {
-    if (precedence.includes(val)) return true
-  }
-
-  // Rule 4: Automated subject
-  const subject = getHeader(email, 'subject').toLowerCase();
-  if (subject) {
-    for (const term of automatedSubjects) {
-      if (subject.includes(term.toLowerCase())) return true
-    }
-  }
-
-  // Rule 5: Non-personalized sender name
-  if (fromValue) {
-    const displayName = extractDisplayName(fromValue);
-    if (displayName && nonPersonalizedNames.some((name) => displayName === name.toLowerCase())) {
-      return true
-    }
-  }
-
-  // Rule 6: Free email with non-personal prefix
-  if (fromValue) {
-    const emailAddr = extractEmailAddress(fromValue);
-    for (const pattern of freeEmailPatterns) {
-      if (new RegExp(pattern, 'i').test(emailAddr)) return true
-    }
-  }
-
-  return false
-}
-
-/**
- * Combined fetch-headers + filter command.
- * Fetches email headers (metadata only, no body) from content fetcher,
- * applies filter rules, and returns filtered/rejected ID lists.
- */
-async function runFetchAndFilter() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const batchId = sanitizeId(coreExports.getInput('batch-id'));
-  const chunkSize = parseInt(coreExports.getInput('chunk-size') || '50', 10);
-  const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '30000', 10);
-
-  if (!batchId) throw new Error('batch-id is required')
-
-  console.log(
-    `[fetch-and-filter] starting for batch ${batchId} (chunk=${chunkSize}, timeout=${fetchTimeoutMs}ms)`,
-  );
-
-  // 1. Authenticate + fetch metadata from SxT
-  const jwt = await authenticate(authUrl, authSecret);
-  const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
-  const metadataRows = await exec(dealStates.selectEmailsByBatch(schema, batchId));
-
-  if (!metadataRows || metadataRows.length === 0) {
-    console.log('[fetch-and-filter] no rows found for batch');
-    return { filtered_ids: '', rejected_ids: '', total: 0 }
-  }
-
-  console.log(`[fetch-and-filter] found ${metadataRows.length} deal_states`);
-
-  // 2. Fetch headers only from content fetcher (format=metadata, no body)
-  const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
-  const messageIds = metadataRows.map((r) => r.MESSAGE_ID);
-  const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]));
-
-  const allEmails = await fetchEmails(messageIds, metaByMessageId, {
-    contentFetcherUrl,
-    userId: metadataRows[0].USER_ID,
-    syncStateId: metadataRows[0].SYNC_STATE_ID,
-    chunkSize,
-    fetchTimeoutMs,
-    format: 'metadata',
-  });
-
-  console.log(`[fetch-and-filter] fetched ${allEmails.length} emails, applying filter rules`);
-
-  // 3. Apply filter rules
-  const filteredIds = [];
-  const rejectedIds = [];
-
-  for (const email of allEmails) {
-    if (isRejected(email)) {
-      rejectedIds.push(email.id);
-    } else {
-      filteredIds.push(email.id);
-    }
-  }
-
-  console.log(
-    `[fetch-and-filter] result: ${filteredIds.length} passed, ${rejectedIds.length} rejected`,
-  );
-
-  return {
-    filtered_ids: filteredIds.map((id) => `'${sanitizeId(id)}'`).join(','),
-    rejected_ids: rejectedIds.map((id) => `'${sanitizeId(id)}'`).join(','),
-    total: allEmails.length,
-  }
-}
-
-/**
- * Save deal contacts with two-table upsert pattern:
- * 1. Core contacts (EMAIL_CORE_STAGING.CONTACTS) — enrichment via COALESCE
- * 2. Deal contacts (DEAL_CONTACTS) — simplified relationship table
- *
- * Reads audit by batch_id, looks up deals by thread_id,
- * then upserts both tables.
- */
-async function runSaveDealContacts() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const coreSchema = sanitizeSchema(coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING');
-  const batchId = sanitizeId(coreExports.getInput('batch-id'));
-
-  if (!batchId) throw new Error('batch-id is required')
-
-  const jwt = await authenticate(authUrl, authSecret);
-  const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
-
-  const threads = await readAuditThreads(exec, schema, batchId);
-  if (!threads) {
-    console.log('[save-deal-contacts] no audit found — skipping');
-    return { contacts_created: 0 }
-  }
-
-  const dealThreads = threads.filter((t) => t.is_deal);
-
-  if (dealThreads.length === 0) {
-    console.log('[save-deal-contacts] no deal threads — skipping');
-    return { contacts_created: 0 }
-  }
-
-  // Look up deals to get USER_ID per thread
-  const dealThreadIds = dealThreads.map((t) => sanitizeId(t.thread_id));
-  const quotedIds = dealThreadIds.map((id) => `'${id}'`);
-
-  const deals$1 = await exec(deals.selectByThreadIds(schema, quotedIds));
-
-  const dealByThread = {};
-  for (const row of deals$1) {
-    dealByThread[row.THREAD_ID] = row;
-  }
-
-  // Build contact rows with two-table pattern
-  const coreContactValues = [];
-  const dealContactValues = [];
-
-  for (const thread of dealThreads) {
-    const mc = thread.main_contact;
-    if (!mc) continue
-    const email = (mc.email || '').trim().toLowerCase();
-    if (!email) continue
-
-    const threadId = sanitizeId(thread.thread_id);
-    const deal = dealByThread[threadId];
-    if (!deal) {
-      console.log(`[save-deal-contacts] no deal found for thread ${threadId} — skipping`);
-      continue
-    }
-
-    const userId = sanitizeId(deal.USER_ID || '');
-    const contactEmail = sanitizeString(email);
-    const nameVal = toSqlNullable(mc.name);
-    const companyVal = toSqlNullable(mc.company);
-    const titleVal = toSqlNullable(mc.title);
-    const phoneVal = toSqlNullable(mc.phone_number);
-
-    // Core contacts — COALESCE preserves existing non-null values
-    coreContactValues.push(
-      `('${userId}', '${contactEmail}', ${nameVal}, ${companyVal}, ${titleVal}, ${phoneVal}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    );
-
-    // Deal contacts — simplified relationship table
-    dealContactValues.push(
-      `('${threadId}', '${userId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-    );
-  }
-
-  // Upsert core contacts (non-fatal — table may not exist yet)
-  if (coreContactValues.length > 0) {
-    try {
-      await exec(contacts.upsert(coreSchema, coreContactValues));
-    } catch (err) {
-      console.error(`[save-deal-contacts] core contacts upsert failed (non-fatal): ${err.message}`);
-    }
-  }
-
-  // Upsert deal contacts
-  if (dealContactValues.length > 0) {
-    await exec(dealContacts.upsert(schema, dealContactValues));
-  }
-
-  console.log(`[save-deal-contacts] ${dealContactValues.length} contacts saved (core + deal)`);
-  return { contacts_created: dealContactValues.length }
-}
-
-/**
- * Step 3: Read audit by batch_id → upsert deals.
- * Batched: single multi-row INSERT for deals.
- */
-async function runSaveDeals() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const batchId = sanitizeId(coreExports.getInput('batch-id'));
-
-  if (!batchId) throw new Error('batch-id is required')
-
-  const jwt = await authenticate(authUrl, authSecret);
-  const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
-
-  const threads = await readAuditThreads(exec, schema, batchId);
-  if (!threads) {
-    console.log('[save-deals] no audit found — skipping');
-    return { deals_created: 0 }
-  }
-
-  // Need metadata to get userId per thread
-  const metadataRows = await exec(dealStates.selectDistinctThreadUsers(schema, batchId));
-  const userByThread = {};
-  for (const row of metadataRows) {
-    userByThread[row.THREAD_ID] = row.USER_ID;
-  }
-
-  // Separate deal vs non-deal threads
-  const dealThreads = [];
-  const notDealThreadIds = [];
-
-  for (const thread of threads) {
-    if (thread.is_deal) {
-      dealThreads.push(thread);
-    } else {
-      notDealThreadIds.push(sanitizeId(thread.thread_id));
-    }
-  }
-
-  // Batch DELETE non-deal threads (single query)
-  if (notDealThreadIds.length > 0) {
-    const quotedIds = notDealThreadIds.map((id) => `'${id}'`);
-    await exec(deals.deleteByThreadIds(schema, quotedIds));
-    console.log(`[save-deals] deleted ${notDealThreadIds.length} non-deal threads (1 query)`);
-  }
-
-  if (dealThreads.length === 0) {
-    console.log('[save-deals] no deal threads to save');
-    return { deals_created: 0 }
-  }
-
-  // Batch upsert deals (single multi-row INSERT)
-  const dealTuples = dealThreads.map((thread) => {
-    const threadId = sanitizeId(thread.thread_id);
-    const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
-    const dealId = v7();
-    const dealName = sanitizeString(thread.deal_name || '');
-    const dealType = sanitizeString(thread.deal_type || '');
-    const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
-    const currency = sanitizeString(thread.currency || 'USD');
-    const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
-    const category = sanitizeString(thread.category || '');
-    return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-  });
-
-  await exec(deals.upsert(schema, dealTuples));
-
-  console.log(`[save-deals] ${dealThreads.length} deals upserted`);
-  return { deals_created: dealThreads.length }
-}
-
-/**
- * Step 2: Read audit by batch_id → upsert thread evaluations.
- * Batched: single multi-row INSERT ... ON CONFLICT for all threads.
- */
-async function runSaveEvals() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const batchId = sanitizeId(coreExports.getInput('batch-id'));
-
-  if (!batchId) throw new Error('batch-id is required')
-
-  const jwt = await authenticate(authUrl, authSecret);
-  const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
-
-  const threads = await readAuditThreads(exec, schema, batchId);
-  if (!threads) {
-    console.log('[save-evals] no audit found — skipping');
-    return { upserted: 0 }
-  }
-
-  if (threads.length === 0) {
-    console.log('[save-evals] no threads in audit');
-    return { upserted: 0 }
-  }
-
-  // Build batched VALUES for all threads
-  const valueTuples = threads.map((thread) => {
-    const threadId = sanitizeId(thread.thread_id);
-    const evalId = v7();
-    const category = sanitizeString(thread.category || '');
-    const aiSummary = sanitizeString(thread.ai_summary || '');
-    const isDeal = thread.is_deal ? 'true' : 'false';
-    const isLikelyScam = (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false';
-    const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0;
-    return `('${evalId}', '${threadId}', '', '${category}', '${aiSummary}', ${isDeal}, ${isLikelyScam}, ${aiScore}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-  });
-
-  await exec(evaluations.upsert(schema, valueTuples));
-
-  console.log(`[save-evals] upserted ${threads.length} thread evaluations (1 query)`);
-  return { upserted: threads.length, total: threads.length }
-}
-
-/**
- * Standalone SxT query/execute command.
- * Authenticates via proxy, uses pre-generated biscuit from input.
- */
-async function runSxtQuery() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = coreExports.getInput('schema');
-  const sql = coreExports.getInput('sql');
-
-  if (schema) sanitizeSchema(schema);
-
-  coreExports.info(`sxt-query: schema=${schema || '(none)'}, sql=${sql.substring(0, 100)}...`);
-  const jwt = await authenticate(authUrl, authSecret);
-  const result = await executeSql(apiUrl, jwt, biscuit, sql);
-  coreExports.info(`sxt-query: returned ${Array.isArray(result) ? result.length : 0} rows`);
-
-  return { result }
-}
-
-/**
- * Step 4: Read audit by batch_id → update deal_states to terminal status.
- * Batched: collects all deal/not_deal email IDs, then issues exactly 2 UPDATEs.
- */
-async function runUpdateDealStates() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const batchId = sanitizeId(coreExports.getInput('batch-id'));
-
-  if (!batchId) throw new Error('batch-id is required')
-
-  const jwt = await authenticate(authUrl, authSecret);
-  const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
-
-  const threads = await readAuditThreads(exec, schema, batchId);
-  if (!threads) {
-    console.log('[update-states] no audit found — skipping');
-    return { deal: 0, not_deal: 0 }
-  }
-
-  // Get metadata to map thread → email_metadata_ids (by batch_id)
-  const metadataRows = await exec(dealStates.selectEmailAndThreadIdsByBatch(schema, batchId));
-
-  const metadataByThread = {};
-  for (const row of metadataRows) {
-    if (!metadataByThread[row.THREAD_ID]) metadataByThread[row.THREAD_ID] = [];
-    metadataByThread[row.THREAD_ID].push(row);
-  }
-
-  // Collect all deal and not_deal email IDs
-  const dealEmailIds = [];
-  const notDealEmailIds = [];
-
-  for (const thread of threads) {
-    const threadId = sanitizeId(thread.thread_id);
-    const threadEmails = metadataByThread[threadId] || [];
-    if (threadEmails.length === 0) continue
-
-    const emailIds = threadEmails.map((e) => e.EMAIL_METADATA_ID);
-    if (thread.is_deal) {
-      dealEmailIds.push(...emailIds);
-    } else {
-      notDealEmailIds.push(...emailIds);
-    }
-  }
-
-  // Issue exactly 2 UPDATEs (one for deals, one for not_deals)
-  if (dealEmailIds.length > 0) {
-    await exec(
-      dealStates.updateStatusByIds(
-        schema,
-        dealEmailIds.map((id) => `'${sanitizeId(id)}'`),
-        STATUS.DEAL,
-      ),
-    );
-  }
-  if (notDealEmailIds.length > 0) {
-    await exec(
-      dealStates.updateStatusByIds(
-        schema,
-        notDealEmailIds.map((id) => `'${sanitizeId(id)}'`),
-        STATUS.NOT_DEAL,
-      ),
-    );
-  }
-
-  const queries = (dealEmailIds.length > 0 ? 1 : 0) + (notDealEmailIds.length > 0 ? 1 : 0);
-  console.log(
-    `[update-states] ${dealEmailIds.length} → deal, ${notDealEmailIds.length} → not_deal (${queries} queries)`,
-  );
-  return { deal: dealEmailIds.length, not_deal: notDealEmailIds.length }
 }
 
 /**
@@ -38593,6 +37822,105 @@ async function runEvalCompare() {
   return result
 }
 
+const byteToHex = [];
+for (let i = 0; i < 256; ++i) {
+    byteToHex.push((i + 0x100).toString(16).slice(1));
+}
+function unsafeStringify(arr, offset = 0) {
+    return (byteToHex[arr[offset + 0]] +
+        byteToHex[arr[offset + 1]] +
+        byteToHex[arr[offset + 2]] +
+        byteToHex[arr[offset + 3]] +
+        '-' +
+        byteToHex[arr[offset + 4]] +
+        byteToHex[arr[offset + 5]] +
+        '-' +
+        byteToHex[arr[offset + 6]] +
+        byteToHex[arr[offset + 7]] +
+        '-' +
+        byteToHex[arr[offset + 8]] +
+        byteToHex[arr[offset + 9]] +
+        '-' +
+        byteToHex[arr[offset + 10]] +
+        byteToHex[arr[offset + 11]] +
+        byteToHex[arr[offset + 12]] +
+        byteToHex[arr[offset + 13]] +
+        byteToHex[arr[offset + 14]] +
+        byteToHex[arr[offset + 15]]).toLowerCase();
+}
+
+let getRandomValues;
+const rnds8 = new Uint8Array(16);
+function rng() {
+    if (!getRandomValues) {
+        if (typeof crypto === 'undefined' || !crypto.getRandomValues) {
+            throw new Error('crypto.getRandomValues() not supported. See https://github.com/uuidjs/uuid#getrandomvalues-not-supported');
+        }
+        getRandomValues = crypto.getRandomValues.bind(crypto);
+    }
+    return getRandomValues(rnds8);
+}
+
+const _state = {};
+function v7(options, buf, offset) {
+    let bytes;
+    {
+        const now = Date.now();
+        const rnds = rng();
+        updateV7State(_state, now, rnds);
+        bytes = v7Bytes(rnds, _state.msecs, _state.seq, buf, offset);
+    }
+    return buf ?? unsafeStringify(bytes);
+}
+function updateV7State(state, now, rnds) {
+    state.msecs ??= -Infinity;
+    state.seq ??= 0;
+    if (now > state.msecs) {
+        state.seq = (rnds[6] << 23) | (rnds[7] << 16) | (rnds[8] << 8) | rnds[9];
+        state.msecs = now;
+    }
+    else {
+        state.seq = (state.seq + 1) | 0;
+        if (state.seq === 0) {
+            state.msecs++;
+        }
+    }
+    return state;
+}
+function v7Bytes(rnds, msecs, seq, buf, offset = 0) {
+    if (rnds.length < 16) {
+        throw new Error('Random bytes length must be >= 16');
+    }
+    if (!buf) {
+        buf = new Uint8Array(16);
+        offset = 0;
+    }
+    else {
+        if (offset < 0 || offset + 16 > buf.length) {
+            throw new RangeError(`UUID byte range ${offset}:${offset + 15} is out of buffer bounds`);
+        }
+    }
+    msecs ??= Date.now();
+    seq ??= ((rnds[6] * 0x7f) << 24) | (rnds[7] << 16) | (rnds[8] << 8) | rnds[9];
+    buf[offset++] = (msecs / 0x10000000000) & 0xff;
+    buf[offset++] = (msecs / 0x100000000) & 0xff;
+    buf[offset++] = (msecs / 0x1000000) & 0xff;
+    buf[offset++] = (msecs / 0x10000) & 0xff;
+    buf[offset++] = (msecs / 0x100) & 0xff;
+    buf[offset++] = msecs & 0xff;
+    buf[offset++] = 0x70 | ((seq >>> 28) & 0x0f);
+    buf[offset++] = (seq >>> 20) & 0xff;
+    buf[offset++] = 0x80 | ((seq >>> 14) & 0x3f);
+    buf[offset++] = (seq >>> 6) & 0xff;
+    buf[offset++] = ((seq << 2) & 0xff) | (rnds[10] & 0x03);
+    buf[offset++] = rnds[11];
+    buf[offset++] = rnds[12];
+    buf[offset++] = rnds[13];
+    buf[offset++] = rnds[14];
+    buf[offset++] = rnds[15];
+    return buf;
+}
+
 /**
  * Concurrency pool + batch event helper.
  * Used by both run-filter-pipeline and run-classify-pipeline.
@@ -38772,212 +38100,6 @@ async function insertBatchEvent(
 }
 
 /**
- * Atomically claims pending deal_states for filtering.
- * Falls back to re-claiming a stuck batch if no pending rows exist.
- *
- * @returns {Promise<{
- *   batch_id: string | null,
- *   count: number,
- *   attempts?: number,
- *   rows?: unknown[],
- *   stuck_failed?: number
- * }>}
- * - New or retriggered batch: `batch_id` set, optional `attempts` / `rows`.
- * - No work and no retrigger-eligible stuck batch: `batch_id: null`, `count: 0`,
- *   and `stuck_failed` (rows moved to failed by the exhausted-batch sweep, may be 0).
- */
-async function runClaimFilterBatch() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const batchSize = parseInt(coreExports.getInput('filter-batch-size') || '200', 10);
-  const maxRetries = parseInt(coreExports.getInput('max-retries') || '6', 10);
-
-  console.log(`[claim-filter-batch] starting (batchSize=${batchSize}, maxRetries=${maxRetries})`);
-
-  // 1. Authenticate
-  const jwt = await authenticate(authUrl, authSecret);
-  const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
-
-  // 2. Generate batch ID
-  const batchId = v7();
-
-  // 3. Atomically claim pending rows
-  await exec(dealStates.claimFilterBatch(schema, batchId, batchSize));
-
-  // 4. SELECT the claimed rows
-  const rows = await exec(dealStates.selectEmailsByBatch(schema, batchId));
-
-  const count = rows ? rows.length : 0;
-  console.log(`[claim-filter-batch] claimed ${count} pending rows`);
-
-  // 5. If claimed > 0, insert batch event and return
-  if (count > 0) {
-    await insertBatchEvent(exec, schema, {
-      triggerHash: batchId,
-      batchId,
-      batchType: 'filter',
-      eventType: 'new',
-    });
-
-    return { batch_id: batchId, count, attempts: 0, rows }
-  }
-
-  // 6. No pending rows — look for stuck batches
-  console.log(`[claim-filter-batch] no pending rows, checking for stuck batches`);
-
-  const stuckBatches = await exec(
-    dealStates.findStuckBatches(schema, STATUS.FILTERING, 5, maxRetries),
-  );
-
-  if (!stuckBatches || stuckBatches.length === 0) {
-    const stuckFailed = await sweepStuckRows(exec, schema, {
-      activeStatus: STATUS.FILTERING,
-      batchType: 'filter',
-      maxRetries,
-    });
-    if (stuckFailed > 0) {
-      console.log(
-        `[claim-filter-batch] dead-lettered ${stuckFailed} row(s) in exhausted filter batches (no retrigger-eligible stuck batches)`,
-      );
-    } else {
-      console.log(`[claim-filter-batch] no stuck batches found, nothing to do`);
-    }
-    return { batch_id: null, count: 0, stuck_failed: stuckFailed }
-  }
-
-  // 7. Re-claim the stuck batch
-  const stuckBatchId = stuckBatches[0].BATCH_ID;
-  const attempts = stuckBatches[0].ATTEMPTS;
-
-  console.log(`[claim-filter-batch] re-claiming stuck batch ${stuckBatchId} (attempts=${attempts})`);
-
-  // SELECT its rows
-  const stuckRows = await exec(dealStates.selectEmailsByBatch(schema, stuckBatchId));
-
-  // UPDATE UPDATED_AT to prevent other instances from grabbing it
-  await exec(dealStates.refreshBatchTimestamp(schema, stuckBatchId));
-
-  // Insert batch event with retrigger type and new trigger hash
-  const triggerHash = v7();
-  await insertBatchEvent(exec, schema, {
-    triggerHash,
-    batchId: stuckBatchId,
-    batchType: 'filter',
-    eventType: 'retrigger',
-  });
-
-  const stuckCount = stuckRows ? stuckRows.length : 0;
-
-  return { batch_id: stuckBatchId, count: stuckCount, attempts, rows: stuckRows }
-}
-
-/**
- * Atomically claims pending_classification deal_states for classification.
- *
- * Thread-aware: only claims threads where ALL messages in the same
- * sync-state have cleared filtering (no 'pending' or 'filtering' siblings).
- *
- * Returns:
- *  - New batch:   { batch_id, count, attempts: 0, rows }
- *  - Stuck batch: { batch_id, count, attempts, rows }
- *  - Nothing:     { batch_id: null, count: 0, stuck_failed, orphan_failed } — last two are
- *    counts from post-claim sweeps when nothing was claimable (each may be 0).
- */
-async function runClaimClassifyBatch() {
-  const authUrl = coreExports.getInput('auth-url');
-  const authSecret = coreExports.getInput('auth-secret');
-  const apiUrl = coreExports.getInput('api-url');
-  const biscuit = coreExports.getInput('biscuit');
-  const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const batchSize = parseInt(coreExports.getInput('classify-batch-size') || '5', 10);
-  const maxRetries = parseInt(coreExports.getInput('max-retries') || '6', 10);
-
-  console.log(`[claim-classify-batch] starting (batchSize=${batchSize}, maxRetries=${maxRetries})`);
-
-  // 1. Authenticate
-  const jwt = await authenticate(authUrl, authSecret);
-  const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
-
-  // 2. Generate batch_id
-  const batchId = v7();
-
-  // 3. Claim threads where all messages have cleared filtering
-  await exec(dealStates.claimClassifyBatch(schema, batchId, batchSize));
-
-  // 4. SELECT claimed rows
-  const rows = await exec(dealStates.selectEmailsByBatch(schema, batchId));
-
-  // 5. If claimed > 0, insert batch event and return
-  if (rows && rows.length > 0) {
-    console.log(`[claim-classify-batch] claimed ${rows.length} rows (batch=${batchId})`);
-    await insertBatchEvent(exec, schema, {
-      triggerHash: batchId,
-      batchId,
-      batchType: 'classify',
-      eventType: 'new',
-    });
-    return { batch_id: batchId, count: rows.length, attempts: 0, rows }
-  }
-
-  // 6. No rows claimed — look for stuck batches
-  console.log('[claim-classify-batch] no pending rows, checking for stuck batches');
-  const stuckRows = await exec(
-    dealStates.findStuckBatches(schema, STATUS.CLASSIFYING, 5, maxRetries),
-  );
-
-  if (stuckRows && stuckRows.length > 0) {
-    const stuckBatchId = stuckRows[0].BATCH_ID;
-    const attempts = parseInt(stuckRows[0].ATTEMPTS, 10);
-
-    // 7. SELECT its rows
-    const stuckBatchRows = await exec(dealStates.selectEmailsByBatch(schema, stuckBatchId));
-
-    // UPDATE UPDATED_AT to reset the stuck timer
-    await exec(dealStates.refreshBatchTimestamp(schema, stuckBatchId));
-
-    // Insert batch event with retrigger type and new triggerHash
-    const triggerHash = v7();
-    await insertBatchEvent(exec, schema, {
-      triggerHash,
-      batchId: stuckBatchId,
-      batchType: 'classify',
-      eventType: 'retrigger',
-    });
-
-    console.log(
-      `[claim-classify-batch] retriggering stuck batch ${stuckBatchId} (attempts=${attempts}, rows=${stuckBatchRows.length})`,
-    );
-    return {
-      batch_id: stuckBatchId,
-      count: stuckBatchRows.length,
-      attempts,
-      rows: stuckBatchRows,
-    }
-  }
-
-  const stuckFailed = await sweepStuckRows(exec, schema, {
-    activeStatus: STATUS.CLASSIFYING,
-    batchType: 'classify',
-    maxRetries,
-  });
-  const orphanFailed = await sweepOrphanedRows(exec, schema, {
-    statuses: [STATUS.PENDING_CLASSIFICATION],
-    staleMinutes: 30,
-  });
-  if (stuckFailed > 0 || orphanFailed > 0) {
-    console.log(
-      `[claim-classify-batch] dead-lettered ${stuckFailed} classify row(s), ${orphanFailed} orphan pending_classification row(s)`,
-    );
-  } else {
-    console.log('[claim-classify-batch] nothing to claim');
-  }
-  return { batch_id: null, count: 0, stuck_failed: stuckFailed, orphan_failed: orphanFailed }
-}
-
-/**
  * Orchestrator that claims and processes filter batches concurrently
  * until all pending work is exhausted.
  *
@@ -39012,7 +38134,7 @@ async function runFilterPipeline() {
   let totalFiltered = 0;
   let totalRejected = 0;
 
-  // 3. Define claimBatch() inline — same logic as claim-filter-batch.js
+  // 3. Define claimBatch() inline
   async function claimBatch() {
     const batchId = v7();
 
@@ -39350,25 +38472,25 @@ class WriteBatcher {
 
     if (items.length === 0) return
 
-    console.log(`[write-batcher] flushing ${queueName}: ${items.length} items`);
+    console.log(`[batcher] flushing ${queueName}: ${items.length} items`);
 
     try {
       await this._executeQueue(queueName, items);
       for (const w of waiters) w.resolve();
     } catch (err) {
       console.error(
-        `[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}`,
+        `[batcher] ${queueName} flush failed (${items.length} items): ${err.message}`,
       );
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
         console.error(
-          `[write-batcher] combined ${queueName} flush failed, falling back to individual items`,
+          `[batcher] combined ${queueName} flush failed, falling back to individual items`,
         );
         for (let i = 0; i < items.length; i++) {
           try {
             await this._executeQueue(queueName, [items[i]]);
           } catch (itemErr) {
-            console.error(`[write-batcher] ${queueName} item ${i} failed: ${itemErr.message}`);
+            console.error(`[batcher] ${queueName} item ${i} failed: ${itemErr.message}`);
           }
         }
         // Resolve all waiters — individual items that succeeded are written,
@@ -39421,7 +38543,7 @@ class WriteBatcher {
         const uniqueItems = [...dedupMap.values()];
         if (uniqueItems.length < items.length) {
           console.log(
-            `[write-batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`,
+            `[batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`,
           );
         }
         const cs = this._coreSchema;
@@ -39458,8 +38580,8 @@ class WriteBatcher {
 
 /**
  * Orchestrator that claims and processes classify batches concurrently,
- * with in-memory audit passing through save-evals, save-deals,
- * save-deal-contacts, and update-deal-states.
+ * with in-memory audit passing through eval upserts, deal upserts,
+ * contact inserts, and terminal state updates.
  */
 async function runClassifyPipeline() {
   const authUrl = coreExports.getInput('auth-url');
@@ -39588,7 +38710,7 @@ async function runClassifyPipeline() {
 
     let threads = null;
 
-    const existingAudit = await execNoRL(saveResults.getAuditByBatchId(schema, batchId));
+    const existingAudit = await execNoRL(audits.selectByBatch(schema, batchId));
 
     if (existingAudit && existingAudit.length > 0 && existingAudit[0].AI_EVALUATION) {
       try {
@@ -39838,7 +38960,7 @@ async function runClassifyPipeline() {
       const evaluation = sanitizeString(JSON.stringify(aiOutput));
       try {
         await execNoRL(
-          saveResults.insertAudit(schema, {
+          audits.insert(schema, {
             id: auditId,
             batchId,
             threadCount: threads.length,
@@ -40118,18 +39240,9 @@ async function runClassifyPipeline() {
 }
 
 const COMMANDS = {
-  'sxt-execute': runSxtQuery,
-  'fetch-and-filter': runFetchAndFilter,
-  'fetch-and-classify': runFetchAndClassify,
-  'save-evals': runSaveEvals,
-  'save-deal-contacts': runSaveDealContacts,
-  'save-deals': runSaveDeals,
-  'update-deal-states': runUpdateDealStates,
   'sync-deal-states': runSyncDealStates,
   eval: runEval,
   'eval-compare': runEvalCompare,
-  'claim-filter-batch': runClaimFilterBatch,
-  'claim-classify-batch': runClaimClassifyBatch,
   'run-filter-pipeline': runFilterPipeline,
   'run-classify-pipeline': runClassifyPipeline,
 };

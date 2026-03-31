@@ -6,8 +6,8 @@
  * the items have been flushed (or rejects on flush error).
  */
 
-import { STATUS } from './constants.js'
 import {
+  STATUS,
   evaluations as evalSql,
   deals as dealsSql,
   dealContacts as dealContactsSql,
@@ -24,7 +24,11 @@ export class WriteBatcher {
    * @param {number} opts.flushIntervalMs — timer-based flush interval (default 5000)
    * @param {number} opts.flushThreshold — count-based flush threshold per queue (default 10)
    */
-  constructor(executeSqlFn, schema, { flushIntervalMs = 5000, flushThreshold = 10, coreSchema = 'EMAIL_CORE_STAGING' } = {}) {
+  constructor(
+    executeSqlFn,
+    schema,
+    { flushIntervalMs = 5000, flushThreshold = 10, coreSchema = 'EMAIL_CORE_STAGING' } = {},
+  ) {
     this._executeSqlFn = executeSqlFn
     this._schema = schema
     this._coreSchema = coreSchema
@@ -165,23 +169,25 @@ export class WriteBatcher {
 
     if (items.length === 0) return
 
-    console.log(`[write-batcher] flushing ${queueName}: ${items.length} items`)
+    console.log(`[batcher] flushing ${queueName}: ${items.length} items`)
 
     try {
       await this._executeQueue(queueName, items)
       for (const w of waiters) w.resolve()
     } catch (err) {
-      console.error(`[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}`)
+      console.error(
+        `[batcher] ${queueName} flush failed (${items.length} items): ${err.message}`,
+      )
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
         console.error(
-          `[write-batcher] combined ${queueName} flush failed, falling back to individual items`,
+          `[batcher] combined ${queueName} flush failed, falling back to individual items`,
         )
         for (let i = 0; i < items.length; i++) {
           try {
             await this._executeQueue(queueName, [items[i]])
           } catch (itemErr) {
-            console.error(`[write-batcher] ${queueName} item ${i} failed: ${itemErr.message}`)
+            console.error(`[batcher] ${queueName} item ${i} failed: ${itemErr.message}`)
           }
         }
         // Resolve all waiters — individual items that succeeded are written,
@@ -233,7 +239,9 @@ export class WriteBatcher {
         }
         const uniqueItems = [...dedupMap.values()]
         if (uniqueItems.length < items.length) {
-          console.log(`[write-batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`)
+          console.log(
+            `[batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`,
+          )
         }
         const cs = this._coreSchema
         await this._executeSqlFn(contactsSql.upsert(cs, uniqueItems))
@@ -252,7 +260,9 @@ export class WriteBatcher {
           await this._executeSqlFn(dealStatesSql.updateStatusByIds(s, allDealIds, STATUS.DEAL))
         }
         if (allNotDealIds.length > 0) {
-          await this._executeSqlFn(dealStatesSql.updateStatusByIds(s, allNotDealIds, STATUS.NOT_DEAL))
+          await this._executeSqlFn(
+            dealStatesSql.updateStatusByIds(s, allNotDealIds, STATUS.NOT_DEAL),
+          )
         }
         break
       }

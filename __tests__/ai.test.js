@@ -17,7 +17,7 @@ jest.unstable_mockModule('../prompts/user.md', () => ({
     'Classify the email threads below. Return one JSON object per thread in a JSON array.\n\n# Threads to Classify\n\n{{THREAD_DATA}}',
 }))
 
-const { buildPrompt } = await import('../src/lib/prompt.js')
+const { buildPrompt } = await import('../src/lib/ai.js')
 
 function makeEmail(overrides = {}) {
   return {

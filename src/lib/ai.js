@@ -1,4 +1,69 @@
+import { getHeader, sanitizeEmailBody } from './emails.js'
 import { sleep, backoffMs } from './retry.js'
+import systemTemplate from '../../prompts/system.md'
+import classificationInstructions from '../../prompts/user.md'
+
+// --- Prompt building ---
+
+function groupByThread(emails) {
+  const threads = {}
+  for (const email of emails) {
+    const threadId = email.threadId || email.id
+    if (!threads[threadId]) threads[threadId] = []
+    threads[threadId].push(email)
+  }
+  return threads
+}
+
+function buildThreadData(emails) {
+  const threads = groupByThread(emails)
+  const parts = []
+  const threadOrder = []
+  let threadIndex = 0
+
+  for (const [threadId, threadEmails] of Object.entries(threads)) {
+    threadIndex++
+    threadOrder.push(threadId)
+    let section = `THREAD_ID_INDEX: ${threadIndex}\n`
+    section += `MODE: FULL_THREAD\n`
+    section += `Message Count: ${threadEmails.length}\n`
+
+    const previousSummary = threadEmails[0].previousAiSummary
+    section += `PREVIOUS_AI_SUMMARY: ${previousSummary || 'None'}\n\n`
+
+    threadEmails.forEach((email, i) => {
+      const from = getHeader(email, 'from')
+      const date = getHeader(email, 'date')
+      const subject = getHeader(email, 'subject')
+      section += `[Message ${i + 1}]\n`
+      section += `From: ${from}\n`
+      section += `Date: ${date}\n`
+      section += `Subject: ${subject}\n\n`
+      const rawBody = email.body || email.replyBody || ''
+      const body = sanitizeEmailBody(rawBody) || '[no body]'
+      section += `${body}\n\n`
+    })
+
+    section += '===\n'
+    parts.push(section)
+  }
+
+  return { text: parts.join('\n'), threadOrder }
+}
+
+export function buildPrompt(emails, { systemOverride, userOverride, creatorEmail } = {}) {
+  const { text: threadData, threadOrder } = buildThreadData(emails)
+
+  const systemPrompt = (systemOverride || systemTemplate).trim()
+
+  const creatorLine = creatorEmail ? `Creator email: ${creatorEmail}\n\n` : ''
+
+  const userPrompt = (userOverride || classificationInstructions)
+    .replace('{{THREAD_DATA}}', creatorLine + threadData)
+    .trim()
+
+  return { systemPrompt, userPrompt, threadOrder }
+}
 
 // --- Constants ---
 export const AI_REQUEST_TIMEOUT_MS = 240000
@@ -25,6 +90,8 @@ export const VALID_DEAL_TYPES = new Set([
   'paid_placement',
   'other_business',
 ])
+
+// --- AI client ---
 
 /**
  * Call a model with HTTP retries + exponential backoff.
@@ -158,9 +225,10 @@ export function parseAndValidate(raw, threadOrder) {
 
   // Schema validation and coercion
   return parsed.map((r) => ({
-    thread_id: threadOrder && r.thread_index != null
-      ? (threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || ''))
-      : String(r.thread_id || ''),
+    thread_id:
+      threadOrder && r.thread_index != null
+        ? threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || '')
+        : String(r.thread_id || ''),
     is_deal: Boolean(r.is_deal),
     is_english: r.is_english !== false,
     language: r.language || null,
