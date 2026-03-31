@@ -40,7 +40,7 @@ export async function runFilterPipeline() {
   let totalFiltered = 0
   let totalRejected = 0
 
-  // 3. Define claimBatch() inline — same logic as claim-filter-batch.js
+  // 3. Define claimBatch() inline
   async function claimBatch() {
     const batchId = uuidv7()
 

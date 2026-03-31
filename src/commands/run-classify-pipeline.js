@@ -19,8 +19,8 @@ import {
 
 /**
  * Orchestrator that claims and processes classify batches concurrently,
- * with in-memory audit passing through save-evals, save-deals,
- * save-deal-contacts, and update-deal-states.
+ * with in-memory audit passing through eval upserts, deal upserts,
+ * contact inserts, and terminal state updates.
  */
 export async function runClassifyPipeline() {
   const authUrl = core.getInput('auth-url')

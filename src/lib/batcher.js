@@ -169,25 +169,25 @@ export class WriteBatcher {
 
     if (items.length === 0) return
 
-    console.log(`[write-batcher] flushing ${queueName}: ${items.length} items`)
+    console.log(`[batcher] flushing ${queueName}: ${items.length} items`)
 
     try {
       await this._executeQueue(queueName, items)
       for (const w of waiters) w.resolve()
     } catch (err) {
       console.error(
-        `[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}`,
+        `[batcher] ${queueName} flush failed (${items.length} items): ${err.message}`,
       )
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
         console.error(
-          `[write-batcher] combined ${queueName} flush failed, falling back to individual items`,
+          `[batcher] combined ${queueName} flush failed, falling back to individual items`,
         )
         for (let i = 0; i < items.length; i++) {
           try {
             await this._executeQueue(queueName, [items[i]])
           } catch (itemErr) {
-            console.error(`[write-batcher] ${queueName} item ${i} failed: ${itemErr.message}`)
+            console.error(`[batcher] ${queueName} item ${i} failed: ${itemErr.message}`)
           }
         }
         // Resolve all waiters — individual items that succeeded are written,
@@ -240,7 +240,7 @@ export class WriteBatcher {
         const uniqueItems = [...dedupMap.values()]
         if (uniqueItems.length < items.length) {
           console.log(
-            `[write-batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`,
+            `[batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`,
           )
         }
         const cs = this._coreSchema

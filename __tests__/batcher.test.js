@@ -452,7 +452,7 @@ describe('WriteBatcher', () => {
     ])
 
     expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('[write-batcher] flushing deals: 1 items'),
+      expect.stringContaining('[batcher] flushing deals: 1 items'),
     )
 
     consoleSpy.mockRestore()
