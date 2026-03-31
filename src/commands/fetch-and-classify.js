@@ -2,10 +2,10 @@ import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { buildPrompt } from '../lib/prompt.js'
 import { callModel, parseAndValidate } from '../lib/ai-client.js'
-import { saveResults, sanitizeString, sanitizeSchema, sanitizeId } from '../lib/constants.js'
+import { saveResults, sanitizeString, sanitizeSchema, sanitizeId, STATUS } from '../lib/constants.js'
 import { authenticate, executeSql } from '../lib/sxt-client.js'
 import { fetchEmails } from '../lib/email-client.js'
-import { dealStates as dealStatesSql } from '../lib/sql/index.js'
+import { dealStates as dealStatesSql, deals as dealsSql } from '../lib/sql/index.js'
 
 /**
  * Step 1: Fetch content + call AI + save audit checkpoint.
@@ -67,13 +67,75 @@ export async function runFetchAndClassify() {
   const messageIds = metadataRows.map((r) => r.MESSAGE_ID)
   const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]))
 
-  const allEmails = await fetchEmails(messageIds, metaByMessageId, {
+  let allEmails = await fetchEmails(messageIds, metaByMessageId, {
     contentFetcherUrl,
     userId: metadataRows[0].USER_ID,
     syncStateId: metadataRows[0].SYNC_STATE_ID,
     chunkSize,
     fetchTimeoutMs,
   })
+
+  // Already-evaluated skip: threads with existing deals + no newer emails
+  const fetchedThreadIds = [...new Set(allEmails.map((e) => e.threadId).filter(Boolean))]
+
+  if (fetchedThreadIds.length > 0) {
+    const quotedFetched = fetchedThreadIds.map((id) => `'${sanitizeId(id)}'`)
+    const existingDeals = await exec(dealsSql.selectByThreadIds(schema, quotedFetched))
+
+    if (existingDeals && existingDeals.length > 0) {
+      const dealByThread = {}
+      for (const d of existingDeals) {
+        dealByThread[d.THREAD_ID] = d.UPDATED_AT
+      }
+
+      const emailsByThread = {}
+      for (const email of allEmails) {
+        if (!email.threadId) continue
+        if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = []
+        emailsByThread[email.threadId].push(email)
+      }
+
+      const skippedEmailIds = []
+      const skippedThreadIds = []
+
+      for (const [threadId, dealUpdatedAt] of Object.entries(dealByThread)) {
+        const threadEmails = emailsByThread[threadId]
+        if (!threadEmails || threadEmails.length === 0) continue
+
+        const emailDates = threadEmails
+          .map((e) => new Date(e.date))
+          .filter((d) => !isNaN(d.getTime()))
+
+        // No valid dates — can't determine, classify normally
+        if (emailDates.length === 0) continue
+
+        const latestEmailDate = emailDates.reduce(
+          (latest, d) => (d > latest ? d : latest),
+          new Date(0),
+        )
+
+        if (latestEmailDate <= new Date(dealUpdatedAt)) {
+          skippedThreadIds.push(threadId)
+          const threadRows = metadataRows.filter((r) => r.THREAD_ID === threadId)
+          skippedEmailIds.push(...threadRows.map((r) => r.EMAIL_METADATA_ID))
+          allEmails = allEmails.filter((e) => e.threadId !== threadId)
+        }
+      }
+
+      if (skippedEmailIds.length > 0) {
+        const quotedSkipped = skippedEmailIds.map((id) => `'${sanitizeId(id)}'`)
+        await exec(dealStatesSql.updateStatusByIds(schema, quotedSkipped, STATUS.DEAL))
+        console.log(
+          `[classify] ${skippedEmailIds.length} rows skipped → deal (already evaluated, ${skippedThreadIds.length} threads)`,
+        )
+      }
+    }
+  }
+
+  if (allEmails.length === 0) {
+    console.log('[classify] all threads already evaluated — skipping AI')
+    return { skipped: true, thread_count: 0 }
+  }
 
   // Build prompt
   const { systemPrompt, userPrompt } = buildPrompt(allEmails)
