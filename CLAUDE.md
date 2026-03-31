@@ -33,7 +33,7 @@ Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command`
 
 **`run-filter-pipeline`** — Claims batches of pending emails, fetches headers from content fetcher, applies 6 static rejection rules from `src/lib/emails.js` (configs in `config/*.json`), updates DEAL_STATES to `pending_classification` or `filter_rejected`. Runs batches concurrently via `runPool()`.
 
-**`run-classify-pipeline`** — Claims batches of pending_classification emails, fetches bodies, calls AI classification, saves audit checkpoint to AI_EVALUATION_AUDITS, upserts evaluations/deals/contacts, and sets terminal deal states. Uses `WriteBatcher` (`src/lib/sql-batcher.js`) for batched SQL writes. Runs batches concurrently via `runPool()`.
+**`run-classify-pipeline`** — Claims batches of pending_classification emails, fetches bodies, calls AI classification, saves audit checkpoint to AI_EVALUATION_AUDITS, upserts evaluations/deals/contacts, and sets terminal deal states. Uses `WriteBatcher` (`src/lib/batcher.js`) for batched SQL writes. Runs batches concurrently via `runPool()`.
 
 **`sync-deal-states`** — Paginated sync of deal states.
 
@@ -50,7 +50,7 @@ Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command`
 
 `parseAndValidate()` handles schema coercion: clamps ai_score to 1-10, validates category/deal_type against enum sets, enforces string limits.
 
-### SxT Client (sxt-client.js)
+### Database Client (db.js)
 
 Auth via proxy with shared secret → JWT. All SQL goes through `executeSql()` which acquires a rate-limit token (fail-open), executes against SxT REST API, and handles 401 re-auth. All column names are UPPERCASE (SxT convention).
 

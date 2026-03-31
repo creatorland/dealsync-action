@@ -7,7 +7,7 @@
 
 import { convert } from 'html-to-text'
 import EmailReplyParser from 'email-reply-parser'
-import { withTimeout } from './sxt-client.js'
+import { withTimeout } from './db.js'
 import { sleep, backoffMs } from './retry.js'
 import blockedDomains from '../../config/blocked-domains.json'
 import blockedPrefixes from '../../config/blocked-prefixes.json'

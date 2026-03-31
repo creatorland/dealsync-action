@@ -1,6 +1,6 @@
 import * as core from '@actions/core'
 import { sanitizeSchema } from '../lib/constants.js'
-import { authenticate, executeSql } from '../lib/sxt-client.js'
+import { authenticate, executeSql } from '../lib/db.js'
 import { dealStates as dealStatesSql } from '../lib/sql/index.js'
 
 /**

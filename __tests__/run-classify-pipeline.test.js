@@ -28,7 +28,7 @@ jest.unstable_mockModule('uuid', () => ({
 const mockAuthenticate = jest.fn()
 const mockExecuteSql = jest.fn()
 const mockAcquireRateLimitToken = jest.fn().mockResolvedValue(undefined)
-jest.unstable_mockModule('../src/lib/sxt-client.js', () => ({
+jest.unstable_mockModule('../src/lib/db.js', () => ({
   authenticate: mockAuthenticate,
   executeSql: mockExecuteSql,
   acquireRateLimitToken: mockAcquireRateLimitToken,
@@ -98,7 +98,7 @@ const mockBatcherInstance = {
   stop: jest.fn(),
 }
 const MockWriteBatcher = jest.fn(() => mockBatcherInstance)
-jest.unstable_mockModule('../src/lib/sql-batcher.js', () => ({
+jest.unstable_mockModule('../src/lib/batcher.js', () => ({
   WriteBatcher: MockWriteBatcher,
 }))
 

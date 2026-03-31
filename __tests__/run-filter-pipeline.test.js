@@ -28,7 +28,7 @@ jest.unstable_mockModule('uuid', () => ({
 const mockAuthenticate = jest.fn()
 const mockExecuteSql = jest.fn()
 const mockAcquireRateLimitToken = jest.fn().mockResolvedValue(undefined)
-jest.unstable_mockModule('../src/lib/sxt-client.js', () => ({
+jest.unstable_mockModule('../src/lib/db.js', () => ({
   authenticate: mockAuthenticate,
   executeSql: mockExecuteSql,
   acquireRateLimitToken: mockAcquireRateLimitToken,
