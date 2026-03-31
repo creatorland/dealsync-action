@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals'
-import { WriteBatcher } from '../src/lib/write-batcher.js'
+import { WriteBatcher } from '../src/lib/sql-batcher.js'
 
 // ============================================================
 // Helpers

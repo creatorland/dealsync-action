@@ -12,7 +12,7 @@ import { authenticate, executeSql, acquireRateLimitToken } from '../lib/sxt-clie
 import { callModel, parseAndValidate, buildPrompt } from '../lib/ai.js'
 import { fetchEmails } from '../lib/emails.js'
 import { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
-import { WriteBatcher } from '../lib/write-batcher.js'
+import { WriteBatcher } from '../lib/sql-batcher.js'
 import {
   dealStates as dealStatesSql,
   evaluations as evalSql,

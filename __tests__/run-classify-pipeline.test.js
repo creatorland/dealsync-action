@@ -98,7 +98,7 @@ const mockBatcherInstance = {
   stop: jest.fn(),
 }
 const MockWriteBatcher = jest.fn(() => mockBatcherInstance)
-jest.unstable_mockModule('../src/lib/write-batcher.js', () => ({
+jest.unstable_mockModule('../src/lib/sql-batcher.js', () => ({
   WriteBatcher: MockWriteBatcher,
 }))
 
