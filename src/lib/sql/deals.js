@@ -13,7 +13,7 @@ export const deals = {
 
   selectByThreadIds: (schema, quotedThreadIds) => {
     const s = sanitizeSchema(schema)
-    return `SELECT ID, THREAD_ID, USER_ID FROM ${s}.DEALS WHERE THREAD_ID IN (${quotedThreadIds.join(',')})`
+    return `SELECT ID, THREAD_ID, USER_ID, UPDATED_AT FROM ${s}.DEALS WHERE THREAD_ID IN (${quotedThreadIds.join(',')})`
   },
 }
 

@@ -27743,7 +27743,7 @@ const deals = {
 
   selectByThreadIds: (schema, quotedThreadIds) => {
     const s = sanitizeSchema(schema);
-    return `SELECT ID, THREAD_ID, USER_ID FROM ${s}.DEALS WHERE THREAD_ID IN (${quotedThreadIds.join(',')})`
+    return `SELECT ID, THREAD_ID, USER_ID, UPDATED_AT FROM ${s}.DEALS WHERE THREAD_ID IN (${quotedThreadIds.join(',')})`
   },
 };
 
@@ -27783,7 +27783,12 @@ async function runSyncDealStates() {
   );
   const jwt = await authenticate(authUrl, authSecret);
 
-  const result = await executeSql(apiUrl, jwt, biscuit, dealStates.syncFromEmailMetadata(schema, emailCoreSchema));
+  const result = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    dealStates.syncFromEmailMetadata(schema, emailCoreSchema),
+  );
 
   const count = Array.isArray(result) ? result.length : 0;
   console.log(`[sync-deal-states] done: ${count} synced (1 query)`);
@@ -34473,7 +34478,7 @@ function sanitizeEmailBody(body) {
   return text
 }
 
-var systemTemplate = "You are an email classifier for a content creator's inbox. Identify brand deals and business opportunities. Return valid JSON only — no markdown, no explanation, no code fences.\n\n# Creator Context\n\nThe user message may specify the creator's email. If provided, use it to distinguish inbound (to creator) from outbound (from creator) emails. If not provided, infer from exchange patterns.\n\n# Classification Rules\n\n**Priority: maximum recall.** If there is a 20% or greater chance something is a brand deal, classify as is_deal: true. When uncertain, use category \"low_confidence\". Missing a real deal costs thousands; a false positive costs 2 seconds to dismiss.\n\n## What IS a deal\n\nA brand, company, agency, platform, or fellow creator wants to work with this creator for their audience, content, reach, or influence. Includes: sponsorships, paid collaborations, product seeding/gifting, affiliate offers, ambassador programs, creator-to-creator collabs, event appearances, paid placements, content licensing, talent agency outreach. Classify regardless of status (new, active, declined, completed, suspicious).\n\n**Strong signals** (any one = is_deal: true): sender from brand/agency/PR firm, mentions sponsorship/collaboration/partnership/campaign, references compensation or budget, proposes deliverables or timeline, references creator's audience/reach, sender has partnership title, requests rate card, mentions exclusivity/licensing, originates from influencer marketing platform.\n\n**Weak signals** (alone = low_confidence): generic \"opportunity\" language, PR press release without ask, event invite without compensation details, vague \"collab\" subject from corporate domain, follow-up referencing unseen conversation.\n\n## What is NOT a deal\n\nInvestor/fundraising conversations, legal/accounting services, internal team discussions, automated notifications (YouTube/Instagram/TikTok/GMass/newsletters), surveys/feedback requests, SaaS pitches (unless proposing to sponsor creator's content), personal messages, calendar-only threads, shipping/order confirmations, password resets, billing notifications, social media alerts, traditional job recruitment, charity requests (unless paid partnership).\n\n# Output Schema\n\nReturn a JSON array with exactly one object per THREAD_ID_INDEX. The array MUST have the same number of elements as threads provided.\n\nFields per object:\n\n- **thread_index** (integer, required): The THREAD_ID_INDEX from the input (1-based)\n- **is_deal** (boolean, required): true if this is or might be a deal\n- **is_english** (boolean, required): true if primary language is English\n- **language** (string or null): ISO 639-1 code when is_english is false, otherwise null\n- **ai_score** (integer 1-10, required): Creator attention priority. 9-10: urgent, respond today. 7-8: high-value, act soon. 5-6: active, no deadline. 3-4: low priority. 1-2: no action needed.\n- **category** (string or null): Required when is_deal is true. One of: \"new\", \"in_progress\", \"completed\", \"not_interested\", \"likely_scam\", \"low_confidence\". Null when is_deal is false.\n- **likely_scam** (boolean, required): true if suspicious patterns detected\n- **ai_insight** (string, required): One-line summary of the opportunity or why it's not a deal\n- **ai_summary** (string, required, max 1000 chars): Context memo for the next AI evaluation (see guidelines below)\n- **main_contact** (object or null): The primary EXTERNAL person relevant to the deal — must NOT be the creator or match the creator's email. If the most relevant contact is the creator, use the next best external contact from the thread instead (e.g. the sender of an inbound deal email, or a CC'd brand representative). Fields: name, email, company, title, phone_number (all string or null). Null when is_deal is false or when no external contact can be identified in the thread.\n- **deal_brand** (string or null): Brand/company name. Null when is_deal is false.\n- **deal_type** (string or null): One of: \"brand_collaboration\", \"sponsorship\", \"affiliate\", \"product_seeding\", \"ambassador\", \"content_partnership\", \"paid_placement\", \"other_business\". Null when is_deal is false.\n- **deal_name** (string or null): Short descriptive name. Null when is_deal is false.\n- **deal_value** (number or null): Only if compensation explicitly mentioned. Null otherwise.\n- **deal_currency** (string or null): ISO 4217 code when deal_value present. Null otherwise.\n\n# AI Summary Guidelines\n\nThe ai_summary is the ONLY context the next classifier will have when new emails arrive. Write it as a factual briefing:\n\n- **Who**: Main contact's full name, email, title, company. Other relevant participants.\n- **What**: Specific proposal, deliverables, content format requested\n- **Status**: Current state of conversation or negotiation\n- **Terms**: Exact compensation figures, rates, budget, currency if mentioned\n- **Dates**: Deadlines, campaign dates, response-by dates\n- **Red flags**: Anything suspicious or noteworthy\n\n# Previous AI Summary\n\nWhen a thread includes PREVIOUS_AI_SUMMARY, it reflects a prior evaluation with fewer emails. New emails may change the classification. Re-evaluate fully — use the prior summary as background context only.\n\n# Examples\n\n## Deal example\n\nThread: Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored YouTube review with 60-day exclusivity.\n\n```json\n{\"thread_index\": 1, \"is_deal\": true, \"is_english\": true, \"ai_score\": 8, \"category\": \"new\", \"likely_scam\": false, \"ai_insight\": \"Beauty Brand X offers $2.5K for sponsored YouTube review\", \"ai_summary\": \"Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.\", \"main_contact\": {\"name\": \"Sarah Kim\", \"email\": \"sarah@beautybrandx.com\", \"company\": \"Beauty Brand X\", \"title\": \"Partnerships Manager\", \"phone_number\": null}, \"deal_brand\": \"Beauty Brand X\", \"deal_type\": \"sponsorship\", \"deal_name\": \"Beauty Brand X YouTube Review\", \"deal_value\": 2500, \"deal_currency\": \"USD\"}\n```\n\n## Non-deal example\n\nThread: noreply@youtube.com sends 100K subscriber milestone notification.\n\n```json\n{\"thread_index\": 2, \"is_deal\": false, \"is_english\": true, \"ai_score\": 1, \"category\": null, \"likely_scam\": false, \"ai_insight\": \"YouTube milestone notification\", \"ai_summary\": \"Automated YouTube notification about 100K subscriber milestone. No deal content.\", \"main_contact\": null, \"deal_brand\": null, \"deal_type\": null, \"deal_name\": null, \"deal_value\": null, \"deal_currency\": null}\n```\n\nOnly classify the threads in the user message. Do NOT classify the examples above.\n\n# Final Rules\n\n1. Return ONLY a valid JSON array\n2. One object per THREAD_ID_INDEX — array length MUST match thread count\n3. When is_deal is false: set category, deal_brand, deal_type, deal_name, deal_value, deal_currency, and main_contact to null\n4. When is_deal is true: deal_type and deal_name are required. deal_brand required when identifiable.\n5. main_contact must be an EXTERNAL person — NEVER the creator. If the creator's email is provided, do NOT use that email in main_contact. Instead, pick the best non-creator contact from the thread (e.g. the inbound sender or a CC'd brand rep). Only set main_contact to null if no external contact exists in the thread at all.\n6. ai_summary is always required for every thread\n7. When uncertain: default to is_deal: true with category \"low_confidence\"\n";
+var systemTemplate = "You are an email classifier for a content creator's inbox. Identify brand deals and business opportunities. Return valid JSON only — no markdown, no explanation, no code fences.\n\n# Creator Context\n\nThe user message may specify the creator's email. If provided, use it to distinguish inbound (to creator) from outbound (from creator) emails. If not provided, infer from exchange patterns.\n\n# Classification Rules\n\n**Priority: maximum recall.** If there is a 20% or greater chance something is a brand deal, classify as is_deal: true. When uncertain, use category \"low_confidence\". Missing a real deal costs thousands; a false positive costs 2 seconds to dismiss.\n\n## What IS a deal\n\nA brand, company, agency, platform, or fellow creator wants to work with this creator for their audience, content, reach, or influence. Includes: sponsorships, paid collaborations, product seeding/gifting, affiliate offers, ambassador programs, creator-to-creator collabs, event appearances, paid placements, content licensing, talent agency outreach. Classify regardless of status (new, active, declined, completed, suspicious).\n\n**Strong signals** (any one = is_deal: true): sender from brand/agency/PR firm, mentions sponsorship/collaboration/partnership/campaign, references compensation or budget, proposes deliverables or timeline, references creator's audience/reach, sender has partnership title, requests rate card, mentions exclusivity/licensing, originates from influencer marketing platform.\n\n**Weak signals** (alone = low_confidence): generic \"opportunity\" language, PR press release without ask, event invite without compensation details, vague \"collab\" subject from corporate domain, follow-up referencing unseen conversation.\n\n## What is NOT a deal\n\nInvestor/fundraising conversations, legal/accounting services, internal team discussions, automated notifications (YouTube/Instagram/TikTok/GMass/newsletters), surveys/feedback requests, SaaS pitches (unless proposing to sponsor creator's content), personal messages, calendar-only threads, shipping/order confirmations, password resets, billing notifications, social media alerts, traditional job recruitment, charity requests (unless paid partnership).\n\n# Output Schema\n\nReturn a JSON array with exactly one object per THREAD_ID_INDEX. The array MUST have the same number of elements as threads provided.\n\nFields per object:\n\n- **thread_index** (integer, required): The THREAD_ID_INDEX from the input (1-based)\n- **is_deal** (boolean, required): true if this is or might be a deal\n- **is_english** (boolean, required): true if primary language is English\n- **language** (string or null): ISO 639-1 code when is_english is false, otherwise null\n- **ai_score** (integer 1-10, required): Creator attention priority. 9-10: urgent, respond today. 7-8: high-value, act soon. 5-6: active, no deadline. 3-4: low priority. 1-2: no action needed.\n- **category** (string or null): Required when is_deal is true. One of: \"new\", \"in_progress\", \"completed\", \"not_interested\", \"likely_scam\", \"low_confidence\". Null when is_deal is false.\n- **likely_scam** (boolean, required): true if suspicious patterns detected\n- **ai_insight** (string, required): One-line summary of the opportunity or why it's not a deal\n- **ai_summary** (string, required, max 1000 chars): Context memo for the next AI evaluation (see guidelines below)\n- **main_contact** (object or null): The primary EXTERNAL person relevant to the deal — must NOT be the creator or match the creator's email. If the most relevant contact is the creator, use the next best external contact from the thread instead (e.g. the sender of an inbound deal email, or a CC'd brand representative). Fields: name, email, company, title, phone_number (all string or null). Null when is_deal is false or when no external contact can be identified in the thread.\n- **deal_brand** (string or null): Brand/company name. Null when is_deal is false.\n- **deal_type** (string or null): One of: \"brand_collaboration\", \"sponsorship\", \"affiliate\", \"product_seeding\", \"ambassador\", \"content_partnership\", \"paid_placement\", \"other_business\". Null when is_deal is false.\n- **deal_name** (string or null): Short descriptive name. Null when is_deal is false.\n- **deal_value** (number or null): Only if compensation explicitly mentioned. Null otherwise.\n- **deal_currency** (string or null): ISO 4217 code when deal_value present. Null otherwise.\n\n# AI Summary Guidelines\n\nThe ai_summary is the ONLY context the next classifier will have when new emails arrive. Write it as a factual briefing:\n\n- **Who**: Main contact's full name, email, title, company. Other relevant participants.\n- **What**: Specific proposal, deliverables, content format requested\n- **Status**: Current state of conversation or negotiation\n- **Terms**: Exact compensation figures, rates, budget, currency if mentioned\n- **Dates**: Deadlines, campaign dates, response-by dates\n- **Red flags**: Anything suspicious or noteworthy\n\n# Previous AI Summary\n\nWhen a thread includes PREVIOUS_AI_SUMMARY, it reflects a prior evaluation with fewer emails. New emails may change the classification. Re-evaluate fully — use the prior summary as background context only.\n\n# Examples\n\n## Deal example\n\nThread: Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored YouTube review with 60-day exclusivity.\n\n```json\n{\n  \"thread_index\": 1,\n  \"is_deal\": true,\n  \"is_english\": true,\n  \"ai_score\": 8,\n  \"category\": \"new\",\n  \"likely_scam\": false,\n  \"ai_insight\": \"Beauty Brand X offers $2.5K for sponsored YouTube review\",\n  \"ai_summary\": \"Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.\",\n  \"main_contact\": {\n    \"name\": \"Sarah Kim\",\n    \"email\": \"sarah@beautybrandx.com\",\n    \"company\": \"Beauty Brand X\",\n    \"title\": \"Partnerships Manager\",\n    \"phone_number\": null\n  },\n  \"deal_brand\": \"Beauty Brand X\",\n  \"deal_type\": \"sponsorship\",\n  \"deal_name\": \"Beauty Brand X YouTube Review\",\n  \"deal_value\": 2500,\n  \"deal_currency\": \"USD\"\n}\n```\n\n## Non-deal example\n\nThread: noreply@youtube.com sends 100K subscriber milestone notification.\n\n```json\n{\n  \"thread_index\": 2,\n  \"is_deal\": false,\n  \"is_english\": true,\n  \"ai_score\": 1,\n  \"category\": null,\n  \"likely_scam\": false,\n  \"ai_insight\": \"YouTube milestone notification\",\n  \"ai_summary\": \"Automated YouTube notification about 100K subscriber milestone. No deal content.\",\n  \"main_contact\": null,\n  \"deal_brand\": null,\n  \"deal_type\": null,\n  \"deal_name\": null,\n  \"deal_value\": null,\n  \"deal_currency\": null\n}\n```\n\nOnly classify the threads in the user message. Do NOT classify the examples above.\n\n# Final Rules\n\n1. Return ONLY a valid JSON array\n2. One object per THREAD_ID_INDEX — array length MUST match thread count\n3. When is_deal is false: set category, deal_brand, deal_type, deal_name, deal_value, deal_currency, and main_contact to null\n4. When is_deal is true: deal_type and deal_name are required. deal_brand required when identifiable.\n5. main_contact must be an EXTERNAL person — NEVER the creator. If the creator's email is provided, do NOT use that email in main_contact. Instead, pick the best non-creator contact from the thread (e.g. the inbound sender or a CC'd brand rep). Only set main_contact to null if no external contact exists in the thread at all.\n6. ai_summary is always required for every thread\n7. When uncertain: default to is_deal: true with category \"low_confidence\"\n";
 
 var classificationInstructions = "Classify the email threads below. Return one JSON object per thread in a JSON array.\n\n# Threads to Classify\n\n{{THREAD_DATA}}\n";
 
@@ -34528,9 +34533,7 @@ function buildPrompt(emails, { systemOverride, userOverride, creatorEmail } = {}
 
   const systemPrompt = (systemOverride || systemTemplate).trim();
 
-  const creatorLine = creatorEmail
-    ? `Creator email: ${creatorEmail}\n\n`
-    : '';
+  const creatorLine = creatorEmail ? `Creator email: ${creatorEmail}\n\n` : '';
 
   const userPrompt = (userOverride || classificationInstructions)
     .replace('{{THREAD_DATA}}', creatorLine + threadData)
@@ -34697,9 +34700,10 @@ function parseAndValidate(raw, threadOrder) {
 
   // Schema validation and coercion
   return parsed.map((r) => ({
-    thread_id: threadOrder && r.thread_index != null
-      ? (threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || ''))
-      : String(r.thread_id || ''),
+    thread_id:
+      threadOrder && r.thread_index != null
+        ? threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || '')
+        : String(r.thread_id || ''),
     is_deal: Boolean(r.is_deal),
     is_english: r.is_english !== false,
     language: r.language || null,
@@ -34905,13 +34909,75 @@ async function runFetchAndClassify() {
   const messageIds = metadataRows.map((r) => r.MESSAGE_ID);
   const metaByMessageId = new Map(metadataRows.map((r) => [r.MESSAGE_ID, r]));
 
-  const allEmails = await fetchEmails(messageIds, metaByMessageId, {
+  let allEmails = await fetchEmails(messageIds, metaByMessageId, {
     contentFetcherUrl,
     userId: metadataRows[0].USER_ID,
     syncStateId: metadataRows[0].SYNC_STATE_ID,
     chunkSize,
     fetchTimeoutMs,
   });
+
+  // Already-evaluated skip: threads with existing deals + no newer emails
+  const fetchedThreadIds = [...new Set(allEmails.map((e) => e.threadId).filter(Boolean))];
+
+  if (fetchedThreadIds.length > 0) {
+    const quotedFetched = fetchedThreadIds.map((id) => `'${sanitizeId(id)}'`);
+    const existingDeals = await exec(deals.selectByThreadIds(schema, quotedFetched));
+
+    if (existingDeals && existingDeals.length > 0) {
+      const dealByThread = {};
+      for (const d of existingDeals) {
+        dealByThread[d.THREAD_ID] = d.UPDATED_AT;
+      }
+
+      const emailsByThread = {};
+      for (const email of allEmails) {
+        if (!email.threadId) continue
+        if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = [];
+        emailsByThread[email.threadId].push(email);
+      }
+
+      const skippedEmailIds = [];
+      const skippedThreadIds = [];
+
+      for (const [threadId, dealUpdatedAt] of Object.entries(dealByThread)) {
+        const threadEmails = emailsByThread[threadId];
+        if (!threadEmails || threadEmails.length === 0) continue
+
+        const emailDates = threadEmails
+          .map((e) => new Date(e.date))
+          .filter((d) => !isNaN(d.getTime()));
+
+        // No valid dates — can't determine, classify normally
+        if (emailDates.length === 0) continue
+
+        const latestEmailDate = emailDates.reduce(
+          (latest, d) => (d > latest ? d : latest),
+          new Date(0),
+        );
+
+        if (latestEmailDate <= new Date(dealUpdatedAt)) {
+          skippedThreadIds.push(threadId);
+          const threadRows = metadataRows.filter((r) => r.THREAD_ID === threadId);
+          skippedEmailIds.push(...threadRows.map((r) => r.EMAIL_METADATA_ID));
+          allEmails = allEmails.filter((e) => e.threadId !== threadId);
+        }
+      }
+
+      if (skippedEmailIds.length > 0) {
+        const quotedSkipped = skippedEmailIds.map((id) => `'${sanitizeId(id)}'`);
+        await exec(dealStates.updateStatusByIds(schema, quotedSkipped, STATUS.DEAL));
+        console.log(
+          `[classify] ${skippedEmailIds.length} rows skipped → deal (already evaluated, ${skippedThreadIds.length} threads)`,
+        );
+      }
+    }
+  }
+
+  if (allEmails.length === 0) {
+    console.log('[classify] all threads already evaluated — skipping AI');
+    return { skipped: true, thread_count: 0 }
+  }
 
   // Build prompt
   const { systemPrompt, userPrompt } = buildPrompt(allEmails);
@@ -35000,17 +35066,19 @@ async function runFetchAndClassify() {
   const auditId = v7();
   const evaluation = sanitizeString(JSON.stringify(aiOutput).substring(0, 6400));
   try {
-    await exec(saveResults.insertAudit(schema, {
-      id: auditId,
-      batchId,
-      threadCount: threads.length,
-      emailCount: metadataRows.length,
-      cost: 0,
-      inputTokens: 0,
-      outputTokens: 0,
-      model: modelUsed,
-      evaluation,
-    }));
+    await exec(
+      saveResults.insertAudit(schema, {
+        id: auditId,
+        batchId,
+        threadCount: threads.length,
+        emailCount: metadataRows.length,
+        cost: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        model: modelUsed,
+        evaluation,
+      }),
+    );
     console.log(`[classify] audit saved: ${auditId} (model: ${modelUsed})`);
   } catch (err) {
     if (
@@ -35453,8 +35521,7 @@ async function runSaveDeals() {
     const dealId = v7();
     const dealName = sanitizeString(thread.deal_name || '');
     const dealType = sanitizeString(thread.deal_type || '');
-    const dealValue =
-      typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
+    const dealValue = typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
     const currency = sanitizeString(thread.currency || 'USD');
     const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
     const category = sanitizeString(thread.category || '');
@@ -35502,8 +35569,7 @@ async function runSaveEvals() {
     const category = sanitizeString(thread.category || '');
     const aiSummary = sanitizeString(thread.ai_summary || '');
     const isDeal = thread.is_deal ? 'true' : 'false';
-    const isLikelyScam =
-      (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false';
+    const isLikelyScam = (thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false';
     const aiScore = typeof thread.ai_score === 'number' ? thread.ai_score : 0;
     return `('${evalId}', '${threadId}', '', '${category}', '${aiSummary}', ${isDeal}, ${isLikelyScam}, ${aiScore}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
   });
@@ -35587,10 +35653,22 @@ async function runUpdateDealStates() {
 
   // Issue exactly 2 UPDATEs (one for deals, one for not_deals)
   if (dealEmailIds.length > 0) {
-    await exec(dealStates.updateStatusByIds(schema, dealEmailIds.map(id => `'${sanitizeId(id)}'`), STATUS.DEAL));
+    await exec(
+      dealStates.updateStatusByIds(
+        schema,
+        dealEmailIds.map((id) => `'${sanitizeId(id)}'`),
+        STATUS.DEAL,
+      ),
+    );
   }
   if (notDealEmailIds.length > 0) {
-    await exec(dealStates.updateStatusByIds(schema, notDealEmailIds.map(id => `'${sanitizeId(id)}'`), STATUS.NOT_DEAL));
+    await exec(
+      dealStates.updateStatusByIds(
+        schema,
+        notDealEmailIds.map((id) => `'${sanitizeId(id)}'`),
+        STATUS.NOT_DEAL,
+      ),
+    );
   }
 
   const queries = (dealEmailIds.length > 0 ? 1 : 0) + (notDealEmailIds.length > 0 ? 1 : 0);
@@ -38629,9 +38707,7 @@ async function sweepStuckRows(exec, schema, { activeStatus, batchType, maxRetrie
       );
       continue
     }
-    await exec(
-      dealStates.updateStatusByBatch(safeSchema, safeBid, statusSql, STATUS.FAILED),
-    );
+    await exec(dealStates.updateStatusByBatch(safeSchema, safeBid, statusSql, STATUS.FAILED));
     await insertBatchEvent(exec, safeSchema, {
       triggerHash: v7(),
       batchId: bid,
@@ -38668,15 +38744,11 @@ async function sweepOrphanedRows(exec, schema, { statuses, staleMinutes }) {
   }
   const safeStaleMinutes = minutesNumber;
 
-  const countRows = await exec(
-    dealStates.countOrphaned(safeSchema, statuses, safeStaleMinutes),
-  );
+  const countRows = await exec(dealStates.countOrphaned(safeSchema, statuses, safeStaleMinutes));
   const n = Number(countRows?.[0]?.C ?? 0) || 0;
   if (n === 0) return 0
 
-  await exec(
-    dealStates.markOrphanedAsFailed(safeSchema, statuses, safeStaleMinutes),
-  );
+  await exec(dealStates.markOrphanedAsFailed(safeSchema, statuses, safeStaleMinutes));
 
   coreExports.info(
     `[sweepOrphanedRows] failed ${n} orphaned row(s) (statuses=${statuses.join(',')}, staleMinutes=${safeStaleMinutes})`,
@@ -38756,7 +38828,9 @@ async function runClaimFilterBatch() {
   // 6. No pending rows — look for stuck batches
   console.log(`[claim-filter-batch] no pending rows, checking for stuck batches`);
 
-  const stuckBatches = await exec(dealStates.findStuckBatches(schema, STATUS.FILTERING, 5, maxRetries));
+  const stuckBatches = await exec(
+    dealStates.findStuckBatches(schema, STATUS.FILTERING, 5, maxRetries),
+  );
 
   if (!stuckBatches || stuckBatches.length === 0) {
     const stuckFailed = await sweepStuckRows(exec, schema, {
@@ -38850,7 +38924,9 @@ async function runClaimClassifyBatch() {
 
   // 6. No rows claimed — look for stuck batches
   console.log('[claim-classify-batch] no pending rows, checking for stuck batches');
-  const stuckRows = await exec(dealStates.findStuckBatches(schema, STATUS.CLASSIFYING, 5, maxRetries));
+  const stuckRows = await exec(
+    dealStates.findStuckBatches(schema, STATUS.CLASSIFYING, 5, maxRetries),
+  );
 
   if (stuckRows && stuckRows.length > 0) {
     const stuckBatchId = stuckRows[0].BATCH_ID;
@@ -39045,7 +39121,9 @@ async function runFilterPipeline() {
     // d. UPDATE passed IDs -> pending_classification
     if (filteredIds.length > 0) {
       const quotedIds = filteredIds.map((id) => `'${sanitizeId(id)}'`);
-      await execNoRL(dealStates.updateStatusByIds(schema, quotedIds, STATUS.PENDING_CLASSIFICATION));
+      await execNoRL(
+        dealStates.updateStatusByIds(schema, quotedIds, STATUS.PENDING_CLASSIFICATION),
+      );
     }
 
     // e. UPDATE rejected IDs -> filter_rejected
@@ -39072,7 +39150,9 @@ async function runFilterPipeline() {
     const bid = batch.batch_id;
     if (!bid) return
     const safeBid = sanitizeId(bid);
-    await execNoRL(dealStates.updateStatusByBatch(schema, safeBid, STATUS.FILTERING, STATUS.FAILED));
+    await execNoRL(
+      dealStates.updateStatusByBatch(schema, safeBid, STATUS.FILTERING, STATUS.FAILED),
+    );
     await insertBatchEvent(execNoRL, schema, {
       triggerHash: v7(),
       batchId: bid,
@@ -39125,7 +39205,11 @@ class WriteBatcher {
    * @param {number} opts.flushIntervalMs — timer-based flush interval (default 5000)
    * @param {number} opts.flushThreshold — count-based flush threshold per queue (default 10)
    */
-  constructor(executeSqlFn, schema, { flushIntervalMs = 5000, flushThreshold = 10, coreSchema = 'EMAIL_CORE_STAGING' } = {}) {
+  constructor(
+    executeSqlFn,
+    schema,
+    { flushIntervalMs = 5000, flushThreshold = 10, coreSchema = 'EMAIL_CORE_STAGING' } = {},
+  ) {
     this._executeSqlFn = executeSqlFn;
     this._schema = schema;
     this._coreSchema = coreSchema;
@@ -39272,7 +39356,9 @@ class WriteBatcher {
       await this._executeQueue(queueName, items);
       for (const w of waiters) w.resolve();
     } catch (err) {
-      console.error(`[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}`);
+      console.error(
+        `[write-batcher] ${queueName} flush failed (${items.length} items): ${err.message}`,
+      );
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
         console.error(
@@ -39334,7 +39420,9 @@ class WriteBatcher {
         }
         const uniqueItems = [...dedupMap.values()];
         if (uniqueItems.length < items.length) {
-          console.log(`[write-batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`);
+          console.log(
+            `[write-batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`,
+          );
         }
         const cs = this._coreSchema;
         await this._executeSqlFn(contacts.upsert(cs, uniqueItems));
@@ -39353,7 +39441,9 @@ class WriteBatcher {
           await this._executeSqlFn(dealStates.updateStatusByIds(s, allDealIds, STATUS.DEAL));
         }
         if (allNotDealIds.length > 0) {
-          await this._executeSqlFn(dealStates.updateStatusByIds(s, allNotDealIds, STATUS.NOT_DEAL));
+          await this._executeSqlFn(
+            dealStates.updateStatusByIds(s, allNotDealIds, STATUS.NOT_DEAL),
+          );
         }
         break
       }
@@ -39484,6 +39574,7 @@ async function runClassifyPipeline() {
   async function processClassifyBatch(batch) {
     const { batch_id: batchId, rows } = batch;
     const creatorEmail = rows[0].CREATOR_EMAIL || '';
+    const alreadyEvaluatedThreadIds = new Set();
 
     console.log(`[run-classify-pipeline] processing batch ${batchId} (${rows.length} rows)`);
 
@@ -39585,12 +39676,76 @@ async function runClassifyPipeline() {
         }
       }
 
+      // ---------------------------------------------------------------
+      // Already-evaluated skip: threads with existing deals + no newer emails
+      // ---------------------------------------------------------------
+
+      const remainingThreadIds = [...new Set(allEmails.map((e) => e.threadId).filter(Boolean))];
+
+      if (remainingThreadIds.length > 0) {
+        const quotedFetched = remainingThreadIds.map((id) => `'${sanitizeId(id)}'`);
+        const existingDeals = await execNoRL(deals.selectByThreadIds(schema, quotedFetched));
+
+        if (existingDeals && existingDeals.length > 0) {
+          const dealByThread = {};
+          for (const d of existingDeals) {
+            dealByThread[d.THREAD_ID] = d.UPDATED_AT;
+          }
+
+          // Group emails by thread and find latest date per thread
+          const emailsByThread = {};
+          for (const email of allEmails) {
+            if (!email.threadId) continue
+            if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = [];
+            emailsByThread[email.threadId].push(email);
+          }
+
+          const skippedEmailIds = [];
+          const skippedThreadIds = [];
+
+          for (const [threadId, dealUpdatedAt] of Object.entries(dealByThread)) {
+            const threadEmails = emailsByThread[threadId];
+            if (!threadEmails || threadEmails.length === 0) continue
+
+            const emailDates = threadEmails
+              .map((e) => new Date(e.date))
+              .filter((d) => !isNaN(d.getTime()));
+
+            // No valid dates — can't determine, classify normally
+            if (emailDates.length === 0) continue
+
+            const latestEmailDate = emailDates.reduce(
+              (latest, d) => (d > latest ? d : latest),
+              new Date(0),
+            );
+
+            if (latestEmailDate <= new Date(dealUpdatedAt)) {
+              // All emails are older than the deal — skip classification
+              alreadyEvaluatedThreadIds.add(threadId);
+              skippedThreadIds.push(threadId);
+              const threadRows = rows.filter((r) => r.THREAD_ID === threadId);
+              skippedEmailIds.push(...threadRows.map((r) => r.EMAIL_METADATA_ID));
+              // Remove these emails from allEmails so they don't go to AI
+              allEmails = allEmails.filter((e) => e.threadId !== threadId);
+            }
+          }
+
+          if (skippedEmailIds.length > 0) {
+            const quotedSkipped = skippedEmailIds.map((id) => `'${sanitizeId(id)}'`);
+            await execNoRL(dealStates.updateStatusByIds(schema, quotedSkipped, STATUS.DEAL));
+            console.log(
+              `[run-classify-pipeline] ${skippedEmailIds.length} rows skipped → deal (already evaluated, ${skippedThreadIds.length} threads)`,
+            );
+          }
+        }
+      }
+
       if (allEmails.length === 0) {
-        console.log(`[run-classify-pipeline] no fetchable emails, skipping AI`);
+        console.log(`[run-classify-pipeline] no emails to classify, skipping AI`);
         await batcher.pushBatchEvents([
           `('${batchId}', '${batchId}', 'classify', 'complete', CURRENT_TIMESTAMP)`,
         ]);
-        console.log(`[run-classify-pipeline] batch ${batchId} complete (all unfetchable)`);
+        console.log(`[run-classify-pipeline] batch ${batchId} complete (no emails to classify)`);
         return
       }
 
@@ -39864,8 +40019,10 @@ async function runClassifyPipeline() {
     // Use previous evaluation if exists, otherwise default to not_deal
     for (const [threadId, threadRows] of Object.entries(metadataByThread)) {
       if (classifiedThreadIds.has(threadId)) continue
+      if (alreadyEvaluatedThreadIds.has(threadId)) continue
       // Already handled by unfetchable logic earlier
-      if (threadRows.every((r) => r.STATUS === STATUS.DEAL || r.STATUS === STATUS.NOT_DEAL)) continue
+      if (threadRows.every((r) => r.STATUS === STATUS.DEAL || r.STATUS === STATUS.NOT_DEAL))
+        continue
 
       const emailIds = threadRows.map((r) => r.EMAIL_METADATA_ID);
       // Check if any row has a previous eval indicating deal

@@ -1,13 +1,24 @@
 import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
-import { sanitizeSchema, sanitizeId, sanitizeString, toSqlNullable, STATUS, saveResults } from '../lib/constants.js'
+import {
+  sanitizeSchema,
+  sanitizeId,
+  sanitizeString,
+  toSqlNullable,
+  STATUS,
+  saveResults,
+} from '../lib/constants.js'
 import { authenticate, executeSql, acquireRateLimitToken } from '../lib/sxt-client.js'
 import { callModel, parseAndValidate } from '../lib/ai-client.js'
 import { buildPrompt } from '../lib/prompt.js'
 import { fetchEmails } from '../lib/email-client.js'
 import { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
 import { WriteBatcher } from '../lib/write-batcher.js'
-import { dealStates as dealStatesSql, evaluations as evalSql } from '../lib/sql/index.js'
+import {
+  dealStates as dealStatesSql,
+  evaluations as evalSql,
+  deals as dealsSql,
+} from '../lib/sql/index.js'
 
 /**
  * Orchestrator that claims and processes classify batches concurrently,
@@ -127,6 +138,7 @@ export async function runClassifyPipeline() {
   async function processClassifyBatch(batch) {
     const { batch_id: batchId, rows } = batch
     const creatorEmail = rows[0].CREATOR_EMAIL || ''
+    const alreadyEvaluatedThreadIds = new Set()
 
     console.log(`[run-classify-pipeline] processing batch ${batchId} (${rows.length} rows)`)
 
@@ -228,12 +240,76 @@ export async function runClassifyPipeline() {
         }
       }
 
+      // ---------------------------------------------------------------
+      // Already-evaluated skip: threads with existing deals + no newer emails
+      // ---------------------------------------------------------------
+
+      const remainingThreadIds = [...new Set(allEmails.map((e) => e.threadId).filter(Boolean))]
+
+      if (remainingThreadIds.length > 0) {
+        const quotedFetched = remainingThreadIds.map((id) => `'${sanitizeId(id)}'`)
+        const existingDeals = await execNoRL(dealsSql.selectByThreadIds(schema, quotedFetched))
+
+        if (existingDeals && existingDeals.length > 0) {
+          const dealByThread = {}
+          for (const d of existingDeals) {
+            dealByThread[d.THREAD_ID] = d.UPDATED_AT
+          }
+
+          // Group emails by thread and find latest date per thread
+          const emailsByThread = {}
+          for (const email of allEmails) {
+            if (!email.threadId) continue
+            if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = []
+            emailsByThread[email.threadId].push(email)
+          }
+
+          const skippedEmailIds = []
+          const skippedThreadIds = []
+
+          for (const [threadId, dealUpdatedAt] of Object.entries(dealByThread)) {
+            const threadEmails = emailsByThread[threadId]
+            if (!threadEmails || threadEmails.length === 0) continue
+
+            const emailDates = threadEmails
+              .map((e) => new Date(e.date))
+              .filter((d) => !isNaN(d.getTime()))
+
+            // No valid dates — can't determine, classify normally
+            if (emailDates.length === 0) continue
+
+            const latestEmailDate = emailDates.reduce(
+              (latest, d) => (d > latest ? d : latest),
+              new Date(0),
+            )
+
+            if (latestEmailDate <= new Date(dealUpdatedAt)) {
+              // All emails are older than the deal — skip classification
+              alreadyEvaluatedThreadIds.add(threadId)
+              skippedThreadIds.push(threadId)
+              const threadRows = rows.filter((r) => r.THREAD_ID === threadId)
+              skippedEmailIds.push(...threadRows.map((r) => r.EMAIL_METADATA_ID))
+              // Remove these emails from allEmails so they don't go to AI
+              allEmails = allEmails.filter((e) => e.threadId !== threadId)
+            }
+          }
+
+          if (skippedEmailIds.length > 0) {
+            const quotedSkipped = skippedEmailIds.map((id) => `'${sanitizeId(id)}'`)
+            await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedSkipped, STATUS.DEAL))
+            console.log(
+              `[run-classify-pipeline] ${skippedEmailIds.length} rows skipped → deal (already evaluated, ${skippedThreadIds.length} threads)`,
+            )
+          }
+        }
+      }
+
       if (allEmails.length === 0) {
-        console.log(`[run-classify-pipeline] no fetchable emails, skipping AI`)
+        console.log(`[run-classify-pipeline] no emails to classify, skipping AI`)
         await batcher.pushBatchEvents([
           `('${batchId}', '${batchId}', 'classify', 'complete', CURRENT_TIMESTAMP)`,
         ])
-        console.log(`[run-classify-pipeline] batch ${batchId} complete (all unfetchable)`)
+        console.log(`[run-classify-pipeline] batch ${batchId} complete (no emails to classify)`)
         return
       }
 
@@ -507,8 +583,10 @@ export async function runClassifyPipeline() {
     // Use previous evaluation if exists, otherwise default to not_deal
     for (const [threadId, threadRows] of Object.entries(metadataByThread)) {
       if (classifiedThreadIds.has(threadId)) continue
+      if (alreadyEvaluatedThreadIds.has(threadId)) continue
       // Already handled by unfetchable logic earlier
-      if (threadRows.every((r) => r.STATUS === STATUS.DEAL || r.STATUS === STATUS.NOT_DEAL)) continue
+      if (threadRows.every((r) => r.STATUS === STATUS.DEAL || r.STATUS === STATUS.NOT_DEAL))
+        continue
 
       const emailIds = threadRows.map((r) => r.EMAIL_METADATA_ID)
       // Check if any row has a previous eval indicating deal
