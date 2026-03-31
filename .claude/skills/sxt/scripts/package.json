@@ -1,0 +1,9 @@
+{
+  "name": "sxt-scripts",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "sxt-nodejs-sdk": "^2.1.5",
+    "@noble/ed25519": "^2.2.3"
+  }
+}

@@ -1,0 +1,7 @@
+# SxT scripts generated files
+.claude/skills/sxt/scripts/biscuit.txt
+.claude/skills/sxt/scripts/node_modules/
+.claude/skills/sxt/scripts/package-lock.json
+.claude/skills/sxt/scripts/insert-deal-states.mjs
+.claude/skills/sxt/scripts/test-claim.js
+biscuit.txt
