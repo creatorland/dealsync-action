@@ -39739,11 +39739,11 @@ async function runClassifyPipeline() {
       }
 
       if (allEmails.length === 0) {
-        console.log(`[run-classify-pipeline] no fetchable emails, skipping AI`);
+        console.log(`[run-classify-pipeline] no emails to classify, skipping AI`);
         await batcher.pushBatchEvents([
           `('${batchId}', '${batchId}', 'classify', 'complete', CURRENT_TIMESTAMP)`,
         ]);
-        console.log(`[run-classify-pipeline] batch ${batchId} complete (all unfetchable)`);
+        console.log(`[run-classify-pipeline] batch ${batchId} complete (no emails to classify)`);
         return
       }
 

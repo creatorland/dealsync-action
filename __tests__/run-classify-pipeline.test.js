@@ -1346,7 +1346,13 @@ describe('run-classify-pipeline command', () => {
         deal_type: 'brand_collaboration',
         deal_value: '500',
         currency: 'USD',
-        main_contact: { name: 'Bob', email: 'bob@co.com', company: 'BobCo', title: 'CTO', phone_number: null },
+        main_contact: {
+          name: 'Bob',
+          email: 'bob@co.com',
+          company: 'BobCo',
+          title: 'CTO',
+          phone_number: null,
+        },
       },
     ]
 
@@ -1458,6 +1464,63 @@ describe('run-classify-pipeline command', () => {
 
     // AI SHOULD have been called — emails are newer
     expect(mockCallModel).toHaveBeenCalledTimes(1)
+
+    // All emails should be in the prompt
+    const promptEmails = mockBuildPrompt.mock.calls[0][0]
+    expect(promptEmails.length).toBe(2)
+  })
+
+  // ----------------------------------------------------------
+  // Already-evaluated skip: missing/unparseable dates -> classify normally
+  // ----------------------------------------------------------
+
+  it('does not skip threads when email dates are missing or unparseable', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(2)
+    const threads = makeThreads(rows)
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed rows
+
+      const batch = await claimFn()
+
+      mockExecuteSql.mockResolvedValueOnce([]) // getAuditByBatchId -> empty
+
+      // Emails with NO date field
+      const emails = rows.map((r) => ({
+        messageId: r.MESSAGE_ID,
+        id: r.EMAIL_METADATA_ID,
+        threadId: r.THREAD_ID,
+        body: 'test email body',
+        // no date field
+      }))
+      mockFetchEmails.mockResolvedValueOnce(emails)
+
+      // Both threads have existing deals
+      mockExecuteSql.mockResolvedValueOnce([
+        { THREAD_ID: 'thread-1', UPDATED_AT: '2026-01-01T00:00:00Z' },
+        { THREAD_ID: 'thread-2', UPDATED_AT: '2026-01-01T00:00:00Z' },
+      ])
+
+      // No skipping — proceed to AI because dates are unparseable
+      mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
+      mockCallModel.mockResolvedValueOnce({ content: '[]' })
+      mockParseAndValidate.mockReturnValueOnce(threads)
+      mockExecuteSql.mockResolvedValueOnce([]) // audit insert
+
+      await workerFn(batch, { attempt: 0 })
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+
+    // AI SHOULD have been called — missing dates means we can't determine, so classify
+    expect(mockCallModel).toHaveBeenCalledTimes(1)
+    expect(mockBuildPrompt).toHaveBeenCalledTimes(1)
 
     // All emails should be in the prompt
     const promptEmails = mockBuildPrompt.mock.calls[0][0]

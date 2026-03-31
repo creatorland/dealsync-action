@@ -1,13 +1,24 @@
 import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
-import { sanitizeSchema, sanitizeId, sanitizeString, toSqlNullable, STATUS, saveResults } from '../lib/constants.js'
+import {
+  sanitizeSchema,
+  sanitizeId,
+  sanitizeString,
+  toSqlNullable,
+  STATUS,
+  saveResults,
+} from '../lib/constants.js'
 import { authenticate, executeSql, acquireRateLimitToken } from '../lib/sxt-client.js'
 import { callModel, parseAndValidate } from '../lib/ai-client.js'
 import { buildPrompt } from '../lib/prompt.js'
 import { fetchEmails } from '../lib/email-client.js'
 import { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
 import { WriteBatcher } from '../lib/write-batcher.js'
-import { dealStates as dealStatesSql, evaluations as evalSql, deals as dealsSql } from '../lib/sql/index.js'
+import {
+  dealStates as dealStatesSql,
+  evaluations as evalSql,
+  deals as dealsSql,
+} from '../lib/sql/index.js'
 
 /**
  * Orchestrator that claims and processes classify batches concurrently,
@@ -266,7 +277,10 @@ export async function runClassifyPipeline() {
             // No valid dates — can't determine, classify normally
             if (emailDates.length === 0) continue
 
-            const latestEmailDate = emailDates.reduce((latest, d) => (d > latest ? d : latest), new Date(0))
+            const latestEmailDate = emailDates.reduce(
+              (latest, d) => (d > latest ? d : latest),
+              new Date(0),
+            )
 
             if (latestEmailDate <= new Date(dealUpdatedAt)) {
               // All emails are older than the deal — skip classification
@@ -289,11 +303,11 @@ export async function runClassifyPipeline() {
       }
 
       if (allEmails.length === 0) {
-        console.log(`[run-classify-pipeline] no fetchable emails, skipping AI`)
+        console.log(`[run-classify-pipeline] no emails to classify, skipping AI`)
         await batcher.pushBatchEvents([
           `('${batchId}', '${batchId}', 'classify', 'complete', CURRENT_TIMESTAMP)`,
         ])
-        console.log(`[run-classify-pipeline] batch ${batchId} complete (all unfetchable)`)
+        console.log(`[run-classify-pipeline] batch ${batchId} complete (no emails to classify)`)
         return
       }
 
@@ -568,7 +582,8 @@ export async function runClassifyPipeline() {
     for (const [threadId, threadRows] of Object.entries(metadataByThread)) {
       if (classifiedThreadIds.has(threadId)) continue
       // Already handled by unfetchable logic earlier
-      if (threadRows.every((r) => r.STATUS === STATUS.DEAL || r.STATUS === STATUS.NOT_DEAL)) continue
+      if (threadRows.every((r) => r.STATUS === STATUS.DEAL || r.STATUS === STATUS.NOT_DEAL))
+        continue
 
       const emailIds = threadRows.map((r) => r.EMAIL_METADATA_ID)
       // Check if any row has a previous eval indicating deal
