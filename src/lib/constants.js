@@ -15,7 +15,13 @@
 import { audits } from './sql/audits.js'
 
 // Re-export sanitization utilities from their canonical location.
-export { sanitizeId, sanitizeString, toSqlIdList, toSqlNullable, sanitizeSchema } from './sql/sanitize.js'
+export {
+  sanitizeId,
+  sanitizeString,
+  toSqlIdList,
+  toSqlNullable,
+  sanitizeSchema,
+} from './sql/sanitize.js'
 
 // ============================================================
 // STATUS CONSTANTS

@@ -68,9 +68,7 @@ describe('dealsync main (command router)', () => {
   })
 
   it('sets success=false when command throws', async () => {
-    core.getInput.mockImplementation((name) =>
-      name === 'command' ? 'run-classify-pipeline' : '',
-    )
+    core.getInput.mockImplementation((name) => (name === 'command' ? 'run-classify-pipeline' : ''))
 
     await expect(run()).rejects.toThrow('classify-pipeline not mocked')
 

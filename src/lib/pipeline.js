@@ -117,9 +117,7 @@ export async function sweepStuckRows(exec, schema, { activeStatus, batchType, ma
       )
       continue
     }
-    await exec(
-      dealStatesSql.updateStatusByBatch(safeSchema, safeBid, statusSql, STATUS.FAILED),
-    )
+    await exec(dealStatesSql.updateStatusByBatch(safeSchema, safeBid, statusSql, STATUS.FAILED))
     await insertBatchEvent(exec, safeSchema, {
       triggerHash: uuidv7(),
       batchId: bid,
@@ -158,15 +156,11 @@ export async function sweepOrphanedRows(exec, schema, { statuses, staleMinutes }
   }
   const safeStaleMinutes = minutesNumber
 
-  const countRows = await exec(
-    dealStatesSql.countOrphaned(safeSchema, statuses, safeStaleMinutes),
-  )
+  const countRows = await exec(dealStatesSql.countOrphaned(safeSchema, statuses, safeStaleMinutes))
   const n = Number(countRows?.[0]?.C ?? 0) || 0
   if (n === 0) return 0
 
-  await exec(
-    dealStatesSql.markOrphanedAsFailed(safeSchema, statuses, safeStaleMinutes),
-  )
+  await exec(dealStatesSql.markOrphanedAsFailed(safeSchema, statuses, safeStaleMinutes))
 
   core.info(
     `[sweepOrphanedRows] failed ${n} orphaned row(s) (statuses=${statuses.join(',')}, staleMinutes=${safeStaleMinutes})`,

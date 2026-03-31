@@ -150,7 +150,9 @@ export async function runFilterPipeline() {
     // d. UPDATE passed IDs -> pending_classification
     if (filteredIds.length > 0) {
       const quotedIds = filteredIds.map((id) => `'${sanitizeId(id)}'`)
-      await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedIds, STATUS.PENDING_CLASSIFICATION))
+      await execNoRL(
+        dealStatesSql.updateStatusByIds(schema, quotedIds, STATUS.PENDING_CLASSIFICATION),
+      )
     }
 
     // e. UPDATE rejected IDs -> filter_rejected
@@ -177,7 +179,9 @@ export async function runFilterPipeline() {
     const bid = batch.batch_id
     if (!bid) return
     const safeBid = sanitizeId(bid)
-    await execNoRL(dealStatesSql.updateStatusByBatch(schema, safeBid, STATUS.FILTERING, STATUS.FAILED))
+    await execNoRL(
+      dealStatesSql.updateStatusByBatch(schema, safeBid, STATUS.FILTERING, STATUS.FAILED),
+    )
     await insertBatchEvent(execNoRL, schema, {
       triggerHash: uuidv7(),
       batchId: bid,

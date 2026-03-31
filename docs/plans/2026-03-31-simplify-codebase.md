@@ -15,6 +15,7 @@
 These 9 commands are not referenced by any workflow file and no active command imports them. Only `src/main.js` imports them for the COMMANDS dispatch map.
 
 **Files:**
+
 - Delete: `src/commands/fetch-and-filter.js`
 - Delete: `src/commands/fetch-and-classify.js`
 - Delete: `src/commands/save-evals.js`
@@ -72,6 +73,7 @@ Update lines 2 and 7 to only list active commands:
 - `command.description:` → `'Operation: run-filter-pipeline, run-classify-pipeline, sync-deal-states, eval, eval-compare'`
 
 Remove input descriptions that reference only dead commands (but keep inputs that are shared with active commands). Specifically, remove these inputs that are ONLY used by dead commands:
+
 - `sxt-command` (line 31 — only used by sxt-execute)
 
 Keep all other inputs — they're used by active pipeline commands or eval.
@@ -89,6 +91,7 @@ Note: No test files exist for fetch-and-filter, fetch-and-classify, save-evals, 
 **Step 5: Update `__tests__/main.test.js`**
 
 Remove the 9 dead command mocks (lines 18-62) and update the test cases:
+
 - Change the "routes to fetch-and-filter" test → route to `run-filter-pipeline` instead
 - Change the "fails when command throws" test → use `run-classify-pipeline` instead of `fetch-and-classify`
 
@@ -165,9 +168,7 @@ describe('dealsync main (command router)', () => {
   })
 
   it('sets success=false when command throws', async () => {
-    core.getInput.mockImplementation((name) =>
-      name === 'command' ? 'run-classify-pipeline' : '',
-    )
+    core.getInput.mockImplementation((name) => (name === 'command' ? 'run-classify-pipeline' : ''))
 
     await expect(run()).rejects.toThrow('classify-pipeline not mocked')
 
@@ -182,6 +183,7 @@ describe('dealsync main (command router)', () => {
 ```bash
 node --experimental-vm-modules node_modules/jest/bin/jest.js __tests__/main.test.js
 ```
+
 Expected: 3 tests PASS
 
 **Step 7: Commit**
@@ -198,6 +200,7 @@ git commit -m "refactor: remove 9 dead command files and tests"
 No file in `src/` imports from `crypto.js`. It's dead code.
 
 **Files:**
+
 - Delete: `src/lib/crypto.js`
 
 **Step 1: Delete the file**
@@ -211,6 +214,7 @@ rm src/lib/crypto.js
 ```bash
 npm test
 ```
+
 Expected: All tests PASS
 
 **Step 3: Commit**
@@ -227,6 +231,7 @@ git commit -m "refactor: remove unused crypto.js"
 Merge `email-client.js` (fetch), `email-sanitizer.js` (parse/clean), and `filter-rules.js` (reject) into a single `emails.js`. These form a tight unit: filter-rules imports email-sanitizer, and all operate on email data.
 
 **Files:**
+
 - Delete: `src/lib/email-client.js` (126 lines)
 - Delete: `src/lib/email-sanitizer.js` (71 lines)
 - Delete: `src/lib/filter-rules.js` (92 lines)
@@ -240,6 +245,7 @@ Merge `email-client.js` (fetch), `email-sanitizer.js` (parse/clean), and `filter
 **Step 1: Create `src/lib/emails.js`**
 
 Concatenate the three files into one, combining imports. The file should contain:
+
 - All imports from email-sanitizer.js (`convert` from `html-to-text`, `EmailReplyParser` from `email-reply-parser`)
 - All imports from filter-rules.js (the 6 config JSON imports)
 - All imports from email-client.js (`withTimeout` from `sxt-client.js`, `sleep`/`backoffMs` from `retry.js`)
@@ -251,12 +257,12 @@ Order the code logically: sanitizer functions first (dependencies of filter-rule
 
 Find-and-replace imports across the codebase:
 
-| File | Old Import | New Import |
-|------|-----------|------------|
-| `src/commands/run-filter-pipeline.js` | `from '../lib/filter-rules.js'` and `from '../lib/email-client.js'` | `from '../lib/emails.js'` (combine: `{ isRejected, fetchEmails }`) |
-| `src/commands/run-classify-pipeline.js` | `from '../lib/email-client.js'` | `from '../lib/emails.js'` (`{ fetchEmails }`) |
-| `src/commands/eval.js` | `from '../lib/filter-rules.js'` | `from '../lib/emails.js'` (`{ isRejected }`) |
-| `src/lib/prompt.js` | `from './email-sanitizer.js'` | `from './emails.js'` (`{ getHeader, sanitizeEmailBody }`) |
+| File                                    | Old Import                                                          | New Import                                                         |
+| --------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `src/commands/run-filter-pipeline.js`   | `from '../lib/filter-rules.js'` and `from '../lib/email-client.js'` | `from '../lib/emails.js'` (combine: `{ isRejected, fetchEmails }`) |
+| `src/commands/run-classify-pipeline.js` | `from '../lib/email-client.js'`                                     | `from '../lib/emails.js'` (`{ fetchEmails }`)                      |
+| `src/commands/eval.js`                  | `from '../lib/filter-rules.js'`                                     | `from '../lib/emails.js'` (`{ isRejected }`)                       |
+| `src/lib/prompt.js`                     | `from './email-sanitizer.js'`                                       | `from './emails.js'` (`{ getHeader, sanitizeEmailBody }`)          |
 
 **Step 3: Rename test file**
 
@@ -277,6 +283,7 @@ rm src/lib/email-client.js src/lib/email-sanitizer.js src/lib/filter-rules.js
 ```bash
 npm test
 ```
+
 Expected: All tests PASS
 
 **Step 6: Commit**
@@ -293,6 +300,7 @@ git commit -m "refactor: merge email-client, email-sanitizer, filter-rules into 
 Merge `ai-client.js` (model calling + validation) and `prompt.js` (prompt building) into `ai.js`. These are always used together in classify and eval commands.
 
 **Files:**
+
 - Delete: `src/lib/ai-client.js` (184 lines)
 - Delete: `src/lib/prompt.js` (66 lines)
 - Create: `src/lib/ai.js`
@@ -303,6 +311,7 @@ Merge `ai-client.js` (model calling + validation) and `prompt.js` (prompt buildi
 **Step 1: Create `src/lib/ai.js`**
 
 Concatenate `ai-client.js` and `prompt.js`. Combine imports:
+
 - From ai-client.js: `sleep`, `backoffMs` from `./retry.js`
 - From prompt.js: `getHeader`, `sanitizeEmailBody` from `./emails.js` (note: updated path from Task 3)
 - From prompt.js: `systemTemplate` from `../../prompts/system.md`, `classificationInstructions` from `../../prompts/user.md`
@@ -313,12 +322,13 @@ Order: prompt-building first, then AI client (call + parse).
 
 **Step 2: Update all consumers**
 
-| File | Old Imports | New Import |
-|------|-----------|------------|
-| `src/commands/run-classify-pipeline.js` | `from '../lib/ai-client.js'` and `from '../lib/prompt.js'` | `from '../lib/ai.js'` (`{ callModel, parseAndValidate, buildPrompt }`) |
-| `src/commands/eval.js` | `from '../lib/ai-client.js'` and `from '../lib/prompt.js'` | `from '../lib/ai.js'` (`{ callModel, parseAndValidate, buildPrompt, isRejected }`) — wait, `isRejected` comes from `emails.js`, keep that import separate |
+| File                                    | Old Imports                                                | New Import                                                                                                                                                |
+| --------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/commands/run-classify-pipeline.js` | `from '../lib/ai-client.js'` and `from '../lib/prompt.js'` | `from '../lib/ai.js'` (`{ callModel, parseAndValidate, buildPrompt }`)                                                                                    |
+| `src/commands/eval.js`                  | `from '../lib/ai-client.js'` and `from '../lib/prompt.js'` | `from '../lib/ai.js'` (`{ callModel, parseAndValidate, buildPrompt, isRejected }`) — wait, `isRejected` comes from `emails.js`, keep that import separate |
 
 Corrected eval.js imports:
+
 ```javascript
 import { callModel, parseAndValidate, buildPrompt } from '../lib/ai.js'
 import { isRejected } from '../lib/emails.js'
@@ -343,6 +353,7 @@ rm src/lib/ai-client.js src/lib/prompt.js
 ```bash
 npm test
 ```
+
 Expected: All tests PASS
 
 **Step 6: Commit**
@@ -359,6 +370,7 @@ git commit -m "refactor: merge ai-client and prompt into ai.js"
 The batcher exclusively batches SQL operations for SxT. The name `sql-batcher` is more descriptive and pairs with `sxt-client.js`.
 
 **Files:**
+
 - Rename: `src/lib/write-batcher.js` → `src/lib/sql-batcher.js`
 - Modify: `src/commands/run-classify-pipeline.js` (update import)
 - Rename: `__tests__/write-batcher.test.js` → `__tests__/sql-batcher.test.js`
@@ -386,6 +398,7 @@ Update the import inside: `../src/lib/write-batcher.js` → `../src/lib/sql-batc
 ```bash
 npm test
 ```
+
 Expected: All tests PASS
 
 **Step 5: Commit**
@@ -400,14 +413,16 @@ git commit -m "refactor: rename write-batcher to sql-batcher"
 ### Task 6: Update CLAUDE.md and rebuild
 
 **Files:**
+
 - Modify: `CLAUDE.md`
 
 **Step 1: Update CLAUDE.md architecture section**
 
 Update the "Architecture" section to reflect the simplified file structure:
+
 - Remove references to the 9 deleted commands and their pipeline stages
 - Update lib file names (emails.js, ai.js, sql-batcher.js)
-- Remove the "Checkpoint/Audit Pattern" section's references to individual save-* commands (now internal to run-classify-pipeline)
+- Remove the "Checkpoint/Audit Pattern" section's references to individual save-\* commands (now internal to run-classify-pipeline)
 - Remove crypto.js from any mention
 
 **Step 2: Rebuild the bundle**
@@ -415,6 +430,7 @@ Update the "Architecture" section to reflect the simplified file structure:
 ```bash
 npm run all
 ```
+
 Expected: format + test + package all pass
 
 **Step 3: Commit**
@@ -429,6 +445,7 @@ git commit -m "docs: update CLAUDE.md for simplified codebase"
 ## Final State
 
 ### src/commands/ (5 files, was 14)
+
 ```
 run-filter-pipeline.js
 run-classify-pipeline.js
@@ -438,6 +455,7 @@ eval-compare.js
 ```
 
 ### src/lib/ (7 files + sql/, was 11 + sql/)
+
 ```
 emails.js          (was: email-client + email-sanitizer + filter-rules)
 ai.js              (was: ai-client + prompt)
@@ -450,7 +468,8 @@ sxt-client.js      (unchanged)
 sql/               (unchanged)
 ```
 
-### __tests__/ (updated)
+### **tests**/ (updated)
+
 ```
 emails.test.js       (was: email-client.test.js)
 ai.test.js           (was: build-prompt.test.js)

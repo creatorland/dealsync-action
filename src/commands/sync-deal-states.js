@@ -20,7 +20,12 @@ export async function runSyncDealStates() {
   )
   const jwt = await authenticate(authUrl, authSecret)
 
-  const result = await executeSql(apiUrl, jwt, biscuit, dealStatesSql.syncFromEmailMetadata(schema, emailCoreSchema))
+  const result = await executeSql(
+    apiUrl,
+    jwt,
+    biscuit,
+    dealStatesSql.syncFromEmailMetadata(schema, emailCoreSchema),
+  )
 
   const count = Array.isArray(result) ? result.length : 0
   console.log(`[sync-deal-states] done: ${count} synced (1 query)`)

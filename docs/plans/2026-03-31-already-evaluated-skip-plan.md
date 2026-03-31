@@ -13,6 +13,7 @@
 ### Task 1: Update `deals.selectByThreadIds` SQL builder to include UPDATED_AT
 
 **Files:**
+
 - Modify: `src/lib/sql/deals.js:14-17`
 - Test: `__tests__/sql/deals.test.js:20-25`
 
@@ -62,6 +63,7 @@ git commit -m "feat: add UPDATED_AT to deals.selectByThreadIds"
 ### Task 2: Add already-evaluated skip logic to `run-classify-pipeline.js`
 
 **Files:**
+
 - Modify: `src/commands/run-classify-pipeline.js:10` (add `deals` import)
 - Modify: `src/commands/run-classify-pipeline.js:163-241` (add skip logic after fetch, before AI call)
 - Test: `__tests__/run-classify-pipeline.test.js`
@@ -156,7 +158,13 @@ it('classifies only threads without existing deals or with newer emails', async 
       deal_type: 'brand_collaboration',
       deal_value: '500',
       currency: 'USD',
-      main_contact: { name: 'Bob', email: 'bob@co.com', company: 'BobCo', title: 'CTO', phone_number: null },
+      main_contact: {
+        name: 'Bob',
+        email: 'bob@co.com',
+        company: 'BobCo',
+        title: 'CTO',
+        phone_number: null,
+      },
     },
   ]
 
@@ -230,67 +238,71 @@ In `src/commands/run-classify-pipeline.js`:
 4a. Add `deals` to the import on line 10:
 
 ```js
-import { dealStates as dealStatesSql, evaluations as evalSql, deals as dealsSql } from '../lib/sql/index.js'
+import {
+  dealStates as dealStatesSql,
+  evaluations as evalSql,
+  deals as dealsSql,
+} from '../lib/sql/index.js'
 ```
 
 4b. After the unfetchable thread handling block (after line 229) and before the `if (allEmails.length === 0)` check (line 231), insert the skip logic:
 
 ```js
-      // ---------------------------------------------------------------
-      // Already-evaluated skip: threads with existing deals + no newer emails
-      // ---------------------------------------------------------------
+// ---------------------------------------------------------------
+// Already-evaluated skip: threads with existing deals + no newer emails
+// ---------------------------------------------------------------
 
-      const fetchedThreadIds2 = [...new Set(allEmails.map((e) => e.threadId).filter(Boolean))]
+const fetchedThreadIds2 = [...new Set(allEmails.map((e) => e.threadId).filter(Boolean))]
 
-      if (fetchedThreadIds2.length > 0) {
-        const quotedFetched = fetchedThreadIds2.map((id) => `'${sanitizeId(id)}'`)
-        const existingDeals = await execNoRL(dealsSql.selectByThreadIds(schema, quotedFetched))
+if (fetchedThreadIds2.length > 0) {
+  const quotedFetched = fetchedThreadIds2.map((id) => `'${sanitizeId(id)}'`)
+  const existingDeals = await execNoRL(dealsSql.selectByThreadIds(schema, quotedFetched))
 
-        if (existingDeals && existingDeals.length > 0) {
-          const dealByThread = {}
-          for (const d of existingDeals) {
-            dealByThread[d.THREAD_ID] = d.UPDATED_AT
-          }
+  if (existingDeals && existingDeals.length > 0) {
+    const dealByThread = {}
+    for (const d of existingDeals) {
+      dealByThread[d.THREAD_ID] = d.UPDATED_AT
+    }
 
-          // Group emails by thread and find latest date per thread
-          const emailsByThread = {}
-          for (const email of allEmails) {
-            if (!email.threadId) continue
-            if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = []
-            emailsByThread[email.threadId].push(email)
-          }
+    // Group emails by thread and find latest date per thread
+    const emailsByThread = {}
+    for (const email of allEmails) {
+      if (!email.threadId) continue
+      if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = []
+      emailsByThread[email.threadId].push(email)
+    }
 
-          const skippedEmailIds = []
-          const skippedThreadIds = []
+    const skippedEmailIds = []
+    const skippedThreadIds = []
 
-          for (const [threadId, dealUpdatedAt] of Object.entries(dealByThread)) {
-            const threadEmails = emailsByThread[threadId]
-            if (!threadEmails || threadEmails.length === 0) continue
+    for (const [threadId, dealUpdatedAt] of Object.entries(dealByThread)) {
+      const threadEmails = emailsByThread[threadId]
+      if (!threadEmails || threadEmails.length === 0) continue
 
-            const latestEmailDate = threadEmails.reduce((latest, e) => {
-              const d = new Date(e.date)
-              return d > latest ? d : latest
-            }, new Date(0))
+      const latestEmailDate = threadEmails.reduce((latest, e) => {
+        const d = new Date(e.date)
+        return d > latest ? d : latest
+      }, new Date(0))
 
-            if (latestEmailDate <= new Date(dealUpdatedAt)) {
-              // All emails are older than the deal — skip classification
-              skippedThreadIds.push(threadId)
-              const threadRows = rows.filter((r) => r.THREAD_ID === threadId)
-              skippedEmailIds.push(...threadRows.map((r) => r.EMAIL_METADATA_ID))
-              // Remove these emails from allEmails so they don't go to AI
-              allEmails = allEmails.filter((e) => e.threadId !== threadId)
-            }
-          }
-
-          if (skippedEmailIds.length > 0) {
-            const quotedSkipped = skippedEmailIds.map((id) => `'${sanitizeId(id)}'`)
-            await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedSkipped, STATUS.DEAL))
-            console.log(
-              `[run-classify-pipeline] ${skippedEmailIds.length} rows skipped → deal (already evaluated, ${skippedThreadIds.length} threads)`,
-            )
-          }
-        }
+      if (latestEmailDate <= new Date(dealUpdatedAt)) {
+        // All emails are older than the deal — skip classification
+        skippedThreadIds.push(threadId)
+        const threadRows = rows.filter((r) => r.THREAD_ID === threadId)
+        skippedEmailIds.push(...threadRows.map((r) => r.EMAIL_METADATA_ID))
+        // Remove these emails from allEmails so they don't go to AI
+        allEmails = allEmails.filter((e) => e.threadId !== threadId)
       }
+    }
+
+    if (skippedEmailIds.length > 0) {
+      const quotedSkipped = skippedEmailIds.map((id) => `'${sanitizeId(id)}'`)
+      await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedSkipped, STATUS.DEAL))
+      console.log(
+        `[run-classify-pipeline] ${skippedEmailIds.length} rows skipped → deal (already evaluated, ${skippedThreadIds.length} threads)`,
+      )
+    }
+  }
+}
 ```
 
 Note: `allEmails` must be declared with `let` instead of `const` (currently on line ~170 in the `let allEmails` declaration — it's already `let`, so no change needed).
@@ -317,6 +329,7 @@ git commit -m "feat: skip classification for threads with existing deals and old
 ### Task 3: Add same skip logic to standalone `fetch-and-classify.js`
 
 **Files:**
+
 - Modify: `src/commands/fetch-and-classify.js:8` (add `deals` import)
 - Modify: `src/commands/fetch-and-classify.js:66-78` (add skip logic after fetch, before prompt build)
 
@@ -333,66 +346,72 @@ import { dealStates as dealStatesSql, deals as dealsSql } from '../lib/sql/index
 1b. Add `STATUS` to the constants import on line 5:
 
 ```js
-import { saveResults, sanitizeString, sanitizeSchema, sanitizeId, STATUS } from '../lib/constants.js'
+import {
+  saveResults,
+  sanitizeString,
+  sanitizeSchema,
+  sanitizeId,
+  STATUS,
+} from '../lib/constants.js'
 ```
 
 1c. After the content fetch (after line 76) and before `buildPrompt` (line 79), insert the skip logic:
 
 ```js
-  // Already-evaluated skip: threads with existing deals + no newer emails
-  const fetchedThreadIds = [...new Set(allEmails.map((e) => e.threadId).filter(Boolean))]
+// Already-evaluated skip: threads with existing deals + no newer emails
+const fetchedThreadIds = [...new Set(allEmails.map((e) => e.threadId).filter(Boolean))]
 
-  if (fetchedThreadIds.length > 0) {
-    const quotedFetched = fetchedThreadIds.map((id) => `'${sanitizeId(id)}'`)
-    const existingDeals = await exec(dealsSql.selectByThreadIds(schema, quotedFetched))
+if (fetchedThreadIds.length > 0) {
+  const quotedFetched = fetchedThreadIds.map((id) => `'${sanitizeId(id)}'`)
+  const existingDeals = await exec(dealsSql.selectByThreadIds(schema, quotedFetched))
 
-    if (existingDeals && existingDeals.length > 0) {
-      const dealByThread = {}
-      for (const d of existingDeals) {
-        dealByThread[d.THREAD_ID] = d.UPDATED_AT
-      }
+  if (existingDeals && existingDeals.length > 0) {
+    const dealByThread = {}
+    for (const d of existingDeals) {
+      dealByThread[d.THREAD_ID] = d.UPDATED_AT
+    }
 
-      const emailsByThread = {}
-      for (const email of allEmails) {
-        if (!email.threadId) continue
-        if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = []
-        emailsByThread[email.threadId].push(email)
-      }
+    const emailsByThread = {}
+    for (const email of allEmails) {
+      if (!email.threadId) continue
+      if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = []
+      emailsByThread[email.threadId].push(email)
+    }
 
-      const skippedEmailIds = []
-      const skippedThreadIds = []
+    const skippedEmailIds = []
+    const skippedThreadIds = []
 
-      for (const [threadId, dealUpdatedAt] of Object.entries(dealByThread)) {
-        const threadEmails = emailsByThread[threadId]
-        if (!threadEmails || threadEmails.length === 0) continue
+    for (const [threadId, dealUpdatedAt] of Object.entries(dealByThread)) {
+      const threadEmails = emailsByThread[threadId]
+      if (!threadEmails || threadEmails.length === 0) continue
 
-        const latestEmailDate = threadEmails.reduce((latest, e) => {
-          const d = new Date(e.date)
-          return d > latest ? d : latest
-        }, new Date(0))
+      const latestEmailDate = threadEmails.reduce((latest, e) => {
+        const d = new Date(e.date)
+        return d > latest ? d : latest
+      }, new Date(0))
 
-        if (latestEmailDate <= new Date(dealUpdatedAt)) {
-          skippedThreadIds.push(threadId)
-          const threadRows = metadataRows.filter((r) => r.THREAD_ID === threadId)
-          skippedEmailIds.push(...threadRows.map((r) => r.EMAIL_METADATA_ID))
-          allEmails = allEmails.filter((e) => e.threadId !== threadId)
-        }
-      }
-
-      if (skippedEmailIds.length > 0) {
-        const quotedSkipped = skippedEmailIds.map((id) => `'${sanitizeId(id)}'`)
-        await exec(dealStatesSql.updateStatusByIds(schema, quotedSkipped, STATUS.DEAL))
-        console.log(
-          `[classify] ${skippedEmailIds.length} rows skipped → deal (already evaluated, ${skippedThreadIds.length} threads)`,
-        )
+      if (latestEmailDate <= new Date(dealUpdatedAt)) {
+        skippedThreadIds.push(threadId)
+        const threadRows = metadataRows.filter((r) => r.THREAD_ID === threadId)
+        skippedEmailIds.push(...threadRows.map((r) => r.EMAIL_METADATA_ID))
+        allEmails = allEmails.filter((e) => e.threadId !== threadId)
       }
     }
-  }
 
-  if (allEmails.length === 0) {
-    console.log('[classify] all threads already evaluated — skipping AI')
-    return { skipped: true, thread_count: 0 }
+    if (skippedEmailIds.length > 0) {
+      const quotedSkipped = skippedEmailIds.map((id) => `'${sanitizeId(id)}'`)
+      await exec(dealStatesSql.updateStatusByIds(schema, quotedSkipped, STATUS.DEAL))
+      console.log(
+        `[classify] ${skippedEmailIds.length} rows skipped → deal (already evaluated, ${skippedThreadIds.length} threads)`,
+      )
+    }
   }
+}
+
+if (allEmails.length === 0) {
+  console.log('[classify] all threads already evaluated — skipping AI')
+  return { skipped: true, thread_count: 0 }
+}
 ```
 
 Note: The `allEmails` variable on line 70 is `const`. Change it to `let` since we now mutate it by filtering out skipped threads.
@@ -414,6 +433,7 @@ git commit -m "feat: add already-evaluated skip to standalone fetch-and-classify
 ### Task 4: Package and verify
 
 **Files:**
+
 - Regenerate: `dist/index.js`
 
 **Step 1: Run full test suite**

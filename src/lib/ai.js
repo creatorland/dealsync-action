@@ -56,9 +56,7 @@ export function buildPrompt(emails, { systemOverride, userOverride, creatorEmail
 
   const systemPrompt = (systemOverride || systemTemplate).trim()
 
-  const creatorLine = creatorEmail
-    ? `Creator email: ${creatorEmail}\n\n`
-    : ''
+  const creatorLine = creatorEmail ? `Creator email: ${creatorEmail}\n\n` : ''
 
   const userPrompt = (userOverride || classificationInstructions)
     .replace('{{THREAD_DATA}}', creatorLine + threadData)
@@ -227,9 +225,10 @@ export function parseAndValidate(raw, threadOrder) {
 
   // Schema validation and coercion
   return parsed.map((r) => ({
-    thread_id: threadOrder && r.thread_index != null
-      ? (threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || ''))
-      : String(r.thread_id || ''),
+    thread_id:
+      threadOrder && r.thread_index != null
+        ? threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || '')
+        : String(r.thread_id || ''),
     is_deal: Boolean(r.is_deal),
     is_english: r.is_english !== false,
     language: r.language || null,

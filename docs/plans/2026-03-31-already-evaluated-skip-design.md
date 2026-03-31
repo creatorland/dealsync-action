@@ -25,11 +25,11 @@ Threads still flow through filtering normally and land in `pending_classificatio
 
 ## What Changes
 
-| File | Change |
-|------|--------|
-| `src/lib/sql/deals.js` | Add `UPDATED_AT` to `selectByThreadIds` return columns |
+| File                                    | Change                                                                 |
+| --------------------------------------- | ---------------------------------------------------------------------- |
+| `src/lib/sql/deals.js`                  | Add `UPDATED_AT` to `selectByThreadIds` return columns                 |
 | `src/commands/run-classify-pipeline.js` | Add skip logic in `processClassifyBatch()` after fetch, before AI call |
-| `src/commands/fetch-and-classify.js` | Same skip logic for standalone command path |
+| `src/commands/fetch-and-classify.js`    | Same skip logic for standalone command path                            |
 
 ## What Doesn't Change
 
