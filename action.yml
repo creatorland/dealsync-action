@@ -1,10 +1,10 @@
 name: 'Dealsync'
-description: 'Dealsync pipeline action — fetch-and-filter, fetch-and-classify, save-evals, save-deals, save-deal-contacts, update-deal-states, sxt-execute, sync-deal-states'
+description: 'Dealsync pipeline action — run-filter-pipeline, run-classify-pipeline, sync-deal-states, eval, eval-compare'
 author: 'creatorland'
 
 inputs:
   command:
-    description: 'Operation: fetch-and-filter, fetch-and-classify, save-evals, save-deals, save-deal-contacts, update-deal-states, sxt-execute, sync-deal-states, claim-filter-batch, claim-classify-batch, run-filter-pipeline, run-classify-pipeline'
+    description: 'Operation: run-filter-pipeline, run-classify-pipeline, sync-deal-states, eval, eval-compare'
     required: true
   auth-url:
     description: 'SxT auth proxy URL'
@@ -25,10 +25,6 @@ inputs:
     description: 'SxT API key for rate limiter token acquisition'
   content-fetcher-url:
     description: 'Content fetcher service URL (fetch-and-filter, fetch-and-classify)'
-  sql:
-    description: 'SQL statement (sxt-execute)'
-  sxt-command:
-    description: 'SxT operation type: query or execute (sxt-execute)'
   batch-id:
     description: 'Batch ID for processor commands (fetch-and-filter, fetch-and-classify, save-evals, save-deals, update-deal-states)'
   hyperbolic-key:
