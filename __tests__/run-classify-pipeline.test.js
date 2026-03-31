@@ -269,6 +269,7 @@ describe('run-classify-pipeline command', () => {
         body: 'test email body',
       }))
       mockFetchEmails.mockResolvedValueOnce(emails)
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[{"thread_id":"thread-1"}]' })
       mockParseAndValidate.mockReturnValueOnce(threads)
@@ -413,6 +414,7 @@ describe('run-classify-pipeline command', () => {
         body: 'test',
       }))
       mockFetchEmails.mockResolvedValueOnce(emails)
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
       mockParseAndValidate.mockReturnValueOnce(threads)
@@ -462,6 +464,7 @@ describe('run-classify-pipeline command', () => {
       mockFetchEmails.mockResolvedValueOnce([
         { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
       ])
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({
         systemPrompt: 'system-prompt',
         userPrompt: 'user-prompt',
@@ -535,6 +538,7 @@ describe('run-classify-pipeline command', () => {
       mockFetchEmails.mockResolvedValueOnce([
         { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
       ])
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
 
       // Primary model fails completely
@@ -583,6 +587,7 @@ describe('run-classify-pipeline command', () => {
       mockFetchEmails.mockResolvedValueOnce([
         { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
       ])
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
 
       // Primary model returns content but it can't be parsed
@@ -907,6 +912,10 @@ describe('run-classify-pipeline command', () => {
       mockFetchEmails.mockResolvedValueOnce([
         { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
       ])
+
+      // selectByThreadIds for already-evaluated skip check
+      mockExecuteSql.mockResolvedValueOnce([])
+
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
       mockParseAndValidate.mockReturnValueOnce(threads)
@@ -1056,6 +1065,10 @@ describe('run-classify-pipeline command', () => {
       mockFetchEmails.mockResolvedValueOnce([
         { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
       ])
+
+      // selectByThreadIds for already-evaluated skip check
+      mockExecuteSql.mockResolvedValueOnce([])
+
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
 
       // Primary fails
@@ -1166,6 +1179,7 @@ describe('run-classify-pipeline command', () => {
       mockFetchEmails.mockResolvedValueOnce([
         { messageId: 'msg-1', id: 'em-1', threadId: 'thread-xyz', body: 'hi' },
       ])
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
       mockParseAndValidate.mockReturnValueOnce(threads)
@@ -1229,6 +1243,7 @@ describe('run-classify-pipeline command', () => {
       mockFetchEmails.mockResolvedValueOnce([
         { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
       ])
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
       mockParseAndValidate.mockReturnValueOnce(threads)
@@ -1241,6 +1256,275 @@ describe('run-classify-pipeline command', () => {
 
     const coreValues = mockBatcherInstance.pushCoreContacts.mock.calls[0][0]
     expect(coreValues[0]).toMatch(/NULL/)
+  })
+
+  // ----------------------------------------------------------
+  // Already-evaluated skip: all threads skipped
+  // ----------------------------------------------------------
+
+  it('skips classification for threads with existing deals and older emails', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(2)
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      // Claim phase
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed rows
+
+      const batch = await claimFn()
+
+      // Worker phase
+      mockExecuteSql.mockResolvedValueOnce([]) // getAuditByBatchId -> empty
+
+      // Fetch emails with dates OLDER than existing deals
+      const emails = rows.map((r) => ({
+        messageId: r.MESSAGE_ID,
+        id: r.EMAIL_METADATA_ID,
+        threadId: r.THREAD_ID,
+        body: 'test email body',
+        date: '2025-01-01T00:00:00Z',
+      }))
+      mockFetchEmails.mockResolvedValueOnce(emails)
+
+      // Query existing deals — both threads have deals with NEWER UPDATED_AT
+      mockExecuteSql.mockResolvedValueOnce([
+        { THREAD_ID: 'thread-1', UPDATED_AT: '2026-01-01T00:00:00Z' },
+        { THREAD_ID: 'thread-2', UPDATED_AT: '2026-01-01T00:00:00Z' },
+      ])
+
+      // updateStatusByIds for skipped threads
+      mockExecuteSql.mockResolvedValueOnce([])
+
+      await workerFn(batch, { attempt: 0 })
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+
+    // AI should NOT have been called — all threads skipped
+    expect(mockCallModel).not.toHaveBeenCalled()
+    expect(mockBuildPrompt).not.toHaveBeenCalled()
+
+    // Batch completion event should still be recorded
+    expect(mockBatcherInstance.pushBatchEvents).toHaveBeenCalledTimes(1)
+  })
+
+  // ----------------------------------------------------------
+  // Already-evaluated skip: mixed batch (some skipped, some classified)
+  // ----------------------------------------------------------
+
+  it('classifies only threads without existing deals or with newer emails', async () => {
+    mockInputs()
+
+    // 3 rows: thread-1, thread-2, thread-3
+    const rows = makeBatchRows(3)
+
+    // Only thread-2 and thread-3 will be classified
+    const classifiedThreads = [
+      {
+        thread_id: 'thread-2',
+        is_deal: false,
+        ai_score: 3,
+        ai_summary: 'Not a deal',
+        category: null,
+        deal_name: null,
+        deal_type: null,
+        deal_value: '0',
+        currency: 'USD',
+        main_contact: null,
+      },
+      {
+        thread_id: 'thread-3',
+        is_deal: true,
+        ai_score: 9,
+        ai_summary: 'New deal',
+        category: 'new',
+        deal_name: 'New Deal',
+        deal_type: 'brand_collaboration',
+        deal_value: '500',
+        currency: 'USD',
+        main_contact: {
+          name: 'Bob',
+          email: 'bob@co.com',
+          company: 'BobCo',
+          title: 'CTO',
+          phone_number: null,
+        },
+      },
+    ]
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      // Claim
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed rows
+
+      const batch = await claimFn()
+
+      // Worker
+      mockExecuteSql.mockResolvedValueOnce([]) // getAuditByBatchId -> empty
+
+      // Fetch emails - all 3 threads
+      const emails = rows.map((r) => ({
+        messageId: r.MESSAGE_ID,
+        id: r.EMAIL_METADATA_ID,
+        threadId: r.THREAD_ID,
+        body: 'test email body',
+        date: '2025-06-01T00:00:00Z',
+      }))
+      mockFetchEmails.mockResolvedValueOnce(emails)
+
+      // Only thread-1 has existing deal with newer UPDATED_AT
+      mockExecuteSql.mockResolvedValueOnce([
+        { THREAD_ID: 'thread-1', UPDATED_AT: '2026-01-01T00:00:00Z' },
+      ])
+
+      // updateStatusByIds for skipped thread-1
+      mockExecuteSql.mockResolvedValueOnce([])
+
+      // AI classification for thread-2 and thread-3
+      mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
+      mockCallModel.mockResolvedValueOnce({ content: '[]' })
+      mockParseAndValidate.mockReturnValueOnce(classifiedThreads)
+
+      // Save audit
+      mockExecuteSql.mockResolvedValueOnce([])
+
+      await workerFn(batch, { attempt: 0 })
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+
+    // AI should have been called for non-skipped threads
+    expect(mockCallModel).toHaveBeenCalledTimes(1)
+
+    // buildPrompt should have received only thread-2 and thread-3 emails
+    const promptEmails = mockBuildPrompt.mock.calls[0][0]
+    const promptThreadIds = [...new Set(promptEmails.map((e) => e.threadId))]
+    expect(promptThreadIds).not.toContain('thread-1')
+    expect(promptThreadIds).toContain('thread-2')
+    expect(promptThreadIds).toContain('thread-3')
+
+    // Evals/deals should have been saved for classified threads
+    expect(mockBatcherInstance.pushEvals).toHaveBeenCalledTimes(1)
+  })
+
+  // ----------------------------------------------------------
+  // Already-evaluated skip: newer emails -> classify normally
+  // ----------------------------------------------------------
+
+  it('classifies threads with existing deals when emails are newer than deal', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(2)
+    const threads = makeThreads(rows)
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed rows
+
+      const batch = await claimFn()
+
+      mockExecuteSql.mockResolvedValueOnce([]) // getAuditByBatchId -> empty
+
+      // Emails with dates NEWER than existing deals
+      const emails = rows.map((r) => ({
+        messageId: r.MESSAGE_ID,
+        id: r.EMAIL_METADATA_ID,
+        threadId: r.THREAD_ID,
+        body: 'test email body',
+        date: '2026-06-01T00:00:00Z',
+      }))
+      mockFetchEmails.mockResolvedValueOnce(emails)
+
+      // Both threads have deals but with OLDER UPDATED_AT
+      mockExecuteSql.mockResolvedValueOnce([
+        { THREAD_ID: 'thread-1', UPDATED_AT: '2025-01-01T00:00:00Z' },
+        { THREAD_ID: 'thread-2', UPDATED_AT: '2025-01-01T00:00:00Z' },
+      ])
+
+      // No skipping — proceed to AI classification
+      mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
+      mockCallModel.mockResolvedValueOnce({ content: '[]' })
+      mockParseAndValidate.mockReturnValueOnce(threads)
+      mockExecuteSql.mockResolvedValueOnce([]) // audit insert
+
+      await workerFn(batch, { attempt: 0 })
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+
+    // AI SHOULD have been called — emails are newer
+    expect(mockCallModel).toHaveBeenCalledTimes(1)
+
+    // All emails should be in the prompt
+    const promptEmails = mockBuildPrompt.mock.calls[0][0]
+    expect(promptEmails.length).toBe(2)
+  })
+
+  // ----------------------------------------------------------
+  // Already-evaluated skip: missing/unparseable dates -> classify normally
+  // ----------------------------------------------------------
+
+  it('does not skip threads when email dates are missing or unparseable', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(2)
+    const threads = makeThreads(rows)
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed rows
+
+      const batch = await claimFn()
+
+      mockExecuteSql.mockResolvedValueOnce([]) // getAuditByBatchId -> empty
+
+      // Emails with NO date field
+      const emails = rows.map((r) => ({
+        messageId: r.MESSAGE_ID,
+        id: r.EMAIL_METADATA_ID,
+        threadId: r.THREAD_ID,
+        body: 'test email body',
+        // no date field
+      }))
+      mockFetchEmails.mockResolvedValueOnce(emails)
+
+      // Both threads have existing deals
+      mockExecuteSql.mockResolvedValueOnce([
+        { THREAD_ID: 'thread-1', UPDATED_AT: '2026-01-01T00:00:00Z' },
+        { THREAD_ID: 'thread-2', UPDATED_AT: '2026-01-01T00:00:00Z' },
+      ])
+
+      // No skipping — proceed to AI because dates are unparseable
+      mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
+      mockCallModel.mockResolvedValueOnce({ content: '[]' })
+      mockParseAndValidate.mockReturnValueOnce(threads)
+      mockExecuteSql.mockResolvedValueOnce([]) // audit insert
+
+      await workerFn(batch, { attempt: 0 })
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+
+    // AI SHOULD have been called — missing dates means we can't determine, so classify
+    expect(mockCallModel).toHaveBeenCalledTimes(1)
+    expect(mockBuildPrompt).toHaveBeenCalledTimes(1)
+
+    // All emails should be in the prompt
+    const promptEmails = mockBuildPrompt.mock.calls[0][0]
+    expect(promptEmails.length).toBe(2)
   })
 
   // ----------------------------------------------------------
@@ -1281,6 +1565,7 @@ describe('run-classify-pipeline command', () => {
       mockFetchEmails.mockResolvedValueOnce([
         { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
       ])
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
       mockParseAndValidate.mockReturnValueOnce(threads)

@@ -19,7 +19,7 @@ describe('deals', () => {
 
   it('selectByThreadIds', () => {
     const sql = deals.selectByThreadIds(S, ["'th-1'", "'th-2'"])
-    expect(sql).toContain('SELECT ID, THREAD_ID, USER_ID')
+    expect(sql).toContain('SELECT ID, THREAD_ID, USER_ID, UPDATED_AT')
     expect(sql).toContain(`FROM ${S}.DEALS`)
     expect(sql).toContain("'th-1'")
   })
