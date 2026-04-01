@@ -1,17 +1,17 @@
-name: dealsync-sync
-authority: '0x553b60381dC74493d03b2865C818350f3347Ac7f'
+name: dealsync-sync-betanet
+authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
   workflow_dispatch:
 
 concurrency:
-  group: compact-sync
+  group: compact-sync-betanet
   cancel-in-progress: false
 
 jobs:
   sync:
     timeout-minutes: 10
     runs-on: ubuntu-latest
-    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
+    environment: ''
     steps:
       - id: sync
         name: Sync deal states from email metadata

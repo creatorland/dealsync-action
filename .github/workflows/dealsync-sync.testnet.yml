@@ -1,0 +1,27 @@
+name: dealsync-sync-testnet
+authority: '0x553b60381dC74493d03b2865C818350f3347Ac7f'
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: compact-sync-testnet
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
+    steps:
+      - id: sync
+        name: Sync deal states from email metadata
+        uses: creatorland/dealsync-action@main
+        with:
+          command: sync-deal-states
+          auth-url: ${{ secrets.SXT_AUTH_URL }}
+          auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          api-url: ${{ secrets.SXT_API_URL }}
+          biscuit: ${{ secrets.SXT_BISCUIT }}
+          schema: ${{ secrets.SXT_SCHEMA }}
+          rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
+          rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}

@@ -1,41 +1,41 @@
-name: dealsync-classify
-authority: '0x553b60381dC74493d03b2865C818350f3347Ac7f'
+name: dealsync-filter-betanet
+authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
   workflow_dispatch:
     inputs:
       max_concurrent:
         type: string
-        default: '70'
-      classify_batch_size:
-        type: string
         default: '5'
+      filter_batch_size:
+        type: string
+        default: '200'
       max_retries:
         type: string
         default: '6'
       chunk_size:
         type: string
-        default: '10'
+        default: '50'
       fetch_timeout_ms:
         type: string
         default: '240000'
 
 concurrency:
-  group: compact-classify
+  group: compact-filter-betanet
   cancel-in-progress: false
 
 jobs:
-  classify:
-    timeout-minutes: 30
+  filter:
+    timeout-minutes: 10
     runs-on: ubuntu-latest
-    environment: '0x226c2acd33ef649bff3339670b6de489880a094acf7390df6cad4b5e18a17665'
+    environment: ''
     steps:
-      - id: classify
-        name: Run classify pipeline
+      - id: filter
+        name: Run filter pipeline
         uses: creatorland/dealsync-action@main
         with:
-          command: run-classify-pipeline
+          command: run-filter-pipeline
           max-concurrent: ${{ inputs.max_concurrent }}
-          classify-batch-size: ${{ inputs.classify_batch_size }}
+          filter-batch-size: ${{ inputs.filter_batch_size }}
           max-retries: ${{ inputs.max_retries }}
           chunk-size: ${{ inputs.chunk_size }}
           fetch-timeout-ms: ${{ inputs.fetch_timeout_ms }}
@@ -47,6 +47,3 @@ jobs:
           rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
           rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
           content-fetcher-url: ${{ secrets.CONTENT_FETCHER_URL }}
-          hyperbolic-key: ${{ secrets.HYPERBOLIC_KEY }}
-          primary-model: ${{ secrets.AI_PRIMARY_MODEL }}
-          fallback-model: ${{ secrets.AI_FALLBACK_MODEL }}
