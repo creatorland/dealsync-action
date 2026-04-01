@@ -18,6 +18,9 @@ on:
       fetch_timeout_ms:
         type: string
         default: '240000'
+      email_provider:
+        type: string
+        default: 'content-fetcher'
 
 concurrency:
   group: compact-classify-testnet
@@ -47,6 +50,7 @@ jobs:
           rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
           rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
           content-fetcher-url: ${{ secrets.CONTENT_FETCHER_URL }}
+          email-provider: ${{ inputs.email_provider }}
           hyperbolic-key: ${{ secrets.HYPERBOLIC_KEY }}
           primary-model: ${{ secrets.AI_PRIMARY_MODEL }}
           fallback-model: ${{ secrets.AI_FALLBACK_MODEL }}
