@@ -235,6 +235,37 @@ describe('fetchEmails', () => {
   })
 
   // -------------------------------------------------------------------------
+  // Malformed JSON body on HTTP 200 (resp.json() throws)
+  // -------------------------------------------------------------------------
+
+  it('returns failures when resp.json() throws on HTTP 200 (malformed body)', async () => {
+    const messageIds = ['msg-1', 'msg-2']
+    const meta = makeMeta(messageIds)
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError('Unexpected token < in JSON at position 0')
+      },
+      text: async () => '<html>bad gateway</html>',
+    })
+
+    const result = await fetchEmails(messageIds, meta, makeOpts({ chunkSize: 10 }))
+
+    expect(result.fetched).toHaveLength(0)
+    expect(result.failed).toHaveLength(2)
+    expect(result.failed[0]).toEqual({
+      messageId: 'msg-1',
+      error: 'Unexpected token < in JSON at position 0',
+    })
+    expect(result.failed[1]).toEqual({
+      messageId: 'msg-2',
+      error: 'Unexpected token < in JSON at position 0',
+    })
+  })
+
+  // -------------------------------------------------------------------------
   // HTTP 207 — partial success
   // -------------------------------------------------------------------------
 

@@ -217,13 +217,21 @@ export async function fetchEmails(messageIds, metaByMessageId, opts) {
   // Aggregate results
   const allFetched = []
   const allFailed = []
-  for (const r of results) {
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i]
     if (r.status === 'fulfilled') {
       allFetched.push(...r.value.fetched)
       allFailed.push(...r.value.failed)
+    } else {
+      // Safety net: fetchChunk should never reject, but if it does,
+      // map the chunk's messageIds to failures so none are silently lost.
+      const chunk = chunks[i]
+      const errMsg = r.reason?.message || String(r.reason) || 'unknown error'
+      console.log(
+        `[fetchEmails] chunk ${i + 1}/${totalChunks}: unexpected rejection — ${errMsg}`,
+      )
+      allFailed.push(...chunk.map((messageId) => ({ messageId, error: errMsg })))
     }
-    // Promise.allSettled should never reject with our implementation,
-    // but handle defensively
   }
 
   return { fetched: allFetched, failed: allFailed }
@@ -240,94 +248,92 @@ async function fetchChunk(chunk, chunkIndex, totalChunks, opts) {
   console.log(`${label}: requesting ${chunk.length} messageIds${formatLabel}`)
 
   const t0 = Date.now()
+  let clear
 
-  let resp
   try {
-    const { signal, clear } = withTimeout(fetchTimeoutMs)
-    try {
-      const body = {
-        userId,
-        ...(syncStateId ? { syncStateId } : {}),
-        messageIds: chunk,
-        ...(format ? { format } : {}),
-      }
+    let resp
+    const timeout = withTimeout(fetchTimeoutMs)
+    clear = timeout.clear
 
-      resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal,
-      })
-      clear()
-    } catch (err) {
-      clear()
-      throw err
+    const body = {
+      userId,
+      ...(syncStateId ? { syncStateId } : {}),
+      messageIds: chunk,
+      ...(format ? { format } : {}),
+    }
+
+    resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: timeout.signal,
+    })
+
+    const elapsed = Date.now() - t0
+
+    // --- HTTP 200: full success ---
+    if (resp.status === 200) {
+      const result = await resp.json()
+      const emails = result.data || result
+      enrichEmails(emails, metaByMessageId)
+      console.log(`${label}: HTTP 200 — ${emails.length} fetched (${elapsed}ms)`)
+      return { fetched: emails, failed: [] }
+    }
+
+    // --- HTTP 207: partial success ---
+    if (resp.status === 207) {
+      const result = await resp.json()
+      const emails = result.data || []
+      const errors = result.errors || []
+      enrichEmails(emails, metaByMessageId)
+
+      const failed = errors.map((e) => ({ messageId: e.messageId, error: e.error }))
+      console.log(
+        `${label}: HTTP 207 partial — ${emails.length} fetched, ${failed.length} failed (${elapsed}ms)`,
+      )
+      if (failed.length > 0) {
+        const details = failed.map((f) => `${f.messageId}: ${f.error}`).join(', ')
+        console.log(`${label}: failed messageIds: ${details}`)
+      }
+      return { fetched: emails, failed }
+    }
+
+    // --- HTTP 502: try to parse JSON body ---
+    if (resp.status === 502) {
+      const raw = await resp.text()
+      try {
+        const result = JSON.parse(raw)
+        if (result.errors && Array.isArray(result.errors) && result.errors.length > 0) {
+          const failed = result.errors.map((e) => ({ messageId: e.messageId, error: e.error }))
+          console.log(`${label}: HTTP 502 total failure — ${failed.length} failed (${elapsed}ms)`)
+          return { fetched: [], failed }
+        }
+      } catch {
+        // Non-JSON 502 body — fall through
+      }
+      // No usable per-message errors (non-JSON body, or JSON without errors array)
+      console.log(`${label}: HTTP 502 total failure — ${chunk.length} failed (${elapsed}ms)`)
+      return {
+        fetched: [],
+        failed: chunk.map((messageId) => ({ messageId, error: `HTTP 502: ${raw}` })),
+      }
+    }
+
+    // --- Other HTTP errors (500, 503, etc.) ---
+    const text = await resp.text()
+    console.log(`${label}: HTTP ${resp.status} — treating as transport error (${elapsed}ms)`)
+    return {
+      fetched: [],
+      failed: chunk.map((messageId) => ({ messageId, error: `HTTP ${resp.status}: ${text}` })),
     }
   } catch (err) {
-    // Transport error — fetch threw (timeout, connection reset, etc.)
     console.log(`${label}: transport error — ${err.message}`)
     return {
       fetched: [],
       failed: chunk.map((messageId) => ({ messageId, error: err.message })),
     }
-  }
-
-  const elapsed = Date.now() - t0
-
-  // --- HTTP 200: full success ---
-  if (resp.status === 200) {
-    const result = await resp.json()
-    const emails = result.data || result
-    enrichEmails(emails, metaByMessageId)
-    console.log(`${label}: HTTP 200 — ${emails.length} fetched (${elapsed}ms)`)
-    return { fetched: emails, failed: [] }
-  }
-
-  // --- HTTP 207: partial success ---
-  if (resp.status === 207) {
-    const result = await resp.json()
-    const emails = result.data || []
-    const errors = result.errors || []
-    enrichEmails(emails, metaByMessageId)
-
-    const failed = errors.map((e) => ({ messageId: e.messageId, error: e.error }))
-    console.log(
-      `${label}: HTTP 207 partial — ${emails.length} fetched, ${failed.length} failed (${elapsed}ms)`,
-    )
-    if (failed.length > 0) {
-      const details = failed.map((f) => `${f.messageId}: ${f.error}`).join(', ')
-      console.log(`${label}: failed messageIds: ${details}`)
-    }
-    return { fetched: emails, failed }
-  }
-
-  // --- HTTP 502: try to parse JSON body ---
-  if (resp.status === 502) {
-    const raw = await resp.text()
-    try {
-      const result = JSON.parse(raw)
-      if (result.errors && Array.isArray(result.errors) && result.errors.length > 0) {
-        const failed = result.errors.map((e) => ({ messageId: e.messageId, error: e.error }))
-        console.log(`${label}: HTTP 502 total failure — ${failed.length} failed (${elapsed}ms)`)
-        return { fetched: [], failed }
-      }
-    } catch {
-      // Non-JSON 502 body — fall through
-    }
-    // No usable per-message errors (non-JSON body, or JSON without errors array)
-    console.log(`${label}: HTTP 502 total failure — ${chunk.length} failed (${elapsed}ms)`)
-    return {
-      fetched: [],
-      failed: chunk.map((messageId) => ({ messageId, error: `HTTP 502: ${raw}` })),
-    }
-  }
-
-  // --- Other HTTP errors (500, 503, etc.) ---
-  const text = await resp.text()
-  console.log(`${label}: HTTP ${resp.status} — treating as transport error (${elapsed}ms)`)
-  return {
-    fetched: [],
-    failed: chunk.map((messageId) => ({ messageId, error: `HTTP ${resp.status}: ${text}` })),
+  } finally {
+    if (clear) clear()
   }
 }
 
