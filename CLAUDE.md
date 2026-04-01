@@ -43,10 +43,10 @@ Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command`
 
 4-layer fallback for classification:
 
-- **Layer 0**: Primary model (Qwen3-235B) with HTTP retries + exponential backoff
+- **Layer 0**: Primary model (default: Qwen3-235B, configurable via `primary-model` input) with HTTP retries + exponential backoff
 - **Layer 1**: Local JSON repair (strip markdown fences, extract array, unwrap wrapper objects, coerce schema)
 - **Layer 2**: Corrective retry — send broken output back to same model with parse error
-- **Layer 3**: Fallback model (Kimi-K2) with temperature=0.6
+- **Layer 3**: Fallback model (default: DeepSeek-V3, configurable via `fallback-model` input) with temperature=0.6
 
 `parseAndValidate()` handles schema coercion: clamps ai_score to 1-10, validates category/deal_type against enum sets, enforces string limits.
 
