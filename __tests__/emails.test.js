@@ -408,13 +408,9 @@ describe('fetchEmails', () => {
         partialResponse([{ messageId: 'msg-1' }], [{ messageId: 'msg-2', error: 'fail' }]),
       )
       // Second attempt: 207 with msg-2 still failing
-      .mockResolvedValueOnce(
-        partialResponse([], [{ messageId: 'msg-2', error: 'fail' }]),
-      )
+      .mockResolvedValueOnce(partialResponse([], [{ messageId: 'msg-2', error: 'fail' }]))
       // Third attempt: 207 with msg-2 still failing
-      .mockResolvedValueOnce(
-        partialResponse([], [{ messageId: 'msg-2', error: 'fail' }]),
-      )
+      .mockResolvedValueOnce(partialResponse([], [{ messageId: 'msg-2', error: 'fail' }]))
 
     const result = await fetchEmails(messageIds, meta, makeOpts({ chunkSize: 10, maxRetries: 3 }))
 
