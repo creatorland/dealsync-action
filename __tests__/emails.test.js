@@ -63,6 +63,15 @@ function okResponse(data) {
   }
 }
 
+function partialResponse(data, errors) {
+  return {
+    ok: true,
+    status: 207,
+    json: async () => ({ status: 'partial', data, errors }),
+    text: async () => JSON.stringify({ status: 'partial', data, errors }),
+  }
+}
+
 function errorResponse(status, body = 'error') {
   return {
     ok: false,
@@ -354,6 +363,171 @@ describe('fetchEmails', () => {
     ).rejects.toThrow(/0.*emails retrieved/)
 
     expect(mockFetch).toHaveBeenCalledTimes(3)
+  })
+
+  // -------------------------------------------------------------------------
+  // 207 handling (partial success)
+  // -------------------------------------------------------------------------
+
+  it('on 207, accepts successful emails and retries only failed messageIds', async () => {
+    const messageIds = ['msg-1', 'msg-2', 'msg-3']
+    const meta = makeMeta(messageIds)
+
+    mockFetch
+      // First attempt: 207 with msg-1 success, msg-2 and msg-3 failed
+      .mockResolvedValueOnce(
+        partialResponse(
+          [{ messageId: 'msg-1' }],
+          [
+            { messageId: 'msg-2', error: 'not found' },
+            { messageId: 'msg-3', error: 'not found' },
+          ],
+        ),
+      )
+      // Second attempt: 200 with msg-2 and msg-3 success
+      .mockResolvedValueOnce(okResponse([{ messageId: 'msg-2' }, { messageId: 'msg-3' }]))
+
+    const result = await fetchEmails(messageIds, meta, makeOpts({ chunkSize: 10, maxRetries: 3 }))
+
+    expect(result).toHaveLength(3)
+    expect(result.map((e) => e.messageId).sort()).toEqual(['msg-1', 'msg-2', 'msg-3'])
+
+    // Second fetch should only contain the 2 failed IDs
+    expect(mockFetch).toHaveBeenCalledTimes(2)
+    const secondBody = JSON.parse(mockFetch.mock.calls[1][1].body)
+    expect(secondBody.messageIds).toEqual(['msg-2', 'msg-3'])
+  })
+
+  it('on 207, retries exhaust and returns only successful emails', async () => {
+    const messageIds = ['msg-1', 'msg-2']
+    const meta = makeMeta(messageIds)
+
+    // First attempt: 207 with msg-1 success, msg-2 failed
+    mockFetch
+      .mockResolvedValueOnce(
+        partialResponse([{ messageId: 'msg-1' }], [{ messageId: 'msg-2', error: 'fail' }]),
+      )
+      // Second attempt: 207 with msg-2 still failing
+      .mockResolvedValueOnce(
+        partialResponse([], [{ messageId: 'msg-2', error: 'fail' }]),
+      )
+      // Third attempt: 207 with msg-2 still failing
+      .mockResolvedValueOnce(
+        partialResponse([], [{ messageId: 'msg-2', error: 'fail' }]),
+      )
+
+    const result = await fetchEmails(messageIds, meta, makeOpts({ chunkSize: 10, maxRetries: 3 }))
+
+    // Only msg-1 returned (not duplicated)
+    expect(result).toHaveLength(1)
+    expect(result[0].messageId).toBe('msg-1')
+    expect(mockFetch).toHaveBeenCalledTimes(3)
+
+    // Second and third attempts should only send msg-2
+    const secondBody = JSON.parse(mockFetch.mock.calls[1][1].body)
+    expect(secondBody.messageIds).toEqual(['msg-2'])
+    const thirdBody = JSON.parse(mockFetch.mock.calls[2][1].body)
+    expect(thirdBody.messageIds).toEqual(['msg-2'])
+  })
+
+  // -------------------------------------------------------------------------
+  // 502 handling
+  // -------------------------------------------------------------------------
+
+  it('on 502 with JSON errors, retries failed messageIds', async () => {
+    const messageIds = ['msg-1', 'msg-2']
+    const meta = makeMeta(messageIds)
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        json: async () => ({
+          errors: [
+            { messageId: 'msg-1', error: 'upstream fail' },
+            { messageId: 'msg-2', error: 'upstream fail' },
+          ],
+        }),
+        text: async () =>
+          JSON.stringify({
+            errors: [
+              { messageId: 'msg-1', error: 'upstream fail' },
+              { messageId: 'msg-2', error: 'upstream fail' },
+            ],
+          }),
+      })
+      .mockResolvedValueOnce(okResponse([{ messageId: 'msg-1' }, { messageId: 'msg-2' }]))
+
+    const result = await fetchEmails(messageIds, meta, makeOpts({ chunkSize: 10, maxRetries: 3 }))
+
+    expect(result).toHaveLength(2)
+    expect(result.map((e) => e.messageId).sort()).toEqual(['msg-1', 'msg-2'])
+  })
+
+  it('on 502 with non-JSON body, retries all messageIds in chunk', async () => {
+    const messageIds = ['msg-1', 'msg-2']
+    const meta = makeMeta(messageIds)
+
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        json: async () => {
+          throw new Error('not json')
+        },
+        text: async () => 'Bad Gateway',
+      })
+      .mockResolvedValueOnce(okResponse([{ messageId: 'msg-1' }, { messageId: 'msg-2' }]))
+
+    const result = await fetchEmails(messageIds, meta, makeOpts({ chunkSize: 10, maxRetries: 3 }))
+
+    expect(result).toHaveLength(2)
+    expect(result.map((e) => e.messageId).sort()).toEqual(['msg-1', 'msg-2'])
+
+    // Second fetch should contain all IDs since body was non-JSON
+    const secondBody = JSON.parse(mockFetch.mock.calls[1][1].body)
+    expect(secondBody.messageIds).toEqual(['msg-1', 'msg-2'])
+  })
+
+  it('on 502 exhausting retries, continues to next chunk', async () => {
+    const messageIds = ['msg-1', 'msg-2', 'msg-3', 'msg-4']
+    const meta = makeMeta(messageIds)
+
+    // Chunk 1 (msg-1, msg-2): 502 all 3 retries
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        json: async () => {
+          throw new Error('not json')
+        },
+        text: async () => 'Bad Gateway',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        json: async () => {
+          throw new Error('not json')
+        },
+        text: async () => 'Bad Gateway',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        json: async () => {
+          throw new Error('not json')
+        },
+        text: async () => 'Bad Gateway',
+      })
+      // Chunk 2 (msg-3, msg-4): succeeds
+      .mockResolvedValueOnce(okResponse([{ messageId: 'msg-3' }, { messageId: 'msg-4' }]))
+
+    const result = await fetchEmails(messageIds, meta, makeOpts({ chunkSize: 2, maxRetries: 3 }))
+
+    expect(result).toHaveLength(2)
+    expect(result[0].messageId).toBe('msg-3')
+    expect(result[1].messageId).toBe('msg-4')
+    expect(mockFetch).toHaveBeenCalledTimes(4)
   })
 
   // -------------------------------------------------------------------------

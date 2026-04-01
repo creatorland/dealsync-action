@@ -172,6 +172,24 @@ export function isRejected(email) {
 const DEFAULT_MAX_RETRIES = 3
 
 /**
+ * Enrich fetched emails with metadata and collect them into the output array.
+ * @param {object[]} emails - raw email objects from the content fetcher
+ * @param {object[]} allEmails - accumulator array to push enriched emails into
+ * @param {Map} metaByMessageId - metadata lookup map
+ */
+function enrichAndCollect(emails, allEmails, metaByMessageId) {
+  for (const email of emails) {
+    const meta = metaByMessageId.get(email.messageId)
+    if (meta) {
+      email.id = meta.EMAIL_METADATA_ID
+      email.threadId = meta.THREAD_ID
+      if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY
+    }
+    allEmails.push(email)
+  }
+}
+
+/**
  * Fetch email content from the content-fetcher service in chunks,
  * enriching each email with metadata from the provided map.
  *
@@ -207,16 +225,16 @@ export async function fetchEmails(messageIds, metaByMessageId, opts) {
   for (let i = 0; i < messageIds.length; i += chunkSize) {
     const chunk = messageIds.slice(i, i + chunkSize)
     const chunkIndex = Math.floor(i / chunkSize) + 1
-    let fetched = false
+    let pendingIds = [...chunk]
 
-    for (let attempt = 0; attempt < maxRetries && !fetched; attempt++) {
+    for (let attempt = 0; attempt < maxRetries && pendingIds.length > 0; attempt++) {
       try {
         const { signal, clear } = withTimeout(fetchTimeoutMs)
         try {
           const body = {
             userId,
             ...(syncStateId ? { syncStateId } : {}),
-            messageIds: chunk,
+            messageIds: pendingIds,
             ...(format ? { format } : {}),
           }
 
@@ -240,24 +258,63 @@ export async function fetchEmails(messageIds, metaByMessageId, opts) {
             continue
           }
 
+          // Handle 502 — try to parse per-messageId errors
+          if (resp.status === 502) {
+            let failedIds = pendingIds // default: retry all
+            try {
+              const errBody = await resp.json()
+              if (errBody.errors && Array.isArray(errBody.errors)) {
+                failedIds = errBody.errors.map((e) => e.messageId).filter(Boolean)
+                if (failedIds.length === 0) failedIds = pendingIds
+              }
+            } catch {
+              // Non-JSON body — retry all pendingIds
+            }
+            pendingIds = failedIds
+            console.log(
+              `[email-client] 502 — ${pendingIds.length} messageIds to retry ` +
+                `(chunk ${chunkIndex}, attempt ${attempt + 1}/${maxRetries})`,
+            )
+            if (attempt < maxRetries - 1) {
+              const waitMs = backoffMs(attempt, { base: 1000 })
+              await sleep(waitMs)
+            }
+            continue
+          }
+
           if (!resp.ok) {
             throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
           }
 
           const result = await resp.json()
-          const emails = result.data || result
 
-          for (const email of emails) {
-            const meta = metaByMessageId.get(email.messageId)
-            if (meta) {
-              email.id = meta.EMAIL_METADATA_ID
-              email.threadId = meta.THREAD_ID
-              if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY
+          // Handle 207 partial success
+          if (resp.status === 207) {
+            const successEmails = result.data || []
+            const errors = result.errors || []
+            enrichAndCollect(successEmails, allEmails, metaByMessageId)
+            const failedIds = errors.map((e) => e.messageId).filter(Boolean)
+            if (failedIds.length > 0) {
+              pendingIds = failedIds
+              console.log(
+                `[email-client] 207 partial — ${successEmails.length} ok, ${failedIds.length} failed ` +
+                  `(chunk ${chunkIndex}, attempt ${attempt + 1}/${maxRetries})`,
+              )
+              if (attempt < maxRetries - 1) {
+                const waitMs = backoffMs(attempt, { base: 1000 })
+                await sleep(waitMs)
+              }
+              continue
             }
-            allEmails.push(email)
+            // No failures — done with this chunk
+            pendingIds = []
+            continue
           }
 
-          fetched = true
+          // 200 success — all messages in response
+          const emails = result.data || result
+          enrichAndCollect(emails, allEmails, metaByMessageId)
+          pendingIds = []
         } catch (err) {
           clear()
           throw err
