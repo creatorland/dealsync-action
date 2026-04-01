@@ -2,7 +2,7 @@
 name: w3
 description: Use when working with W3 protocol workflows — deploying, debugging, building new actions, or understanding the legacy Rust pipeline being replaced. Covers workflow YAML authoring, portable action patterns, encryption, and the current Rust implementation reference.
 allowed-tools: Read, Glob, Grep, Bash, WebFetch
-paths: "src/commands/**,config/*.json"
+paths: 'src/commands/**,config/*.json'
 ---
 
 # W3 Protocol Workflows

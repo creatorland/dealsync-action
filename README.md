@@ -10,13 +10,13 @@ The pipeline is orchestrated by GitHub Actions workflows triggered by W3.
 
 ## Commands
 
-| Command                | Description                                                                                      |
-| ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `run-filter-pipeline`  | Claim pending emails, fetch headers, apply 6 static filter rules, update deal states             |
-| `run-classify-pipeline`| Claim pending_classification emails, fetch bodies, AI classify (4-layer fallback), save results   |
-| `sync-deal-states`     | Paginated sync of missing deal_states from email_metadata                                        |
-| `eval`                 | Multi-run AI classification against ground truth, compute recall/precision/F2 metrics             |
-| `eval-compare`         | Compare two eval results with pass/fail criteria (recall >= 95%, precision >= 40%, etc.)          |
+| Command                 | Description                                                                                     |
+| ----------------------- | ----------------------------------------------------------------------------------------------- |
+| `run-filter-pipeline`   | Claim pending emails, fetch headers, apply 6 static filter rules, update deal states            |
+| `run-classify-pipeline` | Claim pending_classification emails, fetch bodies, AI classify (4-layer fallback), save results |
+| `sync-deal-states`      | Paginated sync of missing deal_states from email_metadata                                       |
+| `eval`                  | Multi-run AI classification against ground truth, compute recall/precision/F2 metrics           |
+| `eval-compare`          | Compare two eval results with pass/fail criteria (recall >= 95%, precision >= 40%, etc.)        |
 
 ## Workflows
 

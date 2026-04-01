@@ -2,7 +2,7 @@ import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { authenticate, executeSql, acquireRateLimitToken } from '../lib/db.js'
 import { callModel, parseAndValidate, buildPrompt } from '../lib/ai.js'
-import { fetchEmails } from '../lib/emails.js'
+import { fetchThreadEmails } from '../lib/fetch-threads.js'
 import { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
 import { WriteBatcher } from '../lib/batcher.js'
 import {
@@ -170,23 +170,40 @@ export async function runClassifyPipeline() {
     let modelUsed = primaryModel
 
     if (!threads) {
-      // a. Fetch email content via fetchEmails() (NO format param = full content)
+      // a. Fetch email content via fetchThreadEmails() (NO format param = full content)
       const metaByMessageId = new Map(rows.map((r) => [r.MESSAGE_ID, r]))
       const userId = rows[0].USER_ID
       const syncStateId = rows[0].SYNC_STATE_ID
       const messageIds = rows.map((r) => r.MESSAGE_ID)
 
       let allEmails
+      let fetchUnfetchableThreadIds = []
       try {
-        allEmails = await fetchEmails(messageIds, metaByMessageId, {
-          contentFetcherUrl,
-          userId,
-          syncStateId,
-          chunkSize,
-          fetchTimeoutMs,
-        })
+        const { completedThreads, unfetchableThreadIds } = await fetchThreadEmails(
+          messageIds,
+          metaByMessageId,
+          {
+            contentFetcherUrl,
+            userId,
+            syncStateId,
+            chunkSize,
+            fetchTimeoutMs,
+          },
+        )
+        allEmails = completedThreads
+        fetchUnfetchableThreadIds = unfetchableThreadIds
       } catch {
         allEmails = []
+      }
+
+      if (fetchUnfetchableThreadIds.length > 0) {
+        console.log(
+          `[run-classify-pipeline] ${fetchUnfetchableThreadIds.length} unfetchable threads — ` +
+            `throwing to trigger batch-level retry`,
+        )
+        throw new Error(
+          `${fetchUnfetchableThreadIds.length} threads unfetchable after content fetch retries`,
+        )
       }
 
       // Handle unfetchable threads — threads with zero emails returned

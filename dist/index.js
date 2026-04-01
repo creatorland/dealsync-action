@@ -34541,11 +34541,12 @@ function isRejected(email) {
 // Email content fetcher
 // ---------------------------------------------------------------------------
 
-const DEFAULT_MAX_RETRIES = 3;
-
 /**
  * Fetch email content from the content-fetcher service in chunks,
  * enriching each email with metadata from the provided map.
+ *
+ * Single-shot: fires all chunks concurrently via Promise.allSettled,
+ * never retries, never throws. Returns { fetched, failed }.
  *
  * @param {string[]} messageIds - message IDs to fetch
  * @param {Map} metaByMessageId - Map<messageId, { EMAIL_METADATA_ID, THREAD_ID, PREVIOUS_AI_SUMMARY? }>
@@ -34555,105 +34556,167 @@ const DEFAULT_MAX_RETRIES = 3;
  * @param {string} [opts.syncStateId] - optional sync state ID
  * @param {number} opts.chunkSize - messages per request
  * @param {number} opts.fetchTimeoutMs - timeout per request
- * @param {number} [opts.maxRetries=3] - retries per chunk
  * @param {string} [opts.format] - 'metadata' (headers only) or undefined (full content)
- * @returns {Promise<object[]>} enriched email objects
+ * @returns {Promise<{ fetched: object[], failed: { messageId: string, error: string }[] }>}
  */
 async function fetchEmails(messageIds, metaByMessageId, opts) {
-  const {
-    contentFetcherUrl,
-    userId,
-    syncStateId,
-    chunkSize,
-    fetchTimeoutMs,
-    maxRetries = DEFAULT_MAX_RETRIES,
-    format,
-  } = opts;
+  const { contentFetcherUrl, userId, syncStateId, chunkSize, fetchTimeoutMs, format } = opts;
 
   if (!messageIds || messageIds.length === 0) {
-    return []
+    return { fetched: [], failed: [] }
   }
 
-  const allEmails = [];
-
+  // Split into chunks
+  const chunks = [];
   for (let i = 0; i < messageIds.length; i += chunkSize) {
-    const chunk = messageIds.slice(i, i + chunkSize);
-    const chunkIndex = Math.floor(i / chunkSize) + 1;
-    let fetched = false;
+    chunks.push(messageIds.slice(i, i + chunkSize));
+  }
+  const totalChunks = chunks.length;
 
-    for (let attempt = 0; attempt < maxRetries && !fetched; attempt++) {
-      try {
-        const { signal, clear } = withTimeout(fetchTimeoutMs);
-        try {
-          const body = {
-            userId,
-            ...(syncStateId ? { syncStateId } : {}),
-            messageIds: chunk,
-            ...(format ? { format } : {}),
-          };
+  // Fire all chunks concurrently
+  const results = await Promise.allSettled(
+    chunks.map((chunk, idx) =>
+      fetchChunk(chunk, idx + 1, totalChunks, {
+        contentFetcherUrl,
+        userId,
+        syncStateId,
+        fetchTimeoutMs,
+        format,
+        metaByMessageId,
+      }),
+    ),
+  );
 
-          const resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-            signal,
-          });
-          clear();
-
-          // Handle 429 rate limiting
-          if (resp.status === 429) {
-            const retryBody = await resp.json().catch(() => ({}));
-            const retryAfterMs = retryBody.retryAfterMs || backoffMs(attempt, { base: 1000 });
-            console.log(
-              `[email-client] 429 rate limited, waiting ${retryAfterMs}ms ` +
-                `(chunk ${chunkIndex}, attempt ${attempt + 1}/${maxRetries})`,
-            );
-            await sleep(retryAfterMs);
-            continue
-          }
-
-          if (!resp.ok) {
-            throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
-          }
-
-          const result = await resp.json();
-          const emails = result.data || result;
-
-          for (const email of emails) {
-            const meta = metaByMessageId.get(email.messageId);
-            if (meta) {
-              email.id = meta.EMAIL_METADATA_ID;
-              email.threadId = meta.THREAD_ID;
-              if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY;
-            }
-            allEmails.push(email);
-          }
-
-          fetched = true;
-        } catch (err) {
-          clear();
-          throw err
-        }
-      } catch (err) {
-        console.log(
-          `[email-client] chunk ${chunkIndex} fetch failed ` +
-            `(attempt ${attempt + 1}/${maxRetries}): ${err.message}`,
-        );
-
-        // If not the last attempt, wait with exponential backoff before retry
-        if (attempt < maxRetries - 1) {
-          const waitMs = backoffMs(attempt, { base: 1000 });
-          await sleep(waitMs);
-        }
-      }
+  // Aggregate results
+  const allFetched = [];
+  const allFailed = [];
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'fulfilled') {
+      allFetched.push(...r.value.fetched);
+      allFailed.push(...r.value.failed);
+    } else {
+      // Safety net: fetchChunk should never reject, but if it does,
+      // map the chunk's messageIds to failures so none are silently lost.
+      const chunk = chunks[i];
+      const errMsg = r.reason?.message || String(r.reason) || 'unknown error';
+      console.log(`[fetchEmails] chunk ${i + 1}/${totalChunks}: unexpected rejection — ${errMsg}`);
+      allFailed.push(...chunk.map((messageId) => ({ messageId, error: errMsg })));
     }
   }
 
-  if (allEmails.length === 0 && messageIds.length > 0) {
-    throw new Error(`All content fetches failed — 0/${messageIds.length} emails retrieved`)
-  }
+  return { fetched: allFetched, failed: allFailed }
+}
 
-  return allEmails
+/**
+ * Fetch a single chunk. Returns { fetched, failed } — never throws.
+ */
+async function fetchChunk(chunk, chunkIndex, totalChunks, opts) {
+  const { contentFetcherUrl, userId, syncStateId, fetchTimeoutMs, format, metaByMessageId } = opts;
+  const label = `[fetchEmails] chunk ${chunkIndex}/${totalChunks}`;
+
+  const formatLabel = format ? ` (format=${format})` : '';
+  console.log(`${label}: requesting ${chunk.length} messageIds${formatLabel}`);
+
+  const t0 = Date.now();
+  let clear;
+
+  try {
+    let resp;
+    const timeout = withTimeout(fetchTimeoutMs);
+    clear = timeout.clear;
+
+    const body = {
+      userId,
+      ...(syncStateId ? { syncStateId } : {}),
+      messageIds: chunk,
+      ...(format ? { format } : {}),
+    };
+
+    resp = await fetch(`${contentFetcherUrl}/email-content/fetch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: timeout.signal,
+    });
+
+    const elapsed = Date.now() - t0;
+
+    // --- HTTP 200: full success ---
+    if (resp.status === 200) {
+      const result = await resp.json();
+      const emails = result.data || result;
+      enrichEmails(emails, metaByMessageId);
+      console.log(`${label}: HTTP 200 — ${emails.length} fetched (${elapsed}ms)`);
+      return { fetched: emails, failed: [] }
+    }
+
+    // --- HTTP 207: partial success ---
+    if (resp.status === 207) {
+      const result = await resp.json();
+      const emails = result.data || [];
+      const errors = result.errors || [];
+      enrichEmails(emails, metaByMessageId);
+
+      const failed = errors.map((e) => ({ messageId: e.messageId, error: e.error }));
+      console.log(
+        `${label}: HTTP 207 partial — ${emails.length} fetched, ${failed.length} failed (${elapsed}ms)`,
+      );
+      if (failed.length > 0) {
+        const details = failed.map((f) => `${f.messageId}: ${f.error}`).join(', ');
+        console.log(`${label}: failed messageIds: ${details}`);
+      }
+      return { fetched: emails, failed }
+    }
+
+    // --- HTTP 502: try to parse JSON body ---
+    if (resp.status === 502) {
+      const raw = await resp.text();
+      try {
+        const result = JSON.parse(raw);
+        if (result.errors && Array.isArray(result.errors) && result.errors.length > 0) {
+          const failed = result.errors.map((e) => ({ messageId: e.messageId, error: e.error }));
+          console.log(`${label}: HTTP 502 total failure — ${failed.length} failed (${elapsed}ms)`);
+          return { fetched: [], failed }
+        }
+      } catch {
+        // Non-JSON 502 body — fall through
+      }
+      // No usable per-message errors (non-JSON body, or JSON without errors array)
+      console.log(`${label}: HTTP 502 total failure — ${chunk.length} failed (${elapsed}ms)`);
+      return {
+        fetched: [],
+        failed: chunk.map((messageId) => ({ messageId, error: `HTTP 502: ${raw}` })),
+      }
+    }
+
+    // --- Other HTTP errors (500, 503, etc.) ---
+    const text = await resp.text();
+    console.log(`${label}: HTTP ${resp.status} — treating as transport error (${elapsed}ms)`);
+    return {
+      fetched: [],
+      failed: chunk.map((messageId) => ({ messageId, error: `HTTP ${resp.status}: ${text}` })),
+    }
+  } catch (err) {
+    console.log(`${label}: transport error — ${err.message}`);
+    return {
+      fetched: [],
+      failed: chunk.map((messageId) => ({ messageId, error: err.message })),
+    }
+  } finally {
+    if (clear) clear();
+  }
+}
+
+function enrichEmails(emails, metaByMessageId) {
+  for (const email of emails) {
+    const meta = metaByMessageId.get(email.messageId);
+    if (meta) {
+      email.id = meta.EMAIL_METADATA_ID;
+      email.threadId = meta.THREAD_ID;
+      if (meta.PREVIOUS_AI_SUMMARY) email.previousAiSummary = meta.PREVIOUS_AI_SUMMARY;
+    }
+  }
 }
 
 var systemTemplate = "You are an email classifier for a content creator's inbox. Identify brand deals and business opportunities. Return valid JSON only — no markdown, no explanation, no code fences.\n\n# Creator Context\n\nThe user message may specify the creator's email. If provided, use it to distinguish inbound (to creator) from outbound (from creator) emails. If not provided, infer from exchange patterns.\n\n# Classification Rules\n\n**Priority: maximum recall.** If there is a 20% or greater chance something is a brand deal, classify as is_deal: true. When uncertain, use category \"low_confidence\". Missing a real deal costs thousands; a false positive costs 2 seconds to dismiss.\n\n## What IS a deal\n\nA brand, company, agency, platform, or fellow creator wants to work with this creator for their audience, content, reach, or influence. Includes: sponsorships, paid collaborations, product seeding/gifting, affiliate offers, ambassador programs, creator-to-creator collabs, event appearances, paid placements, content licensing, talent agency outreach. Classify regardless of status (new, active, declined, completed, suspicious).\n\n**Strong signals** (any one = is_deal: true): sender from brand/agency/PR firm, mentions sponsorship/collaboration/partnership/campaign, references compensation or budget, proposes deliverables or timeline, references creator's audience/reach, sender has partnership title, requests rate card, mentions exclusivity/licensing, originates from influencer marketing platform.\n\n**Weak signals** (alone = low_confidence): generic \"opportunity\" language, PR press release without ask, event invite without compensation details, vague \"collab\" subject from corporate domain, follow-up referencing unseen conversation.\n\n## What is NOT a deal\n\nInvestor/fundraising conversations, legal/accounting services, internal team discussions, automated notifications (YouTube/Instagram/TikTok/GMass/newsletters), surveys/feedback requests, SaaS pitches (unless proposing to sponsor creator's content), personal messages, calendar-only threads, shipping/order confirmations, password resets, billing notifications, social media alerts, traditional job recruitment, charity requests (unless paid partnership).\n\n# Output Schema\n\nReturn a JSON array with exactly one object per THREAD_ID_INDEX. The array MUST have the same number of elements as threads provided.\n\nFields per object:\n\n- **thread_index** (integer, required): The THREAD_ID_INDEX from the input (1-based)\n- **is_deal** (boolean, required): true if this is or might be a deal\n- **is_english** (boolean, required): true if primary language is English\n- **language** (string or null): ISO 639-1 code when is_english is false, otherwise null\n- **ai_score** (integer 1-10, required): Creator attention priority. 9-10: urgent, respond today. 7-8: high-value, act soon. 5-6: active, no deadline. 3-4: low priority. 1-2: no action needed.\n- **category** (string or null): Required when is_deal is true. One of: \"new\", \"in_progress\", \"completed\", \"not_interested\", \"likely_scam\", \"low_confidence\". Null when is_deal is false.\n- **likely_scam** (boolean, required): true if suspicious patterns detected\n- **ai_insight** (string, required): One-line summary of the opportunity or why it's not a deal\n- **ai_summary** (string, required, max 1000 chars): Context memo for the next AI evaluation (see guidelines below)\n- **main_contact** (object or null): The primary EXTERNAL person relevant to the deal — must NOT be the creator or match the creator's email. If the most relevant contact is the creator, use the next best external contact from the thread instead (e.g. the sender of an inbound deal email, or a CC'd brand representative). Fields: name, email, company, title, phone_number (all string or null). Null when is_deal is false or when no external contact can be identified in the thread.\n- **deal_brand** (string or null): Brand/company name. Null when is_deal is false.\n- **deal_type** (string or null): One of: \"brand_collaboration\", \"sponsorship\", \"affiliate\", \"product_seeding\", \"ambassador\", \"content_partnership\", \"paid_placement\", \"other_business\". Null when is_deal is false.\n- **deal_name** (string or null): Short descriptive name. Null when is_deal is false.\n- **deal_value** (number or null): Only if compensation explicitly mentioned. Null otherwise.\n- **deal_currency** (string or null): ISO 4217 code when deal_value present. Null otherwise.\n\n# AI Summary Guidelines\n\nThe ai_summary is the ONLY context the next classifier will have when new emails arrive. Write it as a factual briefing:\n\n- **Who**: Main contact's full name, email, title, company. Other relevant participants.\n- **What**: Specific proposal, deliverables, content format requested\n- **Status**: Current state of conversation or negotiation\n- **Terms**: Exact compensation figures, rates, budget, currency if mentioned\n- **Dates**: Deadlines, campaign dates, response-by dates\n- **Red flags**: Anything suspicious or noteworthy\n\n# Previous AI Summary\n\nWhen a thread includes PREVIOUS_AI_SUMMARY, it reflects a prior evaluation with fewer emails. New emails may change the classification. Re-evaluate fully — use the prior summary as background context only.\n\n# Examples\n\n## Deal example\n\nThread: Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored YouTube review with 60-day exclusivity.\n\n```json\n{\n  \"thread_index\": 1,\n  \"is_deal\": true,\n  \"is_english\": true,\n  \"ai_score\": 8,\n  \"category\": \"new\",\n  \"likely_scam\": false,\n  \"ai_insight\": \"Beauty Brand X offers $2.5K for sponsored YouTube review\",\n  \"ai_summary\": \"Sarah Kim (sarah@beautybrandx.com, Partnerships Manager, Beauty Brand X) proposes $2,500 sponsored dedicated YouTube video reviewing new serum line. 60-day exclusivity. Requested creator's rate card. Status: initial outreach, awaiting creator response.\",\n  \"main_contact\": {\n    \"name\": \"Sarah Kim\",\n    \"email\": \"sarah@beautybrandx.com\",\n    \"company\": \"Beauty Brand X\",\n    \"title\": \"Partnerships Manager\",\n    \"phone_number\": null\n  },\n  \"deal_brand\": \"Beauty Brand X\",\n  \"deal_type\": \"sponsorship\",\n  \"deal_name\": \"Beauty Brand X YouTube Review\",\n  \"deal_value\": 2500,\n  \"deal_currency\": \"USD\"\n}\n```\n\n## Non-deal example\n\nThread: noreply@youtube.com sends 100K subscriber milestone notification.\n\n```json\n{\n  \"thread_index\": 2,\n  \"is_deal\": false,\n  \"is_english\": true,\n  \"ai_score\": 1,\n  \"category\": null,\n  \"likely_scam\": false,\n  \"ai_insight\": \"YouTube milestone notification\",\n  \"ai_summary\": \"Automated YouTube notification about 100K subscriber milestone. No deal content.\",\n  \"main_contact\": null,\n  \"deal_brand\": null,\n  \"deal_type\": null,\n  \"deal_name\": null,\n  \"deal_value\": null,\n  \"deal_currency\": null\n}\n```\n\nOnly classify the threads in the user message. Do NOT classify the examples above.\n\n# Final Rules\n\n1. Return ONLY a valid JSON array\n2. One object per THREAD_ID_INDEX — array length MUST match thread count\n3. When is_deal is false: set category, deal_brand, deal_type, deal_name, deal_value, deal_currency, and main_contact to null\n4. When is_deal is true: deal_type and deal_name are required. deal_brand required when identifiable.\n5. main_contact must be an EXTERNAL person — NEVER the creator. If the creator's email is provided, do NOT use that email in main_contact. Instead, pick the best non-creator contact from the thread (e.g. the inbound sender or a CC'd brand rep). Only set main_contact to null if no external contact exists in the thread at all.\n6. ai_summary is always required for every thread\n7. When uncertain: default to is_deal: true with category \"low_confidence\"\n";
@@ -38100,6 +38163,155 @@ async function insertBatchEvent(
 }
 
 /**
+ * Thread-aware retry layer for email fetching.
+ *
+ * Sits between pipelines and fetchEmails(), adding retry logic that
+ * ensures entire threads are fetched before returning them as complete.
+ */
+
+
+const DEFAULT_MAX_FETCH_ATTEMPTS = 10;
+const DEFAULT_DEADLINE_MS = 200000;
+
+/**
+ * Fetch emails with thread-aware retry logic.
+ *
+ * Calls fetchEmails() in rounds, retrying only failed messageIds.
+ * A thread is "complete" only when ALL its messageIds have been fetched.
+ * A thread is "unfetchable" when any of its messageIds exceeds maxFetchAttempts
+ * or the wall-clock deadline is reached.
+ *
+ * @param {string[]} messageIds — all message IDs to fetch
+ * @param {Map} metaByMessageId — Map with THREAD_ID per messageId
+ * @param {object} opts — fetchEmails opts plus deadlineMs and maxFetchAttempts
+ * @returns {{ completedThreads: object[], unfetchableThreadIds: string[] }}
+ */
+async function fetchThreadEmails(messageIds, metaByMessageId, opts) {
+  const {
+    deadlineMs = DEFAULT_DEADLINE_MS,
+    maxFetchAttempts = DEFAULT_MAX_FETCH_ATTEMPTS,
+    ...fetchOpts
+  } = opts;
+
+  if (!messageIds || messageIds.length === 0) {
+    return { completedThreads: [], unfetchableThreadIds: [] }
+  }
+
+  // Step 1: Build thread map — { threadId: Set<messageId> }
+  const threadMap = new Map();
+  for (const msgId of messageIds) {
+    const meta = metaByMessageId.get(msgId);
+    if (!meta) continue
+    const threadId = meta.THREAD_ID;
+    if (!threadMap.has(threadId)) {
+      threadMap.set(threadId, new Set());
+    }
+    threadMap.get(threadId).add(msgId);
+  }
+
+  // Step 2: Initialize state
+  const fetchedMap = new Map(); // messageId → EmailContent
+  const attemptCounts = new Map(); // messageId → number
+  const completedThreads = [];
+  const unfetchableThreadIds = [];
+  const deadline = Date.now() + deadlineMs;
+
+  let pendingMessageIds = [...messageIds];
+  let round = 0;
+
+  // Step 3: Fetch loop
+  while (pendingMessageIds.length > 0) {
+    round++;
+
+    // 3a. If round > 1: check deadline, apply backoff
+    if (round > 1) {
+      if (Date.now() >= deadline) {
+        console.log(
+          `[fetchThreadEmails] deadline reached after round ${round - 1}` +
+            ` — ${pendingMessageIds.length} messageIds still pending`,
+        );
+        break
+      }
+      const wait = backoffMs(round - 2, { base: 1000, max: 60000 });
+      console.log(
+        `[fetchThreadEmails] round ${round}: retrying ${pendingMessageIds.length} messageIds, backoff ${wait}ms`,
+      );
+      await sleep(wait);
+    } else {
+      const threadCount = threadMap.size;
+      console.log(
+        `[fetchThreadEmails] round 1: fetching ${pendingMessageIds.length} messageIds across ${threadCount} threads`,
+      );
+    }
+
+    // 3b. Call fetchEmails
+    const { fetched, failed } = await fetchEmails(pendingMessageIds, metaByMessageId, fetchOpts);
+
+    // 3c. Store fetched emails
+    for (const email of fetched) {
+      fetchedMap.set(email.messageId, email);
+    }
+
+    // 3d. Increment attemptCounts for ALL messageIds processed this round
+    for (const msgId of pendingMessageIds) {
+      attemptCounts.set(msgId, (attemptCounts.get(msgId) || 0) + 1);
+    }
+
+    // 3e. Check thread completeness
+    for (const [threadId, msgIdSet] of [...threadMap.entries()]) {
+      const allFetched = [...msgIdSet].every((id) => fetchedMap.has(id));
+      if (allFetched) {
+        // Move emails to completedThreads
+        for (const id of msgIdSet) {
+          completedThreads.push(fetchedMap.get(id));
+          fetchedMap.delete(id);
+        }
+        threadMap.delete(threadId);
+      }
+    }
+
+    // 3f. Check for permanently stuck threads
+    for (const [threadId, msgIdSet] of [...threadMap.entries()]) {
+      const hasStuckMsg = [...msgIdSet].some(
+        (id) => !fetchedMap.has(id) && (attemptCounts.get(id) || 0) >= maxFetchAttempts,
+      );
+      if (hasStuckMsg) {
+        unfetchableThreadIds.push(threadId);
+        // Clean up
+        for (const id of msgIdSet) {
+          fetchedMap.delete(id);
+        }
+        threadMap.delete(threadId);
+      }
+    }
+
+    // 3g. Build new pendingMessageIds
+    pendingMessageIds = [];
+    for (const [, msgIdSet] of threadMap) {
+      for (const id of msgIdSet) {
+        if (!fetchedMap.has(id) && (attemptCounts.get(id) || 0) < maxFetchAttempts) {
+          pendingMessageIds.push(id);
+        }
+      }
+    }
+
+    // 3h. If no pending → break
+    if (pendingMessageIds.length === 0) break
+  }
+
+  // Step 4: Remaining threads in threadMap after loop = unfetchable (deadline hit)
+  for (const threadId of threadMap.keys()) {
+    unfetchableThreadIds.push(threadId);
+  }
+
+  console.log(
+    `[fetchThreadEmails] done: ${completedThreads.length} emails from completed threads, ${unfetchableThreadIds.length} unfetchable threads`,
+  );
+
+  return { completedThreads, unfetchableThreadIds }
+}
+
+/**
  * Orchestrator that claims and processes filter batches concurrently
  * until all pending work is exhausted.
  *
@@ -38214,15 +38426,31 @@ async function runFilterPipeline() {
     const syncStateId = rows[0].SYNC_STATE_ID;
     const messageIds = rows.map((r) => r.MESSAGE_ID);
 
-    // b. Call fetchEmails() with format: 'metadata'
-    const emails = await fetchEmails(messageIds, metaByMessageId, {
-      contentFetcherUrl,
-      userId,
-      syncStateId,
-      chunkSize,
-      fetchTimeoutMs,
-      format: 'metadata',
-    });
+    // b. Call fetchThreadEmails() with format: 'metadata'
+    const { completedThreads, unfetchableThreadIds } = await fetchThreadEmails(
+      messageIds,
+      metaByMessageId,
+      {
+        contentFetcherUrl,
+        userId,
+        syncStateId,
+        chunkSize,
+        fetchTimeoutMs,
+        format: 'metadata',
+      },
+    );
+
+    if (unfetchableThreadIds.length > 0) {
+      console.log(
+        `[run-filter-pipeline] ${unfetchableThreadIds.length} unfetchable threads — ` +
+          `throwing to trigger batch-level retry`,
+      );
+      throw new Error(
+        `${unfetchableThreadIds.length} threads unfetchable after content fetch retries`,
+      )
+    }
+
+    const emails = completedThreads;
 
     // c. Apply isRejected() to each email
     const filteredIds = [];
@@ -38478,9 +38706,7 @@ class WriteBatcher {
       await this._executeQueue(queueName, items);
       for (const w of waiters) w.resolve();
     } catch (err) {
-      console.error(
-        `[batcher] ${queueName} flush failed (${items.length} items): ${err.message}`,
-      );
+      console.error(`[batcher] ${queueName} flush failed (${items.length} items): ${err.message}`);
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
         console.error(
@@ -38542,9 +38768,7 @@ class WriteBatcher {
         }
         const uniqueItems = [...dedupMap.values()];
         if (uniqueItems.length < items.length) {
-          console.log(
-            `[batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`,
-          );
+          console.log(`[batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`);
         }
         const cs = this._coreSchema;
         await this._executeSqlFn(contacts.upsert(cs, uniqueItems));
@@ -38731,23 +38955,40 @@ async function runClassifyPipeline() {
     let modelUsed = primaryModel;
 
     if (!threads) {
-      // a. Fetch email content via fetchEmails() (NO format param = full content)
+      // a. Fetch email content via fetchThreadEmails() (NO format param = full content)
       const metaByMessageId = new Map(rows.map((r) => [r.MESSAGE_ID, r]));
       const userId = rows[0].USER_ID;
       const syncStateId = rows[0].SYNC_STATE_ID;
       const messageIds = rows.map((r) => r.MESSAGE_ID);
 
       let allEmails;
+      let fetchUnfetchableThreadIds = [];
       try {
-        allEmails = await fetchEmails(messageIds, metaByMessageId, {
-          contentFetcherUrl,
-          userId,
-          syncStateId,
-          chunkSize,
-          fetchTimeoutMs,
-        });
+        const { completedThreads, unfetchableThreadIds } = await fetchThreadEmails(
+          messageIds,
+          metaByMessageId,
+          {
+            contentFetcherUrl,
+            userId,
+            syncStateId,
+            chunkSize,
+            fetchTimeoutMs,
+          },
+        );
+        allEmails = completedThreads;
+        fetchUnfetchableThreadIds = unfetchableThreadIds;
       } catch {
         allEmails = [];
+      }
+
+      if (fetchUnfetchableThreadIds.length > 0) {
+        console.log(
+          `[run-classify-pipeline] ${fetchUnfetchableThreadIds.length} unfetchable threads — ` +
+            `throwing to trigger batch-level retry`,
+        );
+        throw new Error(
+          `${fetchUnfetchableThreadIds.length} threads unfetchable after content fetch retries`,
+        )
       }
 
       // Handle unfetchable threads — threads with zero emails returned

@@ -316,6 +316,7 @@ CREATE TABLE dealsync_stg_v1.user_sync_settings (
 ```
 
 ### Other dealsync tables (NOT touched by W3 workflows):
+
 - `user_reports` — sync session tracking (legacy, being replaced by sync_states)
 - `user_sync_batches` — batch tracking (legacy, being replaced by stage-based concurrency)
 - `user_report_reprocessing_errors` — error logs

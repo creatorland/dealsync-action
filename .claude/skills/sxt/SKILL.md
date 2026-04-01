@@ -2,7 +2,7 @@
 name: sxt
 description: Use when querying, debugging, or managing Space and Time (SxT) database tables for DealSync/VIPC. Covers auth model (proxy JWT + direct login), biscuit generation, table management scripts, E2E tracking, and schema definitions across email_core_staging and dealsync_stg_v1.
 allowed-tools: Read, Glob, Grep, Bash
-paths: "src/lib/db.js,src/lib/batcher.js,src/sql/**"
+paths: 'src/lib/db.js,src/lib/batcher.js,src/sql/**'
 ---
 
 # Space and Time (SxT) Database Skill

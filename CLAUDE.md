@@ -31,13 +31,20 @@ Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command`
 
 ### Pipeline Commands
 
-**`run-filter-pipeline`** — Claims batches of pending emails, fetches headers from content fetcher, applies 6 static rejection rules from `src/lib/emails.js` (configs in `config/*.json`), updates DEAL_STATES to `pending_classification` or `filter_rejected`. Runs batches concurrently via `runPool()`.
+**`run-filter-pipeline`** — Claims batches of pending emails, fetches headers via `fetchThreadEmails()`, applies 6 static rejection rules from `src/lib/emails.js` (configs in `config/*.json`), updates DEAL_STATES to `pending_classification` or `filter_rejected`. Throws on unfetchable threads to trigger batch-level retry. Runs batches concurrently via `runPool()`.
 
-**`run-classify-pipeline`** — Claims batches of pending_classification emails, fetches bodies, calls AI classification, saves audit checkpoint to AI_EVALUATION_AUDITS, upserts evaluations/deals/contacts, and sets terminal deal states. Uses `WriteBatcher` (`src/lib/batcher.js`) for batched SQL writes. Runs batches concurrently via `runPool()`.
+**`run-classify-pipeline`** — Claims batches of pending_classification emails, fetches full content via `fetchThreadEmails()`, calls AI classification, saves audit checkpoint to AI_EVALUATION_AUDITS, upserts evaluations/deals/contacts, and sets terminal deal states. Throws on unfetchable threads to trigger batch-level retry. Uses `WriteBatcher` (`src/lib/batcher.js`) for batched SQL writes. Runs batches concurrently via `runPool()`.
 
 **`sync-deal-states`** — Paginated sync of deal states.
 
 **`eval` / `eval-compare`** — Evaluation system (see below).
+
+### Content Fetcher (emails.js, fetch-threads.js)
+
+Two-layer fetch architecture for email content:
+
+- **`fetchEmails()`** (`src/lib/emails.js`) — Single-shot, no internal retry. Fires chunks concurrently via `Promise.allSettled`. Handles HTTP 200 (success), 207 (partial failure with per-message errors), 502 (total failure). Returns `{ fetched, failed }`.
+- **`fetchThreadEmails()`** (`src/lib/fetch-threads.js`) — Thread-aware retry layer. Groups emails by thread, retries only failed messageIds (up to 10 attempts, exponential backoff 1s-60s cap, 200s deadline). Never returns incomplete threads — a thread is either fully fetched or marked unfetchable. Both pipelines call this instead of `fetchEmails()` directly.
 
 ### AI Resilience Pipeline (ai.js)
 
