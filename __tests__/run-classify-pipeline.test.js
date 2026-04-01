@@ -32,6 +32,8 @@ jest.unstable_mockModule('../src/lib/db.js', () => ({
   authenticate: mockAuthenticate,
   executeSql: mockExecuteSql,
   acquireRateLimitToken: mockAcquireRateLimitToken,
+  logSqlStats: jest.fn(),
+  getSqlStats: jest.fn(() => ({ calls: 0, totalMs: 0, slowest: 0, slowestSql: '', avgMs: 0 })),
   withTimeout: jest.fn(() => ({
     signal: new AbortController().signal,
     clear: jest.fn(),

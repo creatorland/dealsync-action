@@ -1,7 +1,7 @@
 import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { runPool, insertBatchEvent, sweepStuckRows } from '../lib/pipeline.js'
-import { authenticate, executeSql, acquireRateLimitToken } from '../lib/db.js'
+import { authenticate, executeSql, acquireRateLimitToken, logSqlStats } from '../lib/db.js'
 import { isRejected, fetchEmails } from '../lib/emails.js'
 import {
   sanitizeSchema,
@@ -45,9 +45,13 @@ export async function runFilterPipeline() {
   let totalFiltered = 0
   let totalRejected = 0
 
+  let batchCount = 0
+  const runStart = Date.now()
+
   // 3. Define claimBatch() inline
   async function claimBatch() {
     const batchId = uuidv7()
+    const claimStart = Date.now()
 
     // Atomically claim pending rows
     await exec(dealStatesSql.claimFilterBatch(schema, batchId, batchSize))
@@ -56,7 +60,9 @@ export async function runFilterPipeline() {
     const rows = await exec(dealStatesSql.selectEmailsByBatch(schema, batchId))
 
     const count = rows ? rows.length : 0
-    console.log(`[run-filter-pipeline] claimed ${count} pending rows`)
+    const claimMs = Date.now() - claimStart
+    batchCount++
+    console.log(`[run-filter-pipeline] claimed ${count} pending rows (claimMs=${claimMs}, batch #${batchCount})`)
 
     // If claimed > 0, insert batch event and return
     if (count > 0) {
@@ -113,11 +119,14 @@ export async function runFilterPipeline() {
   // 4. Define processFilterBatch — the per-batch worker
   async function processFilterBatch(batch) {
     const { batch_id, rows } = batch
+    const batchStart = Date.now()
 
     console.log(`[run-filter-pipeline] processing batch ${batch_id} (${rows.length} rows)`)
 
     // Acquire rate limit tokens in bulk (2 UPDATEs + 1 batch event)
+    let t0 = Date.now()
     await acquireRateLimitToken(3)
+    const rlMs = Date.now() - t0
 
     // a. Build metaByMessageId Map from batch.rows
     const metaByMessageId = new Map(rows.map((r) => [r.MESSAGE_ID, r]))
@@ -126,6 +135,7 @@ export async function runFilterPipeline() {
     const messageIds = rows.map((r) => r.MESSAGE_ID)
 
     // b. Call fetchEmails() with format: 'metadata'
+    t0 = Date.now()
     const emails = await fetchEmails(messageIds, metaByMessageId, {
       contentFetcherUrl,
       userId,
@@ -134,6 +144,7 @@ export async function runFilterPipeline() {
       fetchTimeoutMs,
       format: 'metadata',
     })
+    const fetchMs = Date.now() - t0
 
     // c. Apply isRejected() to each email
     const filteredIds = []
@@ -152,6 +163,7 @@ export async function runFilterPipeline() {
     )
 
     // d. UPDATE passed IDs -> pending_classification
+    t0 = Date.now()
     if (filteredIds.length > 0) {
       const quotedIds = filteredIds.map((id) => `'${sanitizeId(id)}'`)
       await execNoRL(
@@ -164,6 +176,7 @@ export async function runFilterPipeline() {
       const quotedIds = rejectedIds.map((id) => `'${sanitizeId(id)}'`)
       await execNoRL(dealStatesSql.updateStatusByIds(schema, quotedIds, STATUS.FILTER_REJECTED))
     }
+    const writeMs = Date.now() - t0
 
     // f. Insert BATCH_EVENTS with eventType: 'complete'
     await insertBatchEvent(execNoRL, schema, {
@@ -172,6 +185,11 @@ export async function runFilterPipeline() {
       batchType: 'filter',
       eventType: 'complete',
     })
+
+    const totalMs = Date.now() - batchStart
+    console.log(
+      `[run-filter-pipeline] batch ${batch_id} done: totalMs=${totalMs} fetchMs=${fetchMs} writeMs=${writeMs} rlMs=${rlMs} rows=${rows.length}`,
+    )
 
     // g. Accumulate totals
     totalFiltered += filteredIds.length
@@ -208,8 +226,10 @@ export async function runFilterPipeline() {
     maxRetries,
   })
 
+  const runMs = Date.now() - runStart
+  logSqlStats()
   console.log(
-    `[run-filter-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}, total_filtered=${totalFiltered}, total_rejected=${totalRejected}, stuck_failed=${stuckFailed}`,
+    `[run-filter-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}, total_filtered=${totalFiltered}, total_rejected=${totalRejected}, stuck_failed=${stuckFailed}, runMs=${runMs}`,
   )
 
   return {

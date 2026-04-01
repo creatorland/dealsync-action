@@ -165,12 +165,29 @@ async function reauthenticate(badToken) {
  * @param {string} sql
  * @param {{ skipRateLimit?: boolean }} opts
  */
+// Simple stats tracker for SQL queries
+const sqlStats = { calls: 0, totalMs: 0, slowest: 0, slowestSql: '' }
+
+export function getSqlStats() {
+  return { ...sqlStats, avgMs: sqlStats.calls ? Math.round(sqlStats.totalMs / sqlStats.calls) : 0 }
+}
+
+export function logSqlStats() {
+  const s = getSqlStats()
+  if (s.calls === 0) return
+  console.log(
+    `[sxt-client] SQL stats: calls=${s.calls} avgMs=${s.avgMs} slowestMs=${s.slowest} slowestSql=${s.slowestSql.slice(0, 80)}`,
+  )
+}
+
 export async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } = {}) {
   if (!skipRateLimit) await acquireRateLimitToken()
 
   // Always prefer cachedJwt (refreshed on 401), fall back to passed jwt
   if (!cachedJwt && jwt) cachedJwt = jwt
   if (!cachedJwt) throw new Error('No JWT available — call authenticate() first')
+
+  const queryStart = Date.now()
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const { signal, clear } = withTimeout()
@@ -200,7 +217,15 @@ export async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = fa
         const body = await resp.text()
         throw new Error(`SxT ${resp.status}: ${body}`)
       }
-      return resp.json()
+      const result = await resp.json()
+      const elapsed = Date.now() - queryStart
+      sqlStats.calls++
+      sqlStats.totalMs += elapsed
+      if (elapsed > sqlStats.slowest) {
+        sqlStats.slowest = elapsed
+        sqlStats.slowestSql = sql
+      }
+      return result
     } catch (err) {
       clear()
       if (err.message.startsWith('SxT ')) throw err // Non-retryable SxT error

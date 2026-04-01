@@ -222,9 +222,13 @@ export async function fetchEmails(messageIds, metaByMessageId, opts) {
 
   const allEmails = []
 
+  const fetchStart = Date.now()
+  let totalChunks = 0
+
   for (let i = 0; i < messageIds.length; i += chunkSize) {
     const chunk = messageIds.slice(i, i + chunkSize)
     const chunkIndex = Math.floor(i / chunkSize) + 1
+    totalChunks++
     let pendingIds = [...chunk]
 
     for (let attempt = 0; attempt < maxRetries && pendingIds.length > 0; attempt++) {
@@ -337,6 +341,11 @@ export async function fetchEmails(messageIds, metaByMessageId, opts) {
   if (allEmails.length === 0 && messageIds.length > 0) {
     throw new Error(`All content fetches failed — 0/${messageIds.length} emails retrieved`)
   }
+
+  const fetchTotalMs = Date.now() - fetchStart
+  console.log(
+    `[email-client] fetch done: ${allEmails.length}/${messageIds.length} emails, ${totalChunks} chunks, ${fetchTotalMs}ms`,
+  )
 
   return allEmails
 }
