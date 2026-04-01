@@ -2,7 +2,8 @@ import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { runPool, insertBatchEvent, sweepStuckRows } from '../lib/pipeline.js'
 import { authenticate, executeSql, acquireRateLimitToken } from '../lib/db.js'
-import { isRejected, fetchEmails } from '../lib/emails.js'
+import { isRejected } from '../lib/emails.js'
+import { fetchThreadEmails } from '../lib/fetch-threads.js'
 import { sanitizeSchema, sanitizeId, STATUS, dealStates as dealStatesSql } from '../lib/sql/index.js'
 
 /**
@@ -120,15 +121,31 @@ export async function runFilterPipeline() {
     const syncStateId = rows[0].SYNC_STATE_ID
     const messageIds = rows.map((r) => r.MESSAGE_ID)
 
-    // b. Call fetchEmails() with format: 'metadata'
-    const emails = await fetchEmails(messageIds, metaByMessageId, {
-      contentFetcherUrl,
-      userId,
-      syncStateId,
-      chunkSize,
-      fetchTimeoutMs,
-      format: 'metadata',
-    })
+    // b. Call fetchThreadEmails() with format: 'metadata'
+    const { completedThreads, unfetchableThreadIds } = await fetchThreadEmails(
+      messageIds,
+      metaByMessageId,
+      {
+        contentFetcherUrl,
+        userId,
+        syncStateId,
+        chunkSize,
+        fetchTimeoutMs,
+        format: 'metadata',
+      },
+    )
+
+    if (unfetchableThreadIds.length > 0) {
+      console.log(
+        `[run-filter-pipeline] ${unfetchableThreadIds.length} unfetchable threads — ` +
+          `throwing to trigger batch-level retry`,
+      )
+      throw new Error(
+        `${unfetchableThreadIds.length} threads unfetchable after content fetch retries`,
+      )
+    }
+
+    const emails = completedThreads
 
     // c. Apply isRejected() to each email
     const filteredIds = []

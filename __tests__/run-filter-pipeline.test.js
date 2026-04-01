@@ -38,12 +38,16 @@ jest.unstable_mockModule('../src/lib/db.js', () => ({
   })),
 }))
 
-// Mock emails (email-client + filter-rules)
-const mockFetchEmails = jest.fn()
+// Mock emails (filter-rules only)
 const mockIsRejected = jest.fn()
 jest.unstable_mockModule('../src/lib/emails.js', () => ({
-  fetchEmails: mockFetchEmails,
   isRejected: mockIsRejected,
+}))
+
+// Mock fetch-threads
+const mockFetchThreadEmails = jest.fn()
+jest.unstable_mockModule('../src/lib/fetch-threads.js', () => ({
+  fetchThreadEmails: mockFetchThreadEmails,
 }))
 
 // Mock pipeline — use real insertBatchEvent but mock runPool
@@ -128,13 +132,16 @@ describe('run-filter-pipeline command', () => {
       expect(batch.count).toBe(3)
       expect(batch.rows).toEqual(rows)
 
-      // Set up fetchEmails to return emails
+      // Set up fetchThreadEmails to return emails
       const emails = rows.map((r) => ({
         messageId: r.MESSAGE_ID,
         id: r.EMAIL_METADATA_ID,
         topLevelHeaders: [{ name: 'From', value: 'alice@company.com' }],
       }))
-      mockFetchEmails.mockResolvedValueOnce(emails)
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: emails,
+        unfetchableThreadIds: [],
+      })
 
       // First email passes, second rejected, third passes
       mockIsRejected.mockReturnValueOnce(false).mockReturnValueOnce(true).mockReturnValueOnce(false)
@@ -176,7 +183,7 @@ describe('run-filter-pipeline command', () => {
   // Calls fetchEmails with correct params (format: 'metadata')
   // ----------------------------------------------------------
 
-  it('calls fetchEmails with correct params including format metadata', async () => {
+  it('calls fetchThreadEmails with correct params including format metadata', async () => {
     mockInputs({ 'chunk-size': '25', 'fetch-timeout-ms': '15000' })
 
     const rows = makeBatchRows(2)
@@ -189,13 +196,14 @@ describe('run-filter-pipeline command', () => {
 
       const batch = await claimFn()
 
-      mockFetchEmails.mockResolvedValueOnce(
-        rows.map((r) => ({
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: rows.map((r) => ({
           messageId: r.MESSAGE_ID,
           id: r.EMAIL_METADATA_ID,
           topLevelHeaders: [],
         })),
-      )
+        unfetchableThreadIds: [],
+      })
       mockIsRejected.mockReturnValue(false)
       mockExecuteSql.mockResolvedValueOnce([]) // UPDATE passed
 
@@ -206,8 +214,8 @@ describe('run-filter-pipeline command', () => {
 
     await runFilterPipeline()
 
-    expect(mockFetchEmails).toHaveBeenCalledTimes(1)
-    const [messageIds, metaMap, opts] = mockFetchEmails.mock.calls[0]
+    expect(mockFetchThreadEmails).toHaveBeenCalledTimes(1)
+    const [messageIds, metaMap, opts] = mockFetchThreadEmails.mock.calls[0]
 
     expect(messageIds).toEqual(['msg-1', 'msg-2'])
     expect(metaMap).toBeInstanceOf(Map)
@@ -243,7 +251,10 @@ describe('run-filter-pipeline command', () => {
         id: r.EMAIL_METADATA_ID,
         topLevelHeaders: [],
       }))
-      mockFetchEmails.mockResolvedValueOnce(emails)
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: emails,
+        unfetchableThreadIds: [],
+      })
 
       // em-1 passes, em-2 rejected, em-3 rejected, em-4 passes
       mockIsRejected
@@ -288,7 +299,10 @@ describe('run-filter-pipeline command', () => {
         id: r.EMAIL_METADATA_ID,
         topLevelHeaders: [],
       }))
-      mockFetchEmails.mockResolvedValueOnce(emails)
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: emails,
+        unfetchableThreadIds: [],
+      })
 
       // em-1 passes, em-2 rejected
       mockIsRejected.mockReturnValueOnce(false).mockReturnValueOnce(true)
@@ -354,7 +368,10 @@ describe('run-filter-pipeline command', () => {
         id: r.EMAIL_METADATA_ID,
         topLevelHeaders: [],
       }))
-      mockFetchEmails.mockResolvedValueOnce(emails)
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: emails,
+        unfetchableThreadIds: [],
+      })
       mockIsRejected.mockReturnValueOnce(false)
       mockExecuteSql.mockResolvedValueOnce([]) // UPDATE passed
 
@@ -408,13 +425,14 @@ describe('run-filter-pipeline command', () => {
 
       const batch1 = await claimFn()
 
-      mockFetchEmails.mockResolvedValueOnce(
-        rows1.map((r) => ({
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: rows1.map((r) => ({
           messageId: r.MESSAGE_ID,
           id: r.EMAIL_METADATA_ID,
           topLevelHeaders: [],
         })),
-      )
+        unfetchableThreadIds: [],
+      })
       // Batch 1: 2 passed, 1 rejected
       mockIsRejected.mockReturnValueOnce(false).mockReturnValueOnce(true).mockReturnValueOnce(false)
       mockExecuteSql.mockResolvedValueOnce([]) // UPDATE passed
@@ -429,13 +447,14 @@ describe('run-filter-pipeline command', () => {
 
       const batch2 = await claimFn()
 
-      mockFetchEmails.mockResolvedValueOnce(
-        rows2.map((r) => ({
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: rows2.map((r) => ({
           messageId: r.MESSAGE_ID,
           id: r.EMAIL_METADATA_ID,
           topLevelHeaders: [],
         })),
-      )
+        unfetchableThreadIds: [],
+      })
       // Batch 2: 1 passed, 1 rejected
       mockIsRejected.mockReturnValueOnce(false).mockReturnValueOnce(true)
       mockExecuteSql.mockResolvedValueOnce([]) // UPDATE passed
@@ -487,8 +506,8 @@ describe('run-filter-pipeline command', () => {
       stuck_failed: 0,
     })
 
-    // No emails should have been fetched
-    expect(mockFetchEmails).not.toHaveBeenCalled()
+    // No threads should have been fetched
+    expect(mockFetchThreadEmails).not.toHaveBeenCalled()
     expect(mockIsRejected).not.toHaveBeenCalled()
   })
 
@@ -661,7 +680,10 @@ describe('run-filter-pipeline command', () => {
         id: r.EMAIL_METADATA_ID,
         topLevelHeaders: [],
       }))
-      mockFetchEmails.mockResolvedValueOnce(emails)
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: emails,
+        unfetchableThreadIds: [],
+      })
       mockIsRejected.mockReturnValue(false)
 
       mockExecuteSql.mockResolvedValueOnce([]) // UPDATE passed (only)
@@ -697,7 +719,10 @@ describe('run-filter-pipeline command', () => {
         id: r.EMAIL_METADATA_ID,
         topLevelHeaders: [],
       }))
-      mockFetchEmails.mockResolvedValueOnce(emails)
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: emails,
+        unfetchableThreadIds: [],
+      })
       mockIsRejected.mockReturnValue(true)
 
       mockExecuteSql.mockResolvedValueOnce([]) // UPDATE rejected (only)
@@ -747,7 +772,10 @@ describe('run-filter-pipeline command', () => {
           topLevelHeaders: [],
         },
       ]
-      mockFetchEmails.mockResolvedValueOnce(emails)
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: emails,
+        unfetchableThreadIds: [],
+      })
       mockIsRejected.mockReturnValueOnce(false)
 
       mockExecuteSql.mockResolvedValueOnce([]) // UPDATE passed
@@ -808,6 +836,37 @@ describe('run-filter-pipeline command', () => {
       expect(typeof firstCall[3]).toBe('string') // sql
 
       return { processed: 0, failed: 0 }
+    })
+
+    await runFilterPipeline()
+  })
+
+  // ----------------------------------------------------------
+  // Throws when threads are unfetchable (triggers batch-level retry)
+  // ----------------------------------------------------------
+
+  it('throws when threads are unfetchable (triggers batch-level retry)', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(2)
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed
+
+      const batch = await claimFn()
+
+      // fetchThreadEmails returns unfetchable threads
+      mockFetchThreadEmails.mockResolvedValueOnce({
+        completedThreads: [],
+        unfetchableThreadIds: ['thread-1'],
+      })
+
+      // processFilterBatch should throw
+      await expect(workerFn(batch, { attempt: 0 })).rejects.toThrow(/unfetchable/)
+
+      return { processed: 0, failed: 1 }
     })
 
     await runFilterPipeline()
