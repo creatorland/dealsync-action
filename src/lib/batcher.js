@@ -175,7 +175,9 @@ export class WriteBatcher {
       await this._executeQueue(queueName, items)
       for (const w of waiters) w.resolve()
     } catch (err) {
-      console.error(`[batcher] ${queueName} flush failed (${items.length} items): ${err.message}`)
+      console.error(
+        `[batcher] ${queueName} flush failed (${items.length} items): ${err.message}`,
+      )
       // If combined flush fails, try each item individually to isolate the bad one
       if (items.length > 1 && err.message.includes('SxT 400')) {
         console.error(
@@ -237,7 +239,9 @@ export class WriteBatcher {
         }
         const uniqueItems = [...dedupMap.values()]
         if (uniqueItems.length < items.length) {
-          console.log(`[batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`)
+          console.log(
+            `[batcher] coreContacts deduped: ${items.length} → ${uniqueItems.length}`,
+          )
         }
         const cs = this._coreSchema
         await this._executeSqlFn(contactsSql.upsert(cs, uniqueItems))

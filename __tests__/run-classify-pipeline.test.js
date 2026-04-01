@@ -38,10 +38,10 @@ jest.unstable_mockModule('../src/lib/db.js', () => ({
   })),
 }))
 
-// Mock fetch-threads
-const mockFetchThreadEmails = jest.fn()
-jest.unstable_mockModule('../src/lib/fetch-threads.js', () => ({
-  fetchThreadEmails: mockFetchThreadEmails,
+// Mock emails
+const mockFetchEmails = jest.fn()
+jest.unstable_mockModule('../src/lib/emails.js', () => ({
+  fetchEmails: mockFetchEmails,
 }))
 
 // Mock ai
@@ -264,10 +264,7 @@ describe('run-classify-pipeline command', () => {
         threadId: r.THREAD_ID,
         body: 'test email body',
       }))
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: emails,
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce(emails)
       mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[{"thread_id":"thread-1"}]' })
@@ -342,7 +339,7 @@ describe('run-classify-pipeline command', () => {
     await runClassifyPipeline()
 
     // AI should NOT have been called
-    expect(mockFetchThreadEmails).not.toHaveBeenCalled()
+    expect(mockFetchEmails).not.toHaveBeenCalled()
     expect(mockCallModel).not.toHaveBeenCalled()
     expect(mockBuildPrompt).not.toHaveBeenCalled()
     expect(mockParseAndValidate).not.toHaveBeenCalled()
@@ -381,7 +378,7 @@ describe('run-classify-pipeline command', () => {
     })
 
     // No pipeline work should have been done
-    expect(mockFetchThreadEmails).not.toHaveBeenCalled()
+    expect(mockFetchEmails).not.toHaveBeenCalled()
     expect(mockCallModel).not.toHaveBeenCalled()
   })
 
@@ -389,7 +386,7 @@ describe('run-classify-pipeline command', () => {
   // Correct params passed to each step
   // ----------------------------------------------------------
 
-  it('passes correct params to fetchThreadEmails (no format = full content)', async () => {
+  it('passes correct params to fetchEmails (no format = full content)', async () => {
     mockInputs({ 'chunk-size': '15', 'fetch-timeout-ms': '60000' })
 
     const rows = makeBatchRows(2)
@@ -412,10 +409,7 @@ describe('run-classify-pipeline command', () => {
         threadId: r.THREAD_ID,
         body: 'test',
       }))
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: emails,
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce(emails)
       mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
@@ -431,8 +425,8 @@ describe('run-classify-pipeline command', () => {
 
     await runClassifyPipeline()
 
-    expect(mockFetchThreadEmails).toHaveBeenCalledTimes(1)
-    const [messageIds, metaMap, opts] = mockFetchThreadEmails.mock.calls[0]
+    expect(mockFetchEmails).toHaveBeenCalledTimes(1)
+    const [messageIds, metaMap, opts] = mockFetchEmails.mock.calls[0]
 
     expect(messageIds).toEqual(['msg-1', 'msg-2'])
     expect(metaMap).toBeInstanceOf(Map)
@@ -463,10 +457,9 @@ describe('run-classify-pipeline command', () => {
 
       mockExecuteSql.mockResolvedValueOnce([]) // no existing audit
 
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: [{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }],
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
+      ])
       mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({
         systemPrompt: 'system-prompt',
@@ -538,10 +531,9 @@ describe('run-classify-pipeline command', () => {
 
       mockExecuteSql.mockResolvedValueOnce([]) // no existing audit
 
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: [{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }],
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
+      ])
       mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
 
@@ -588,10 +580,9 @@ describe('run-classify-pipeline command', () => {
 
       mockExecuteSql.mockResolvedValueOnce([]) // no existing audit
 
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: [{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }],
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
+      ])
       mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
 
@@ -914,10 +905,9 @@ describe('run-classify-pipeline command', () => {
       mockExecuteSql.mockResolvedValueOnce([])
 
       // AI
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: [{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }],
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
+      ])
 
       // selectByThreadIds for already-evaluated skip check
       mockExecuteSql.mockResolvedValueOnce([])
@@ -1068,10 +1058,9 @@ describe('run-classify-pipeline command', () => {
 
       mockExecuteSql.mockResolvedValueOnce([]) // no existing audit
 
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: [{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }],
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
+      ])
 
       // selectByThreadIds for already-evaluated skip check
       mockExecuteSql.mockResolvedValueOnce([])
@@ -1183,10 +1172,9 @@ describe('run-classify-pipeline command', () => {
       mockExecuteSql.mockResolvedValueOnce([]).mockResolvedValueOnce(rows)
       const batch = await claimFn()
       mockExecuteSql.mockResolvedValueOnce([])
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: [{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-xyz', body: 'hi' }],
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-xyz', body: 'hi' },
+      ])
       mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
@@ -1248,10 +1236,9 @@ describe('run-classify-pipeline command', () => {
       mockExecuteSql.mockResolvedValueOnce([]).mockResolvedValueOnce(rows)
       const batch = await claimFn()
       mockExecuteSql.mockResolvedValueOnce([])
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: [{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }],
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
+      ])
       mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
@@ -1295,10 +1282,7 @@ describe('run-classify-pipeline command', () => {
         body: 'test email body',
         date: '2025-01-01T00:00:00Z',
       }))
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: emails,
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce(emails)
 
       // Query existing deals — both threads have deals with NEWER UPDATED_AT
       mockExecuteSql.mockResolvedValueOnce([
@@ -1387,10 +1371,7 @@ describe('run-classify-pipeline command', () => {
         body: 'test email body',
         date: '2025-06-01T00:00:00Z',
       }))
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: emails,
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce(emails)
 
       // Only thread-1 has existing deal with newer UPDATED_AT
       mockExecuteSql.mockResolvedValueOnce([
@@ -1456,10 +1437,7 @@ describe('run-classify-pipeline command', () => {
         body: 'test email body',
         date: '2026-06-01T00:00:00Z',
       }))
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: emails,
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce(emails)
 
       // Both threads have deals but with OLDER UPDATED_AT
       mockExecuteSql.mockResolvedValueOnce([
@@ -1515,10 +1493,7 @@ describe('run-classify-pipeline command', () => {
         body: 'test email body',
         // no date field
       }))
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: emails,
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce(emails)
 
       // Both threads have existing deals
       mockExecuteSql.mockResolvedValueOnce([
@@ -1583,10 +1558,9 @@ describe('run-classify-pipeline command', () => {
       mockExecuteSql.mockResolvedValueOnce([]).mockResolvedValueOnce(rows)
       const batch = await claimFn()
       mockExecuteSql.mockResolvedValueOnce([])
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: [{ messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' }],
-        unfetchableThreadIds: [],
-      })
+      mockFetchEmails.mockResolvedValueOnce([
+        { messageId: 'msg-1', id: 'em-1', threadId: 'thread-1', body: 'hi' },
+      ])
       mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
       mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
       mockCallModel.mockResolvedValueOnce({ content: '[]' })
@@ -1599,38 +1573,5 @@ describe('run-classify-pipeline command', () => {
     await runClassifyPipeline()
 
     expect(mockBatcherInstance.pushContactDeletes).not.toHaveBeenCalled()
-  })
-
-  // ----------------------------------------------------------
-  // Throws when threads are unfetchable (triggers batch-level retry)
-  // ----------------------------------------------------------
-
-  it('throws when threads are unfetchable (triggers batch-level retry)', async () => {
-    mockInputs()
-
-    const rows = makeBatchRows(2)
-
-    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
-      mockExecuteSql
-        .mockResolvedValueOnce([]) // UPDATE claim
-        .mockResolvedValueOnce(rows) // SELECT claimed
-
-      const batch = await claimFn()
-
-      mockExecuteSql.mockResolvedValueOnce([]) // no existing audit
-
-      // fetchThreadEmails returns unfetchable threads
-      mockFetchThreadEmails.mockResolvedValueOnce({
-        completedThreads: [],
-        unfetchableThreadIds: ['thread-1'],
-      })
-
-      // processClassifyBatch should throw
-      await expect(workerFn(batch, { attempt: 0 })).rejects.toThrow(/unfetchable/)
-
-      return { processed: 0, failed: 1 }
-    })
-
-    await runClassifyPipeline()
   })
 })
