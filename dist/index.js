@@ -38784,6 +38784,7 @@ async function runClassifyPipeline() {
   // =========================================================================
 
   async function claimBatch() {
+    const claimStart = Date.now();
     const batchId = v7();
 
     // Atomic UPDATE for pending_classification threads (thread-aware, NOT EXISTS for pending/filtering)
@@ -38793,7 +38794,7 @@ async function runClassifyPipeline() {
     const rows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, batchId));
 
     const count = rows ? rows.length : 0;
-    console.log(`[run-classify-pipeline] claimed ${count} pending rows`);
+    console.log(`[run-classify-pipeline] claimed ${count} pending rows in ${Date.now() - claimStart}ms`);
 
     // If claimed > 0, insert batch event and return
     if (count > 0) {
@@ -38855,12 +38856,16 @@ async function runClassifyPipeline() {
     const { batch_id: batchId, rows } = batch;
     const creatorEmail = rows[0].CREATOR_EMAIL || '';
     const alreadyEvaluatedThreadIds = new Set();
+    const batchStart = Date.now();
+    const timings = {};
 
     console.log(`[run-classify-pipeline] processing batch ${batchId} (${rows.length} rows)`);
 
     // Acquire rate limit tokens in bulk for this batch attempt
     // ~2 individual SQL calls (audit check + audit insert) — batcher handles the rest
+    let t0 = Date.now();
     await acquireRateLimitToken(2);
+    timings.rateLimit = Date.now() - t0;
 
     // -----------------------------------------------------------------------
     // Step 2: Get or create audit — check for existing audit (retry case)
@@ -38868,6 +38873,7 @@ async function runClassifyPipeline() {
 
     let threads = null;
 
+    t0 = Date.now();
     const existingAudit = await execNoRL(audits.selectByBatch(schema, batchId));
 
     if (existingAudit && existingAudit.length > 0 && existingAudit[0].AI_EVALUATION) {
@@ -38888,6 +38894,8 @@ async function runClassifyPipeline() {
 
     let modelUsed = primaryModel;
 
+    timings.auditCheck = Date.now() - t0;
+
     if (!threads) {
       // a. Fetch email content via fetchEmails() (NO format param = full content)
       const metaByMessageId = new Map(rows.map((r) => [r.MESSAGE_ID, r]));
@@ -38896,6 +38904,7 @@ async function runClassifyPipeline() {
       const messageIds = rows.map((r) => r.MESSAGE_ID);
 
       let allEmails;
+      t0 = Date.now();
       try {
         allEmails = await fetchEmails(messageIds, metaByMessageId, {
           contentFetcherUrl,
@@ -38907,6 +38916,10 @@ async function runClassifyPipeline() {
       } catch {
         allEmails = [];
       }
+      timings.fetch = Date.now() - t0;
+      console.log(
+        `[run-classify-pipeline] batch ${batchId}: fetched ${allEmails.length}/${messageIds.length} emails in ${timings.fetch}ms`,
+      );
 
       // Handle unfetchable threads — threads with zero emails returned
       const fetchedThreadIds = new Set(allEmails.map((e) => e.threadId).filter(Boolean));
@@ -39030,6 +39043,7 @@ async function runClassifyPipeline() {
       }
 
       // b. Build prompt via buildPrompt(emails)
+      t0 = Date.now();
       const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails, { creatorEmail });
 
       // c. 4-layer AI resilience pipeline
@@ -39042,14 +39056,18 @@ async function runClassifyPipeline() {
 
       // --- Layer 0: Primary model call ---
       let primaryRaw;
+      const aiStart = Date.now();
       try {
         const result = await callModel(primaryModel, classifyMessages, {
           temperature: 0,
           ...aiOpts,
         });
         primaryRaw = result.content;
+        timings.primaryModel = Date.now() - aiStart;
+        console.log(`[run-classify-pipeline] batch ${batchId}: primary model responded in ${timings.primaryModel}ms`);
       } catch (primaryApiError) {
-        console.log(`[run-classify-pipeline] Primary model API failed: ${primaryApiError.message}`);
+        timings.primaryModel = Date.now() - aiStart;
+        console.log(`[run-classify-pipeline] Primary model API failed after ${timings.primaryModel}ms: ${primaryApiError.message}`);
         primaryRaw = null;
       }
 
@@ -39063,6 +39081,7 @@ async function runClassifyPipeline() {
 
           // --- Layer 2: Corrective retry (same model, send broken output back) ---
           try {
+            const correctiveStart = Date.now();
             console.log(`[run-classify-pipeline] Attempting corrective retry with ${primaryModel}`);
             const correctiveMessages = [
               ...classifyMessages,
@@ -39079,8 +39098,9 @@ async function runClassifyPipeline() {
             const correctedRaw = corrected.content;
             threads = parseAndValidate(correctedRaw, threadOrder);
             modelUsed = `${primaryModel}(corrective-retry)`;
+            timings.correctiveRetry = Date.now() - correctiveStart;
             console.log(
-              `[run-classify-pipeline] Corrective retry succeeded: ${threads.length} threads`,
+              `[run-classify-pipeline] Corrective retry succeeded in ${timings.correctiveRetry}ms: ${threads.length} threads`,
             );
           } catch (correctiveError) {
             console.log(
@@ -39092,6 +39112,7 @@ async function runClassifyPipeline() {
 
       // --- Layer 3: Fallback model ---
       if (!threads) {
+        const fallbackStart = Date.now();
         console.log(`[run-classify-pipeline] Falling back to ${fallbackModel}`);
         modelUsed = fallbackModel;
         try {
@@ -39101,7 +39122,8 @@ async function runClassifyPipeline() {
           });
           const fallbackRaw = fallbackResult.content;
           threads = parseAndValidate(fallbackRaw, threadOrder);
-          console.log(`[run-classify-pipeline] Fallback model succeeded: ${threads.length} threads`);
+          timings.fallbackModel = Date.now() - fallbackStart;
+          console.log(`[run-classify-pipeline] Fallback model succeeded in ${timings.fallbackModel}ms: ${threads.length} threads`);
         } catch (fallbackError) {
           console.error(
             `[run-classify-pipeline] All layers exhausted. Primary and fallback both failed.`,
@@ -39112,7 +39134,10 @@ async function runClassifyPipeline() {
         }
       }
 
+      timings.aiTotal = Date.now() - t0;
+
       // d. Save audit checkpoint
+      t0 = Date.now();
       const auditId = v7();
       const aiOutput = { threads };
       const evaluation = sanitizeString(JSON.stringify(aiOutput));
@@ -39130,7 +39155,8 @@ async function runClassifyPipeline() {
             evaluation,
           }),
         );
-        console.log(`[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed})`);
+        timings.auditSave = Date.now() - t0;
+        console.log(`[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`);
       } catch (err) {
         if (
           err.message.includes('integrity constraint') ||
@@ -39150,6 +39176,7 @@ async function runClassifyPipeline() {
     // Step 4: Save evals via batcher
     // -----------------------------------------------------------------------
 
+    t0 = Date.now();
     const evalValues = threads.map((thread) => {
       const threadId = sanitizeId(thread.thread_id);
       return `('${v7()}', '${threadId}', '', '${sanitizeString(thread.category || '')}', '${sanitizeString(thread.ai_summary || '')}', ${thread.is_deal ? 'true' : 'false'}, ${(thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'}, ${typeof thread.ai_score === 'number' ? thread.ai_score : 0}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
@@ -39330,6 +39357,8 @@ async function runClassifyPipeline() {
       await execNoRL(dealStates.updateStatusByIds(schema, quotedNDIds, STATUS.NOT_DEAL));
     }
 
+    timings.dbWrites = Date.now() - t0;
+
     console.log(
       `[run-classify-pipeline] states: ${dealEmailIds.length} -> deal, ${notDealEmailIds.length} -> not_deal`,
     );
@@ -39342,7 +39371,10 @@ async function runClassifyPipeline() {
       `('${batchId}', '${batchId}', 'classify', 'complete', CURRENT_TIMESTAMP)`,
     ]);
 
-    console.log(`[run-classify-pipeline] batch ${batchId} complete`);
+    timings.total = Date.now() - batchStart;
+    console.log(
+      `[run-classify-pipeline] batch ${batchId} complete — timings: ${JSON.stringify(timings)}`,
+    );
   }
 
   // =========================================================================
