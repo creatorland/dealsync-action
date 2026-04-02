@@ -23,7 +23,7 @@ export async function runSyncDealStates() {
   const apiUrl = core.getInput('api-url')
   const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
-  const emailCoreSchema = sanitizeSchema(core.getInput('email-core-schema') || 'EMAIL_CORE_STAGING')
+  const emailCoreSchema = sanitizeSchema(core.getInput('email_core_schema') || 'EMAIL_CORE_STAGING')
 
   console.log(
     `[sync-deal-states] syncing from ${emailCoreSchema}.EMAIL_METADATA → ${schema}.DEAL_STATES`,

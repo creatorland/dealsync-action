@@ -28044,7 +28044,7 @@ async function runSyncDealStates() {
   const apiUrl = coreExports.getInput('api-url');
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const emailCoreSchema = sanitizeSchema(coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING');
+  const emailCoreSchema = sanitizeSchema(coreExports.getInput('email_core_schema') || 'EMAIL_CORE_STAGING');
 
   console.log(
     `[sync-deal-states] syncing from ${emailCoreSchema}.EMAIL_METADATA → ${schema}.DEAL_STATES`,
@@ -38888,7 +38888,7 @@ async function runClassifyPipeline() {
   const apiUrl = coreExports.getInput('api-url');
   const biscuit = coreExports.getInput('biscuit');
   const schema = sanitizeSchema(coreExports.getInput('schema'));
-  const coreSchema = sanitizeSchema(coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING');
+  const coreSchema = sanitizeSchema(coreExports.getInput('email_core_schema') || 'EMAIL_CORE_STAGING');
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
   const emailProvider = coreExports.getInput('email-provider') || 'content-fetcher';
   const emailServiceUrl = coreExports.getInput('email-service-url');
