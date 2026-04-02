@@ -35184,6 +35184,11 @@ function buildThreadData(emails) {
       const rawBody = email.body || email.replyBody || '';
       const body = sanitizeEmailBody(rawBody) || '[no body]';
       section += `${body}\n\n`;
+      if (rawBody.length > 5000) {
+        console.log(
+          `[ai-prompt] thread=${threadId} msg=${i + 1}: rawBody=${rawBody.length} chars → sanitized=${body.length} chars`,
+        );
+      }
     });
 
     section += '===\n';
@@ -35203,6 +35208,12 @@ function buildPrompt(emails, { systemOverride, userOverride, creatorEmail } = {}
   const userPrompt = (userOverride || classificationInstructions)
     .replace('{{THREAD_DATA}}', creatorLine + threadData)
     .trim();
+
+  console.log(
+    `[ai-prompt] ${emails.length} emails, ${threadOrder.length} threads, ` +
+      `system=${systemPrompt.length} chars, user=${userPrompt.length} chars, ` +
+      `threadData=${threadData.length} chars`,
+  );
 
   return { systemPrompt, userPrompt, threadOrder }
 }
