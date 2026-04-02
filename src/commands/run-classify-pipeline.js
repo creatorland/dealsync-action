@@ -28,7 +28,7 @@ export async function runClassifyPipeline() {
   const apiUrl = core.getInput('api-url')
   const biscuit = core.getInput('biscuit')
   const schema = sanitizeSchema(core.getInput('schema'))
-  const coreSchema = sanitizeSchema(core.getInput('email_core_schema') || 'EMAIL_CORE_STAGING')
+  const coreSchema = sanitizeSchema(core.getInput('email-core-schema') || 'EMAIL_CORE_STAGING')
   const contentFetcherUrl = core.getInput('content-fetcher-url')
   const emailProvider = core.getInput('email-provider') || 'content-fetcher'
   const emailServiceUrl = core.getInput('email-service-url')
