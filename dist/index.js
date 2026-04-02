@@ -34918,59 +34918,119 @@ function enrichAndCollect(emails, allEmails, metaByMessageId) {
  * Fetch emails from the email-service API using compat format.
  * Returns the same shape as the content-fetcher for pipeline compatibility.
  */
+/**
+ * Fetch emails from the email-service API using compat format.
+ * Uses the same chunked retry logic as content-fetcher since the
+ * email-service now returns matching HTTP status codes (200/207/502).
+ */
 async function fetchEmailsFromService(messageIds, metaByMessageId, opts) {
-  const { emailServiceUrl, userId, fetchTimeoutMs, format } = opts;
+  const { emailServiceUrl, userId, fetchTimeoutMs, chunkSize, maxRetries = DEFAULT_MAX_RETRIES, format } = opts;
 
   if (!messageIds || messageIds.length === 0) return []
 
+  const allEmails = [];
   const fetchStart = Date.now();
-  const { signal, clear } = withTimeout(fetchTimeoutMs);
+  let totalChunks = 0;
 
-  try {
-    const resp = await fetch(`${emailServiceUrl}/v1/emails/messages`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        requests: [{ user_id: userId, ids: messageIds }],
-        format: format === 'metadata' ? 'compat' : 'compat',
-      }),
-      signal,
-    });
-    clear();
+  for (let i = 0; i < messageIds.length; i += chunkSize) {
+    const chunk = messageIds.slice(i, i + chunkSize);
+    const chunkIndex = Math.floor(i / chunkSize) + 1;
+    totalChunks++;
+    let pendingIds = [...chunk];
 
-    if (!resp.ok) {
-      throw new Error(`email-service HTTP ${resp.status}: ${await resp.text()}`)
+    for (let attempt = 0; attempt < maxRetries && pendingIds.length > 0; attempt++) {
+      try {
+        const { signal, clear } = withTimeout(fetchTimeoutMs);
+        try {
+          const resp = await fetch(`${emailServiceUrl}/v1/emails/messages`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              requests: [{ user_id: userId, ids: pendingIds }],
+              format: 'compat',
+            }),
+            signal,
+          });
+          clear();
+
+          // 502 = total failure
+          if (resp.status === 502) {
+            let failedIds = pendingIds;
+            try {
+              const errBody = await resp.json();
+              if (errBody.errors && Array.isArray(errBody.errors)) {
+                failedIds = errBody.errors.map((e) => e.messageId).filter(Boolean);
+                if (failedIds.length === 0) failedIds = pendingIds;
+              }
+            } catch {}
+            pendingIds = failedIds;
+            console.log(
+              `[email-service] 502 — ${pendingIds.length} messageIds to retry ` +
+                `(chunk ${chunkIndex}, attempt ${attempt + 1}/${maxRetries})`,
+            );
+            if (attempt < maxRetries - 1) {
+              await sleep(backoffMs(attempt, { base: 1000 }));
+            }
+            continue
+          }
+
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}: ${await resp.text()}`)
+          }
+
+          const result = await resp.json();
+
+          // 207 = partial success
+          if (resp.status === 207) {
+            const successEmails = result.data || [];
+            const errors = result.errors || [];
+            enrichAndCollect(successEmails, allEmails, metaByMessageId);
+            const failedIds = errors.map((e) => e.messageId).filter(Boolean);
+            if (failedIds.length > 0) {
+              pendingIds = failedIds;
+              console.log(
+                `[email-service] 207 partial — ${successEmails.length} ok, ${failedIds.length} failed ` +
+                  `(chunk ${chunkIndex}, attempt ${attempt + 1}/${maxRetries})`,
+              );
+              if (attempt < maxRetries - 1) {
+                await sleep(backoffMs(attempt, { base: 1000 }));
+              }
+              continue
+            }
+            pendingIds = [];
+            continue
+          }
+
+          // 200 = all success
+          const emails = result.data || result;
+          enrichAndCollect(emails, allEmails, metaByMessageId);
+          pendingIds = [];
+        } catch (err) {
+          clear();
+          throw err
+        }
+      } catch (err) {
+        console.log(
+          `[email-service] chunk ${chunkIndex} fetch failed ` +
+            `(attempt ${attempt + 1}/${maxRetries}): ${err.message}`,
+        );
+        if (attempt < maxRetries - 1) {
+          await sleep(backoffMs(attempt, { base: 1000 }));
+        }
+      }
     }
-
-    const result = await resp.json();
-    const allEmails = [];
-
-    for (const item of result.data || []) {
-      const email = item.payload;
-      enrichAndCollect([email], allEmails, metaByMessageId);
-    }
-
-    const failed = (result.errors || []).map((e) => e.message_id);
-    if (failed.length > 0) {
-      console.log(`[email-service] ${failed.length} messages failed: ${failed.join(', ')}`);
-    }
-
-    if (allEmails.length === 0 && messageIds.length > 0) {
-      throw new Error(`All email-service fetches failed — 0/${messageIds.length} emails retrieved`)
-    }
-
-    const fetchTotalMs = Date.now() - fetchStart;
-    const cached = result.meta?.cached || 0;
-    console.log(
-      `[email-service] fetch done: ${allEmails.length}/${messageIds.length} emails ` +
-        `(${cached} cached), ${fetchTotalMs}ms`,
-    );
-
-    return allEmails
-  } catch (err) {
-    clear();
-    throw err
   }
+
+  if (allEmails.length === 0 && messageIds.length > 0) {
+    throw new Error(`All email-service fetches failed — 0/${messageIds.length} emails retrieved`)
+  }
+
+  const fetchTotalMs = Date.now() - fetchStart;
+  console.log(
+    `[email-service] fetch done: ${allEmails.length}/${messageIds.length} emails, ${totalChunks} chunks, ${fetchTotalMs}ms`,
+  );
+
+  return allEmails
 }
 
 /**
