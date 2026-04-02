@@ -34953,11 +34953,21 @@ async function fetchEmailsFromService(messageIds, metaByMessageId, opts) {
       try {
         const { signal, clear } = withTimeout(fetchTimeoutMs);
         try {
+          // Group message IDs by user_id from metadata (batch can have mixed users)
+          const byUser = {};
+          for (const id of pendingIds) {
+            const meta = metaByMessageId.get(id);
+            const uid = meta?.USER_ID || userId;
+            if (!byUser[uid]) byUser[uid] = [];
+            byUser[uid].push(id);
+          }
+          const requests = Object.entries(byUser).map(([user_id, ids]) => ({ user_id, ids }));
+
           const resp = await fetch(`${emailServiceUrl}/v1/emails/messages`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              requests: [{ user_id: userId, ids: pendingIds }],
+              requests,
               format: 'compat',
             }),
             signal,
