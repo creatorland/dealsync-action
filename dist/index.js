@@ -28053,11 +28053,14 @@ async function runSyncDealStates() {
   const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
 
   // 1. Sync new rows from email_metadata (chunked to avoid SxT timeout)
+  const syncSql = dealStates.syncFromEmailMetadata(schema, emailCoreSchema);
+  console.log(`[sync-deal-states] SQL: ${syncSql}`);
   let totalSynced = 0;
   let chunk = 0;
   while (true) {
     chunk++;
-    const result = await exec(dealStates.syncFromEmailMetadata(schema, emailCoreSchema));
+    const result = await exec(syncSql);
+    console.log(`[sync-deal-states] chunk ${chunk} raw result: ${JSON.stringify(result)}`);
     const synced = result?.[0]?.UPDATED ?? 0;
     totalSynced += synced;
     console.log(`[sync-deal-states] chunk ${chunk}: synced ${synced} rows (total: ${totalSynced})`);
