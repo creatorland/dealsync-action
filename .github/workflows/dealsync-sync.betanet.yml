@@ -18,7 +18,7 @@ jobs:
       - id: sync
         name: Sync deal states from email metadata
         timeout-minutes: 60
-        uses: creatorland/dealsync-action@7d6c8d0
+        uses: creatorland/dealsync-action@3c8b923
         with:
           command: sync-deal-states
           sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
