@@ -28060,12 +28060,12 @@ async function insertBatchEvent(
   await executeSqlFn(batchEvents.upsert(schema, triggerHash, batchId, batchType, eventType));
 }
 
-const DEAD_LETTER_EVENT_COUNT = 3;
+const DEAD_LETTER_EVENT_COUNT = parseInt(coreExports.getInput('pipeline-max-retries') || '2', 10);
 const STUCK_INTERVAL_MINUTES = 5;
 
 /**
  * Sync email_metadata into deal_states — insert missing rows with status='pending'.
- * Also marks batches as failed when they have >= 3 batch_events (retried 3+ times)
+ * Also marks batches as failed when they have >= pipeline-max-retries batch_events
  * and are still stuck in an active status.
  */
 async function runSyncDealStates() {
@@ -28098,7 +28098,7 @@ async function runSyncDealStates() {
   }
   const count = totalSynced;
 
-  // 2. Dead-letter batches stuck in active statuses with >= 3 batch_events
+  // 2. Dead-letter batches stuck in active statuses with >= maxRetries batch_events
   const filterFailed = await deadLetterExhausted(exec, schema, STATUS.FILTERING, 'filter');
   const classifyFailed = await deadLetterExhausted(exec, schema, STATUS.CLASSIFYING, 'classify');
 
