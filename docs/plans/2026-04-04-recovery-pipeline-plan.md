@@ -331,13 +331,13 @@ on:
 
 jobs:
   recovery:
-    timeout-minutes: 10
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     environment: '0x12c3f02f05146db270f75d2abda0557e3250598c1d7029bd221ec3d028bbba53'
     steps:
       - id: recovery
         name: Run recovery pipeline
-        timeout-minutes: 10
+        timeout-minutes: 60
         uses: creatorland/dealsync-action@COMMIT_HASH
         with:
           command: run-recovery-pipeline
