@@ -69,15 +69,23 @@ export async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries, on
 
   while (true) {
     if (active.size < maxConcurrent) {
-      const batch = await claimFn()
-      if (batch === null) {
+      const result = await claimFn()
+      if (result === null) {
         if (active.size === 0) break
         await Promise.race(active)
         continue
       }
-      const worker = runWorker(batch)
-      active.add(worker)
-      worker.finally(() => active.delete(worker))
+      // Normalize to array — claimFn can return a single batch or an array of sub-batches
+      const batches = Array.isArray(result) ? result : [result]
+      for (const batch of batches) {
+        // Wait for a slot if pool is full
+        while (active.size >= maxConcurrent) {
+          await Promise.race(active)
+        }
+        const worker = runWorker(batch)
+        active.add(worker)
+        worker.finally(() => active.delete(worker))
+      }
     } else {
       await Promise.race(active)
     }

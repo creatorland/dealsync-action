@@ -216,6 +216,60 @@ describe('runPool', () => {
     expect(workerFn).not.toHaveBeenCalled()
   })
 
+  it('dispatches each sub-batch when claimFn returns an array', async () => {
+    let callNum = 0
+    const claimFn = jest.fn(async () => {
+      callNum++
+      if (callNum === 1) {
+        return [
+          { batch_id: 'sub-1', attempts: 0, rows: [] },
+          { batch_id: 'sub-2', attempts: 0, rows: [] },
+          { batch_id: 'sub-3', attempts: 0, rows: [] },
+        ]
+      }
+      return null
+    })
+    const workerFn = jest.fn(async () => {})
+
+    const results = await runPool(claimFn, workerFn, { maxConcurrent: 5, maxRetries: 3 })
+
+    expect(results).toEqual({ processed: 3, failed: 0 })
+    expect(workerFn).toHaveBeenCalledTimes(3)
+    expect(workerFn).toHaveBeenCalledWith(
+      expect.objectContaining({ batch_id: 'sub-1' }),
+      { attempt: 0 },
+    )
+    expect(workerFn).toHaveBeenCalledWith(
+      expect.objectContaining({ batch_id: 'sub-2' }),
+      { attempt: 0 },
+    )
+    expect(workerFn).toHaveBeenCalledWith(
+      expect.objectContaining({ batch_id: 'sub-3' }),
+      { attempt: 0 },
+    )
+  })
+
+  it('handles mix of array and single batch returns from claimFn', async () => {
+    let callNum = 0
+    const claimFn = jest.fn(async () => {
+      callNum++
+      if (callNum === 1) {
+        return [
+          { batch_id: 'sub-1', attempts: 0 },
+          { batch_id: 'sub-2', attempts: 0 },
+        ]
+      }
+      if (callNum === 2) return { batch_id: 'single-1', attempts: 0 }
+      return null
+    })
+    const workerFn = jest.fn(async () => {})
+
+    const results = await runPool(claimFn, workerFn, { maxConcurrent: 5, maxRetries: 3 })
+
+    expect(results).toEqual({ processed: 3, failed: 0 })
+    expect(workerFn).toHaveBeenCalledTimes(3)
+  })
+
   it('invokes onDeadLetter after worker exhausts retries', async () => {
     const onDeadLetter = jest.fn().mockResolvedValue(undefined)
     const batches = [{ batch_id: 'b-fail', attempts: 0 }]
