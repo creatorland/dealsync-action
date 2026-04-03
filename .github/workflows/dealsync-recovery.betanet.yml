@@ -14,7 +14,7 @@ jobs:
       - id: recovery
         name: Run recovery pipeline
         timeout-minutes: 60
-        uses: creatorland/dealsync-action@COMMIT_HASH
+        uses: creatorland/dealsync-action@cc9c1bd
         with:
           command: run-recovery-pipeline
           sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
