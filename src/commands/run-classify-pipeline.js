@@ -38,6 +38,7 @@ export async function runClassifyPipeline() {
   const aiApiUrl = core.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions'
   const maxConcurrent = parseInt(core.getInput('max-concurrent') || '70', 10)
   const classifyBatchSize = parseInt(core.getInput('classify-batch-size') || '5', 10)
+  const claimSize = parseInt(core.getInput('claim-size') || '5', 10)
   const maxRetries = parseInt(core.getInput('max-retries') || '6', 10)
   const fetchChunkSize = parseInt(core.getInput('fetch-chunk-size') || core.getInput('chunk-size') || '10', 10)
   const fetchTimeoutMs = parseInt(core.getInput('fetch-timeout-ms') || '120000', 10)
@@ -45,7 +46,7 @@ export async function runClassifyPipeline() {
   const flushThreshold = parseInt(core.getInput('flush-threshold') || '5', 10)
 
   console.log(
-    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
+    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
   )
 
   // 1. Authenticate to SxT once at start
@@ -66,29 +67,95 @@ export async function runClassifyPipeline() {
   //  CLAIM FUNCTION (inline, same pattern as claim-classify-batch)
   // =========================================================================
 
+  /**
+   * Shared mega-split logic: group rows by THREAD_ID, chunk into sub-batches
+   * of classifyBatchSize threads, restamp in DB, push batch events.
+   * Returns an array of sub-batch objects for runPool.
+   */
+  async function megaSplit(megaBatchId, allRows, attempts) {
+    // Group rows by THREAD_ID
+    const rowsByThread = {}
+    for (const row of allRows) {
+      if (!rowsByThread[row.THREAD_ID]) rowsByThread[row.THREAD_ID] = []
+      rowsByThread[row.THREAD_ID].push(row)
+    }
+    const threadIds = Object.keys(rowsByThread)
+
+    // Chunk thread groups into groups of classifyBatchSize
+    const chunks = []
+    for (let i = 0; i < threadIds.length; i += classifyBatchSize) {
+      chunks.push(threadIds.slice(i, i + classifyBatchSize))
+    }
+
+    // Generate sub-batch IDs and build restamp groups
+    const groups = chunks.map((chunkThreadIds) => ({
+      subBatchId: uuidv7(),
+      threadIds: chunkThreadIds,
+    }))
+
+    // Restamp sub-batches in DB
+    await exec(dealStatesSql.restampSubBatches(schema, megaBatchId, groups))
+
+    // Insert batch events for each sub-batch
+    const batchEventValues = groups.map(
+      ({ subBatchId }) =>
+        `('${subBatchId}', '${subBatchId}', 'classify', 'new', CURRENT_TIMESTAMP)`,
+    )
+    await batcher.pushBatchEvents(batchEventValues)
+
+    // Build sub-batch objects
+    const subBatches = groups.map(({ subBatchId, threadIds: tids }) => {
+      const subRows = tids.flatMap((tid) => rowsByThread[tid])
+      return { batch_id: subBatchId, count: subRows.length, attempts, rows: subRows }
+    })
+
+    console.log(
+      `[run-classify-pipeline] mega-split ${megaBatchId}: ${allRows.length} rows → ${subBatches.length} sub-batches (${threadIds.length} threads)`,
+    )
+
+    return subBatches
+  }
+
   async function claimBatch() {
     const claimStart = Date.now()
-    const batchId = uuidv7()
+    const useMegaClaim = claimSize > classifyBatchSize
 
-    // Atomic UPDATE for pending_classification threads (thread-aware, NOT EXISTS for pending/filtering)
-    await exec(dealStatesSql.claimClassifyBatch(schema, batchId, classifyBatchSize))
+    if (useMegaClaim) {
+      // --- Mega-claim path ---
+      const megaId = uuidv7()
+      const megaBatchId = `mega:${megaId}`
 
-    // SELECT the claimed rows
-    const rows = await exec(dealStatesSql.selectEmailsWithEvalAndCreator(schema, batchId))
+      await exec(dealStatesSql.claimClassifyBatch(schema, megaBatchId, claimSize))
 
-    const count = rows ? rows.length : 0
-    console.log(`[run-classify-pipeline] claimed ${count} pending rows in ${Date.now() - claimStart}ms`)
+      const rows = await exec(dealStatesSql.selectEmailsWithEvalAndCreator(schema, megaBatchId))
 
-    // If claimed > 0, insert batch event and return
-    if (count > 0) {
-      await insertBatchEvent(exec, schema, {
-        triggerHash: batchId,
-        batchId,
-        batchType: 'classify',
-        eventType: 'new',
-      })
+      const count = rows ? rows.length : 0
+      console.log(`[run-classify-pipeline] mega-claimed ${count} pending rows in ${Date.now() - claimStart}ms`)
 
-      return { batch_id: batchId, count, attempts: 0, rows }
+      if (count > 0) {
+        return await megaSplit(megaBatchId, rows, 0)
+      }
+    } else {
+      // --- Standard single-batch claim path ---
+      const batchId = uuidv7()
+
+      await exec(dealStatesSql.claimClassifyBatch(schema, batchId, classifyBatchSize))
+
+      const rows = await exec(dealStatesSql.selectEmailsWithEvalAndCreator(schema, batchId))
+
+      const count = rows ? rows.length : 0
+      console.log(`[run-classify-pipeline] claimed ${count} pending rows in ${Date.now() - claimStart}ms`)
+
+      if (count > 0) {
+        await insertBatchEvent(exec, schema, {
+          triggerHash: batchId,
+          batchId,
+          batchType: 'classify',
+          eventType: 'new',
+        })
+
+        return { batch_id: batchId, count, attempts: 0, rows }
+      }
     }
 
     // No pending rows — look for stuck batches (classifying >5min, attempts < maxRetries)
@@ -111,7 +178,22 @@ export async function runClassifyPipeline() {
       `[run-classify-pipeline] re-claiming stuck batch ${stuckBatchId} (attempts=${attempts})`,
     )
 
-    // SELECT its rows
+    // Check if this is a stuck mega-batch
+    if (stuckBatchId.startsWith('mega:')) {
+      // SELECT all rows for the mega batch
+      const stuckRows = await exec(dealStatesSql.selectEmailsWithEvalAndCreator(schema, stuckBatchId))
+
+      // UPDATE UPDATED_AT to prevent other instances from grabbing it
+      await exec(dealStatesSql.refreshBatchTimestamp(schema, stuckBatchId))
+
+      const stuckCount = stuckRows ? stuckRows.length : 0
+      if (stuckCount > 0) {
+        return await megaSplit(stuckBatchId, stuckRows, attempts)
+      }
+      return null
+    }
+
+    // Standard stuck batch recovery
     const stuckRows = await exec(dealStatesSql.selectEmailsWithEvalAndCreator(schema, stuckBatchId))
 
     // UPDATE UPDATED_AT to prevent other instances from grabbing it

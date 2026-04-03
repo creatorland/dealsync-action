@@ -439,7 +439,7 @@ describe('run-classify-pipeline command', () => {
       emailServiceUrl: '',
       userId: 'user-1',
       syncStateId: 'ss-1',
-      chunkSize: 15,
+      fetchChunkSize: 15,
       fetchTimeoutMs: 60000,
     })
     // No format param (full content for classify)
@@ -1577,5 +1577,248 @@ describe('run-classify-pipeline command', () => {
     await runClassifyPipeline()
 
     expect(mockBatcherInstance.pushContactDeletes).not.toHaveBeenCalled()
+  })
+
+  // ----------------------------------------------------------
+  // Mega-claim: returns array of sub-batches when claimSize > classifyBatchSize
+  // ----------------------------------------------------------
+
+  it('mega-claim: claims claimSize threads and splits into sub-batches', async () => {
+    mockInputs({ 'claim-size': '10', 'classify-batch-size': '3' })
+
+    // 7 rows across 7 threads → should split into 3 sub-batches (3+3+1)
+    const rows = Array.from({ length: 7 }, (_, i) => ({
+      EMAIL_METADATA_ID: `em-${i + 1}`,
+      MESSAGE_ID: `msg-${i + 1}`,
+      USER_ID: 'user-1',
+      THREAD_ID: `thread-${i + 1}`,
+      CREATOR_EMAIL: 'creator@test.com',
+      SYNC_STATE_ID: 'ss-1',
+    }))
+
+    mockRunPool.mockImplementation(async (claimFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE mega-claim
+        .mockResolvedValueOnce(rows) // SELECT claimed rows
+        .mockResolvedValueOnce([]) // restampSubBatches
+
+      const result = await claimFn()
+
+      // Should return an array of sub-batches
+      expect(Array.isArray(result)).toBe(true)
+      expect(result.length).toBe(3) // ceil(7/3) = 3
+
+      // First sub-batch: 3 threads
+      expect(result[0].count).toBe(3)
+      expect(result[0].attempts).toBe(0)
+      expect(result[0].rows.length).toBe(3)
+
+      // Second sub-batch: 3 threads
+      expect(result[1].count).toBe(3)
+      expect(result[1].rows.length).toBe(3)
+
+      // Third sub-batch: 1 thread
+      expect(result[2].count).toBe(1)
+      expect(result[2].rows.length).toBe(1)
+
+      // Each sub-batch should have a unique batch_id
+      const ids = new Set(result.map((b) => b.batch_id))
+      expect(ids.size).toBe(3)
+
+      // Verify claimClassifyBatch was called with claimSize (10), not classifyBatchSize (3)
+      const claimSql = mockExecuteSql.mock.calls[0][3]
+      expect(claimSql).toContain('LIMIT 10')
+
+      // Verify restampSubBatches was called
+      const restampSql = mockExecuteSql.mock.calls[2][3]
+      expect(restampSql).toContain('CASE')
+      expect(restampSql).toContain('WHEN THREAD_ID IN')
+
+      // Verify batch events were pushed via batcher
+      expect(mockBatcherInstance.pushBatchEvents).toHaveBeenCalledTimes(1)
+      const eventValues = mockBatcherInstance.pushBatchEvents.mock.calls[0][0]
+      expect(eventValues.length).toBe(3)
+
+      return { processed: 3, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+  })
+
+  // ----------------------------------------------------------
+  // Mega-claim: backward compatibility when claimSize <= classifyBatchSize
+  // ----------------------------------------------------------
+
+  it('mega-claim: backward compatible when claim-size not set (defaults to single batch)', async () => {
+    mockInputs() // claim-size defaults to 5, classify-batch-size defaults to 5
+
+    const rows = makeBatchRows(2)
+
+    mockRunPool.mockImplementation(async (claimFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed rows
+
+      const result = await claimFn()
+
+      // Should return a single batch object (not an array)
+      expect(Array.isArray(result)).toBe(false)
+      expect(result).not.toBeNull()
+      expect(result.batch_id).toBeDefined()
+      expect(result.count).toBe(2)
+      expect(result.rows).toEqual(rows)
+
+      // Verify claimClassifyBatch was called with classifyBatchSize (5)
+      const claimSql = mockExecuteSql.mock.calls[0][3]
+      expect(claimSql).toContain('LIMIT 5')
+
+      // Verify insertBatchEvent was called (not batcher.pushBatchEvents)
+      expect(mockInsertBatchEvent).toHaveBeenCalledWith(expect.any(Function), 'dealsync_stg_v1', {
+        triggerHash: expect.any(String),
+        batchId: expect.any(String),
+        batchType: 'classify',
+        eventType: 'new',
+      })
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+  })
+
+  // ----------------------------------------------------------
+  // Mega-claim: stuck mega batch recovery re-splits
+  // ----------------------------------------------------------
+
+  it('mega-claim: re-splits stuck mega batch into sub-batches', async () => {
+    mockInputs({ 'claim-size': '10', 'classify-batch-size': '2' })
+
+    // 4 rows across 4 threads for the stuck mega batch
+    const stuckRows = Array.from({ length: 4 }, (_, i) => ({
+      EMAIL_METADATA_ID: `em-${i + 1}`,
+      MESSAGE_ID: `msg-${i + 1}`,
+      USER_ID: 'user-1',
+      THREAD_ID: `thread-${i + 1}`,
+      CREATOR_EMAIL: 'creator@test.com',
+      SYNC_STATE_ID: 'ss-1',
+    }))
+
+    mockRunPool.mockImplementation(async (claimFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE mega-claim
+        .mockResolvedValueOnce([]) // SELECT claimed rows — empty (nothing pending)
+        .mockResolvedValueOnce([{ BATCH_ID: 'mega:stuck-uuid', ATTEMPTS: 2 }]) // stuck batches
+        .mockResolvedValueOnce(stuckRows) // SELECT stuck mega batch rows
+        .mockResolvedValueOnce([]) // refreshBatchTimestamp
+        .mockResolvedValueOnce([]) // restampSubBatches
+
+      const result = await claimFn()
+
+      // Should return an array of sub-batches
+      expect(Array.isArray(result)).toBe(true)
+      expect(result.length).toBe(2) // ceil(4/2) = 2
+
+      // Each sub-batch should have attempts from the stuck batch
+      expect(result[0].attempts).toBe(2)
+      expect(result[1].attempts).toBe(2)
+
+      // Each sub-batch should have 2 rows
+      expect(result[0].count).toBe(2)
+      expect(result[1].count).toBe(2)
+
+      return { processed: 2, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+  })
+
+  // ----------------------------------------------------------
+  // Mega-claim: stuck non-mega batch still works normally
+  // ----------------------------------------------------------
+
+  it('mega-claim: stuck non-mega batch uses standard recovery', async () => {
+    mockInputs({ 'claim-size': '10', 'classify-batch-size': '5' })
+
+    const stuckRows = makeBatchRows(2)
+
+    mockRunPool.mockImplementation(async (claimFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE mega-claim
+        .mockResolvedValueOnce([]) // SELECT claimed rows — empty
+        .mockResolvedValueOnce([{ BATCH_ID: 'normal-batch-abc', ATTEMPTS: 1 }]) // stuck batches (non-mega)
+        .mockResolvedValueOnce(stuckRows) // SELECT stuck rows
+        .mockResolvedValueOnce([]) // refreshBatchTimestamp
+
+      const result = await claimFn()
+
+      // Should return a single batch object (not an array)
+      expect(Array.isArray(result)).toBe(false)
+      expect(result).toEqual({
+        batch_id: 'normal-batch-abc',
+        count: 2,
+        attempts: 1,
+        rows: stuckRows,
+      })
+
+      // Should have called insertBatchEvent with retrigger
+      expect(mockInsertBatchEvent).toHaveBeenCalledWith(expect.any(Function), 'dealsync_stg_v1', {
+        triggerHash: expect.any(String),
+        batchId: 'normal-batch-abc',
+        batchType: 'classify',
+        eventType: 'retrigger',
+      })
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+  })
+
+  // ----------------------------------------------------------
+  // Mega-claim: multi-row threads are kept together in sub-batches
+  // ----------------------------------------------------------
+
+  it('mega-claim: groups multi-row threads correctly in sub-batches', async () => {
+    mockInputs({ 'claim-size': '10', 'classify-batch-size': '2' })
+
+    // 6 rows across 3 threads (2 rows per thread) → 2 sub-batches (2 threads + 1 thread)
+    const rows = [
+      { EMAIL_METADATA_ID: 'em-1', MESSAGE_ID: 'msg-1', USER_ID: 'user-1', THREAD_ID: 'thread-A', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
+      { EMAIL_METADATA_ID: 'em-2', MESSAGE_ID: 'msg-2', USER_ID: 'user-1', THREAD_ID: 'thread-A', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
+      { EMAIL_METADATA_ID: 'em-3', MESSAGE_ID: 'msg-3', USER_ID: 'user-1', THREAD_ID: 'thread-B', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
+      { EMAIL_METADATA_ID: 'em-4', MESSAGE_ID: 'msg-4', USER_ID: 'user-1', THREAD_ID: 'thread-B', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
+      { EMAIL_METADATA_ID: 'em-5', MESSAGE_ID: 'msg-5', USER_ID: 'user-1', THREAD_ID: 'thread-C', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
+      { EMAIL_METADATA_ID: 'em-6', MESSAGE_ID: 'msg-6', USER_ID: 'user-1', THREAD_ID: 'thread-C', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
+    ]
+
+    mockRunPool.mockImplementation(async (claimFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE mega-claim
+        .mockResolvedValueOnce(rows) // SELECT claimed rows
+        .mockResolvedValueOnce([]) // restampSubBatches
+
+      const result = await claimFn()
+
+      expect(Array.isArray(result)).toBe(true)
+      expect(result.length).toBe(2) // 3 threads / 2 per batch = 2 sub-batches
+
+      // First sub-batch: 2 threads × 2 rows = 4 rows
+      expect(result[0].count).toBe(4)
+      expect(result[0].rows.length).toBe(4)
+
+      // Second sub-batch: 1 thread × 2 rows = 2 rows
+      expect(result[1].count).toBe(2)
+      expect(result[1].rows.length).toBe(2)
+
+      // All rows from a thread should be in the same sub-batch
+      const sub0ThreadIds = new Set(result[0].rows.map((r) => r.THREAD_ID))
+      const sub1ThreadIds = new Set(result[1].rows.map((r) => r.THREAD_ID))
+      expect(sub0ThreadIds.size).toBe(2)
+      expect(sub1ThreadIds.size).toBe(1)
+
+      return { processed: 2, failed: 0 }
+    })
+
+    await runClassifyPipeline()
   })
 })
