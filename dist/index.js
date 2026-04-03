@@ -38532,9 +38532,11 @@ async function runFilterPipeline() {
 
       const claimSql = dealStates.claimFilterBatch(schema, megaBatchId, claimSize);
       console.log(`[run-filter-pipeline] mega-claim SQL LIMIT=${claimSize}, sql_length=${claimSql.length}, sql_tail=${claimSql.slice(-30)}`);
-      await exec(claimSql);
+      const updateResult = await exec(claimSql);
+      console.log(`[run-filter-pipeline] mega-claim UPDATE result: ${JSON.stringify(updateResult)}`);
 
       const rows = await exec(dealStates.selectEmailsByBatch(schema, megaBatchId));
+      console.log(`[run-filter-pipeline] mega-claim SELECT returned ${rows ? rows.length : 0} rows`);
 
       const count = rows ? rows.length : 0;
       const claimMs = Date.now() - claimStart;
