@@ -36,7 +36,7 @@ export async function runClassifyPipeline() {
   const primaryModel = core.getInput('ai-primary-model') || ''
   const fallbackModel = core.getInput('ai-fallback-model') || ''
   const aiApiUrl = core.getInput('ai-api-url') || ''
-  const maxConcurrent = parseInt(core.getInput('pipeline-max-concurrent') || '70', 10)
+  const maxConcurrent = parseInt(core.getInput('pipeline-classify-max-concurrent') || core.getInput('pipeline-max-concurrent') || '70', 10)
   const classifyBatchSize = parseInt(core.getInput('pipeline-classify-batch-size') || '5', 10)
   const claimSize = parseInt(core.getInput('pipeline-claim-size') || '5', 10)
   const maxRetries = parseInt(core.getInput('pipeline-max-retries') || '6', 10)

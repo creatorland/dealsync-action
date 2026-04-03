@@ -38451,7 +38451,7 @@ async function runFilterPipeline() {
   const contentFetcherUrl = coreExports.getInput('email-content-fetcher-url');
   const emailProvider = coreExports.getInput('email-provider') || '';
   const emailServiceUrl = coreExports.getInput('email-service-url');
-  const maxConcurrent = parseInt(coreExports.getInput('pipeline-max-concurrent') || '70', 10);
+  const maxConcurrent = parseInt(coreExports.getInput('pipeline-filter-max-concurrent') || coreExports.getInput('pipeline-max-concurrent') || '30', 10);
   const batchSize = parseInt(coreExports.getInput('pipeline-filter-batch-size') || '200', 10);
   const maxRetries = parseInt(coreExports.getInput('pipeline-max-retries') || '6', 10);
   const fetchChunkSize = parseInt(coreExports.getInput('pipeline-fetch-chunk-size') || '10', 10);
@@ -39046,7 +39046,7 @@ async function runClassifyPipeline() {
   const primaryModel = coreExports.getInput('ai-primary-model') || '';
   const fallbackModel = coreExports.getInput('ai-fallback-model') || '';
   const aiApiUrl = coreExports.getInput('ai-api-url') || '';
-  const maxConcurrent = parseInt(coreExports.getInput('pipeline-max-concurrent') || '70', 10);
+  const maxConcurrent = parseInt(coreExports.getInput('pipeline-classify-max-concurrent') || coreExports.getInput('pipeline-max-concurrent') || '70', 10);
   const classifyBatchSize = parseInt(coreExports.getInput('pipeline-classify-batch-size') || '5', 10);
   const claimSize = parseInt(coreExports.getInput('pipeline-claim-size') || '5', 10);
   const maxRetries = parseInt(coreExports.getInput('pipeline-max-retries') || '6', 10);

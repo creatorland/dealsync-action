@@ -2,7 +2,7 @@ name: dealsync-filter-betanet
 authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -18,7 +18,7 @@ jobs:
       - id: filter
         name: Run filter pipeline
         timeout-minutes: 60
-        uses: creatorland/dealsync-action@main
+        uses: creatorland/dealsync-action@59e30ba
         with:
           command: run-filter-pipeline
           sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
@@ -31,7 +31,7 @@ jobs:
           email-provider: ${{ secrets.EMAIL_PROVIDER }}
           email-content-fetcher-url: ${{ secrets.EMAIL_CONTENT_FETCHER_URL }}
           email-service-url: ${{ secrets.EMAIL_SERVICE_URL }}
-          pipeline-max-concurrent: ${{ secrets.PIPELINE_MAX_CONCURRENT }}
+          pipeline-filter-max-concurrent: ${{ secrets.PIPELINE_FILTER_MAX_CONCURRENT }}
           pipeline-claim-size: ${{ secrets.PIPELINE_CLAIM_SIZE }}
           pipeline-filter-batch-size: ${{ secrets.PIPELINE_FILTER_BATCH_SIZE }}
           pipeline-max-retries: ${{ secrets.PIPELINE_MAX_RETRIES }}

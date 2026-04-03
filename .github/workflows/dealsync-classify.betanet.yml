@@ -2,7 +2,7 @@ name: dealsync-classify-betanet
 authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -18,7 +18,7 @@ jobs:
       - id: classify
         name: Run classify pipeline
         timeout-minutes: 60
-        uses: creatorland/dealsync-action@main
+        uses: creatorland/dealsync-action@59e30ba
         with:
           command: run-classify-pipeline
           sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
@@ -36,7 +36,7 @@ jobs:
           ai-primary-model: ${{ secrets.AI_PRIMARY_MODEL }}
           ai-fallback-model: ${{ secrets.AI_FALLBACK_MODEL }}
           ai-api-url: ${{ secrets.AI_API_URL }}
-          pipeline-max-concurrent: ${{ secrets.PIPELINE_MAX_CONCURRENT }}
+          pipeline-classify-max-concurrent: ${{ secrets.PIPELINE_CLASSIFY_MAX_CONCURRENT }}
           pipeline-claim-size: ${{ secrets.PIPELINE_CLAIM_SIZE }}
           pipeline-classify-batch-size: ${{ secrets.PIPELINE_CLASSIFY_BATCH_SIZE }}
           pipeline-max-retries: ${{ secrets.PIPELINE_MAX_RETRIES }}

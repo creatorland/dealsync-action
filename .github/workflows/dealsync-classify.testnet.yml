@@ -34,7 +34,7 @@ jobs:
           ai-primary-model: ${{ secrets.AI_PRIMARY_MODEL }}
           ai-fallback-model: ${{ secrets.AI_FALLBACK_MODEL }}
           ai-api-url: ${{ secrets.AI_API_URL }}
-          pipeline-max-concurrent: ${{ secrets.PIPELINE_MAX_CONCURRENT }}
+          pipeline-classify-max-concurrent: ${{ secrets.PIPELINE_CLASSIFY_MAX_CONCURRENT }}
           pipeline-claim-size: ${{ secrets.PIPELINE_CLAIM_SIZE }}
           pipeline-classify-batch-size: ${{ secrets.PIPELINE_CLASSIFY_BATCH_SIZE }}
           pipeline-max-retries: ${{ secrets.PIPELINE_MAX_RETRIES }}

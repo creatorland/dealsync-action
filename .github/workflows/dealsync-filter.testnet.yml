@@ -29,7 +29,7 @@ jobs:
           email-provider: ${{ secrets.EMAIL_PROVIDER }}
           email-content-fetcher-url: ${{ secrets.EMAIL_CONTENT_FETCHER_URL }}
           email-service-url: ${{ secrets.EMAIL_SERVICE_URL }}
-          pipeline-max-concurrent: ${{ secrets.PIPELINE_MAX_CONCURRENT }}
+          pipeline-filter-max-concurrent: ${{ secrets.PIPELINE_FILTER_MAX_CONCURRENT }}
           pipeline-claim-size: ${{ secrets.PIPELINE_CLAIM_SIZE }}
           pipeline-filter-batch-size: ${{ secrets.PIPELINE_FILTER_BATCH_SIZE }}
           pipeline-max-retries: ${{ secrets.PIPELINE_MAX_RETRIES }}

@@ -69,8 +69,14 @@ inputs:
   result-b:
     description: 'JSON result from eval variant B (eval-compare)'
   pipeline-max-concurrent:
-    description: 'Max parallel batch workers (run-filter-pipeline, run-classify-pipeline)'
+    description: 'Deprecated: use pipeline-filter-max-concurrent and pipeline-classify-max-concurrent'
     default: '70'
+  pipeline-filter-max-concurrent:
+    description: 'Max parallel workers for filter pipeline'
+    default: '30'
+  pipeline-classify-max-concurrent:
+    description: 'Max parallel workers for classify pipeline'
+    default: '80'
   pipeline-filter-batch-size:
     description: 'Items per filter batch (run-filter-pipeline)'
     default: '200'

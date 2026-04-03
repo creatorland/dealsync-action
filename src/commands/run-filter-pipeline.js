@@ -26,7 +26,7 @@ export async function runFilterPipeline() {
   const contentFetcherUrl = core.getInput('email-content-fetcher-url')
   const emailProvider = core.getInput('email-provider') || ''
   const emailServiceUrl = core.getInput('email-service-url')
-  const maxConcurrent = parseInt(core.getInput('pipeline-max-concurrent') || '70', 10)
+  const maxConcurrent = parseInt(core.getInput('pipeline-filter-max-concurrent') || core.getInput('pipeline-max-concurrent') || '30', 10)
   const batchSize = parseInt(core.getInput('pipeline-filter-batch-size') || '200', 10)
   const maxRetries = parseInt(core.getInput('pipeline-max-retries') || '6', 10)
   const fetchChunkSize = parseInt(core.getInput('pipeline-fetch-chunk-size') || '10', 10)
