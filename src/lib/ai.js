@@ -138,8 +138,8 @@ export async function callModel(model, messages, { temperature = 0, apiUrl, apiK
 
       if (!resp.ok) {
         const errBody = await resp.text().catch(() => '')
-        lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 200)}`)
-        console.log(`[ai-client] ${model} HTTP ${resp.status}: ${errBody.substring(0, 200)}`)
+        lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 500)}`)
+        console.log(`[ai-client] ${model} HTTP ${resp.status}: ${errBody.substring(0, 500)}`)
 
         // 429: respect Retry-After or wait 5s, don't consume retry budget
         if (resp.status === 429 && rateLimitWaits < MAX_RATE_LIMIT_WAITS) {
