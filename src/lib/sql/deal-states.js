@@ -39,25 +39,25 @@ export const dealStates = {
   selectEmailsByBatch: (schema, batchId) => {
     const s = sanitizeSchema(schema)
     const bid = sanitizeId(batchId)
-    return `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}'`
+    return `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}' LIMIT 10000`
   },
 
   selectEmailsWithEvalAndCreator: (schema, batchId) => {
     const s = sanitizeSchema(schema)
     const bid = sanitizeId(batchId)
-    return `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${s}.DEAL_STATES ds LEFT JOIN ${s}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${s}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${bid}'`
+    return `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${s}.DEAL_STATES ds LEFT JOIN ${s}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${s}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${bid}' LIMIT 10000`
   },
 
   selectEmailAndThreadIdsByBatch: (schema, batchId) => {
     const s = sanitizeSchema(schema)
     const bid = sanitizeId(batchId)
-    return `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}'`
+    return `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}' LIMIT 10000`
   },
 
   selectDistinctThreadUsers: (schema, batchId) => {
     const s = sanitizeSchema(schema)
     const bid = sanitizeId(batchId)
-    return `SELECT DISTINCT THREAD_ID, USER_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}'`
+    return `SELECT DISTINCT THREAD_ID, USER_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}' LIMIT 10000`
   },
 
   updateStatusByIds: (schema, quotedIds, status) => {

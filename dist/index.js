@@ -27688,25 +27688,25 @@ const dealStates = {
   selectEmailsByBatch: (schema, batchId) => {
     const s = sanitizeSchema(schema);
     const bid = sanitizeId(batchId);
-    return `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}'`
+    return `SELECT EMAIL_METADATA_ID, MESSAGE_ID, USER_ID, THREAD_ID, SYNC_STATE_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}' LIMIT 10000`
   },
 
   selectEmailsWithEvalAndCreator: (schema, batchId) => {
     const s = sanitizeSchema(schema);
     const bid = sanitizeId(batchId);
-    return `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${s}.DEAL_STATES ds LEFT JOIN ${s}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${s}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${bid}'`
+    return `SELECT ds.EMAIL_METADATA_ID, ds.MESSAGE_ID, ds.USER_ID, ds.THREAD_ID, ds.SYNC_STATE_ID, ete.AI_SUMMARY AS PREVIOUS_AI_SUMMARY, ete.IS_DEAL AS PREVIOUS_IS_DEAL, uss.EMAIL AS CREATOR_EMAIL FROM ${s}.DEAL_STATES ds LEFT JOIN ${s}.EMAIL_THREAD_EVALUATIONS ete ON ete.THREAD_ID = ds.THREAD_ID LEFT JOIN ${s}.USER_SYNC_SETTINGS uss ON uss.USER_ID = ds.USER_ID WHERE ds.BATCH_ID = '${bid}' LIMIT 10000`
   },
 
   selectEmailAndThreadIdsByBatch: (schema, batchId) => {
     const s = sanitizeSchema(schema);
     const bid = sanitizeId(batchId);
-    return `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}'`
+    return `SELECT EMAIL_METADATA_ID, THREAD_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}' LIMIT 10000`
   },
 
   selectDistinctThreadUsers: (schema, batchId) => {
     const s = sanitizeSchema(schema);
     const bid = sanitizeId(batchId);
-    return `SELECT DISTINCT THREAD_ID, USER_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}'`
+    return `SELECT DISTINCT THREAD_ID, USER_ID FROM ${s}.DEAL_STATES WHERE BATCH_ID = '${bid}' LIMIT 10000`
   },
 
   updateStatusByIds: (schema, quotedIds, status) => {
@@ -38530,13 +38530,9 @@ async function runFilterPipeline() {
       const megaId = v7();
       const megaBatchId = `mega:${megaId}`;
 
-      const claimSql = dealStates.claimFilterBatch(schema, megaBatchId, claimSize);
-      console.log(`[run-filter-pipeline] mega-claim SQL LIMIT=${claimSize}, sql_length=${claimSql.length}, sql_tail=${claimSql.slice(-30)}`);
-      const updateResult = await exec(claimSql);
-      console.log(`[run-filter-pipeline] mega-claim UPDATE result: ${JSON.stringify(updateResult)}`);
+      await exec(dealStates.claimFilterBatch(schema, megaBatchId, claimSize));
 
       const rows = await exec(dealStates.selectEmailsByBatch(schema, megaBatchId));
-      console.log(`[run-filter-pipeline] mega-claim SELECT returned ${rows ? rows.length : 0} rows`);
 
       const count = rows ? rows.length : 0;
       const claimMs = Date.now() - claimStart;
