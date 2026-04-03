@@ -2,6 +2,7 @@ import * as core from '@actions/core'
 import { getHeader, sanitizeEmailBody } from './emails.js'
 import { sleep, backoffMs } from './retry.js'
 import systemTemplate from '../../prompts/system.md'
+import systemTemplateLlama from '../../prompts/system-llama.md'
 import classificationInstructions from '../../prompts/user.md'
 
 // --- Prompt building ---
@@ -57,10 +58,13 @@ function buildThreadData(emails) {
   return { text: parts.join('\n'), threadOrder }
 }
 
-export function buildPrompt(emails, { systemOverride, userOverride, creatorEmail } = {}) {
+export function buildPrompt(emails, { systemOverride, userOverride, creatorEmail, model } = {}) {
   const { text: threadData, threadOrder } = buildThreadData(emails)
 
-  const systemPrompt = (systemOverride || systemTemplate).trim()
+  // Select model-specific prompt: use Llama variant for Llama models
+  const isLlama = model && model.toLowerCase().includes('llama')
+  const defaultTemplate = isLlama ? systemTemplateLlama : systemTemplate
+  const systemPrompt = (systemOverride || defaultTemplate).trim()
 
   const creatorLine = creatorEmail ? `Creator email: ${creatorEmail}\n\n` : ''
 

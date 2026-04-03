@@ -414,7 +414,7 @@ export async function runClassifyPipeline() {
 
       // b. Build prompt via buildPrompt(emails)
       t0 = Date.now()
-      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails, { creatorEmail })
+      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails, { creatorEmail, model: primaryModel })
 
       // c. 4-layer AI resilience pipeline
       const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey }
