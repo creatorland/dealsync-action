@@ -26,14 +26,14 @@ export async function runFilterPipeline() {
   const contentFetcherUrl = core.getInput('content-fetcher-url')
   const emailProvider = core.getInput('email-provider') || 'content-fetcher'
   const emailServiceUrl = core.getInput('email-service-url')
-  const maxConcurrent = parseInt(core.getInput('max-concurrent') || '5', 10)
+  const maxConcurrent = parseInt(core.getInput('max-concurrent') || '70', 10)
   const batchSize = parseInt(core.getInput('filter-batch-size') || '200', 10)
   const maxRetries = parseInt(core.getInput('max-retries') || '6', 10)
-  const chunkSize = parseInt(core.getInput('chunk-size') || '50', 10)
+  const fetchChunkSize = parseInt(core.getInput('fetch-chunk-size') || core.getInput('chunk-size') || '10', 10)
   const fetchTimeoutMs = parseInt(core.getInput('fetch-timeout-ms') || '30000', 10)
 
   console.log(
-    `[run-filter-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${batchSize}, maxRetries=${maxRetries}, chunkSize=${chunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
+    `[run-filter-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${batchSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
   )
 
   // 1. Authenticate to SxT once at start
@@ -144,7 +144,7 @@ export async function runFilterPipeline() {
       emailServiceUrl,
       userId,
       syncStateId,
-      chunkSize,
+      fetchChunkSize,
       fetchTimeoutMs,
       format: 'metadata',
     })

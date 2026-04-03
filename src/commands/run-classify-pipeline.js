@@ -39,13 +39,13 @@ export async function runClassifyPipeline() {
   const maxConcurrent = parseInt(core.getInput('max-concurrent') || '70', 10)
   const classifyBatchSize = parseInt(core.getInput('classify-batch-size') || '5', 10)
   const maxRetries = parseInt(core.getInput('max-retries') || '6', 10)
-  const chunkSize = parseInt(core.getInput('chunk-size') || '10', 10)
+  const fetchChunkSize = parseInt(core.getInput('fetch-chunk-size') || core.getInput('chunk-size') || '10', 10)
   const fetchTimeoutMs = parseInt(core.getInput('fetch-timeout-ms') || '120000', 10)
   const flushIntervalMs = parseInt(core.getInput('flush-interval-ms') || '5000', 10)
   const flushThreshold = parseInt(core.getInput('flush-threshold') || '5', 10)
 
   console.log(
-    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, maxRetries=${maxRetries}, chunkSize=${chunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
+    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
   )
 
   // 1. Authenticate to SxT once at start
@@ -195,7 +195,7 @@ export async function runClassifyPipeline() {
           emailServiceUrl,
           userId,
           syncStateId,
-          chunkSize,
+          fetchChunkSize,
           fetchTimeoutMs,
         })
       } catch {

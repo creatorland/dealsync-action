@@ -44,12 +44,15 @@ inputs:
   ai-api-url:
     description: 'AI API URL (run-classify-pipeline)'
     default: 'https://api.hyperbolic.xyz/v1/chat/completions'
+  fetch-chunk-size:
+    description: 'Emails per content-fetcher HTTP request (run-filter-pipeline, run-classify-pipeline)'
+    default: '10'
   chunk-size:
-    description: 'Content fetcher chunk size per request'
-    default: '50'
+    description: 'Deprecated: use fetch-chunk-size instead'
+    default: '10'
   fetch-timeout-ms:
     description: 'Content fetcher request timeout in ms'
-    default: '30000'
+    default: '120000'
   offset:
     description: 'Offset for paginated queries (sync-deal-states)'
     default: '0'
@@ -76,12 +79,15 @@ inputs:
     description: 'JSON result from eval variant B (eval-compare)'
   max-concurrent:
     description: 'Max parallel batch workers (run-filter-pipeline, run-classify-pipeline)'
-    default: '5'
+    default: '70'
   filter-batch-size:
     description: 'Items per filter batch (run-filter-pipeline)'
     default: '200'
   classify-batch-size:
-    description: 'Threads per classify batch (run-classify-pipeline)'
+    description: 'Threads per AI prompt (run-classify-pipeline)'
+    default: '5'
+  claim-size:
+    description: 'Threads per mega-claim (run-classify-pipeline). Higher = fewer SxT round-trips. Each mega-claim is split into sub-batches of classify-batch-size for AI.'
     default: '5'
   max-retries:
     description: 'Max attempts per batch before dead letter (run-filter-pipeline, run-classify-pipeline)'
