@@ -439,7 +439,7 @@ describe('run-classify-pipeline command', () => {
       emailServiceUrl: '',
       userId: 'user-1',
       syncStateId: 'ss-1',
-      fetchChunkSize: 15,
+      chunkSize: 15,
       fetchTimeoutMs: 60000,
     })
     // No format param (full content for classify)

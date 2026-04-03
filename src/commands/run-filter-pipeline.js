@@ -144,7 +144,7 @@ export async function runFilterPipeline() {
       emailServiceUrl,
       userId,
       syncStateId,
-      fetchChunkSize,
+      chunkSize: fetchChunkSize,
       fetchTimeoutMs,
       format: 'metadata',
     })

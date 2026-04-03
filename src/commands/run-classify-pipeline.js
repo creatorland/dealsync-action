@@ -277,7 +277,7 @@ export async function runClassifyPipeline() {
           emailServiceUrl,
           userId,
           syncStateId,
-          fetchChunkSize,
+          chunkSize: fetchChunkSize,
           fetchTimeoutMs,
         })
       } catch {

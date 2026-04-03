@@ -27624,7 +27624,7 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
 // Extracted to break circular dependency between constants.js and sql builders.
 
 function sanitizeId(id) {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+  if (!/^[a-zA-Z0-9_:-]+$/.test(id)) {
     throw new Error(`Invalid ID format: ${id}`)
   }
   return id
@@ -27760,6 +27760,17 @@ const dealStates = {
     return `UPDATE ${s}.DEAL_STATES SET STATUS = 'failed', UPDATED_AT = CURRENT_TIMESTAMP WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${Number(staleMinutes)}' MINUTE`
   },
 
+
+  restampSubBatches: (schema, megaBatchId, groups) => {
+    const s = sanitizeSchema(schema);
+    const megaBid = sanitizeId(megaBatchId);
+    const cases = groups.map(({ subBatchId, threadIds }) => {
+      const sid = sanitizeId(subBatchId);
+      const ids = threadIds.map((id) => `'${sanitizeId(id)}'`).join(',');
+      return `WHEN THREAD_ID IN (${ids}) THEN '${sid}'`
+    }).join(' ');
+    return `UPDATE ${s}.DEAL_STATES SET BATCH_ID = CASE ${cases} END, UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${megaBid}'`
+  },
 
   syncFromEmailMetadata: (schema, emailCoreSchema, limit = 50000) => {
     const s = sanitizeSchema(schema);
@@ -27913,15 +27924,23 @@ async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries, onDeadLet
 
   while (true) {
     if (active.size < maxConcurrent) {
-      const batch = await claimFn();
-      if (batch === null) {
+      const result = await claimFn();
+      if (result === null) {
         if (active.size === 0) break
         await Promise.race(active);
         continue
       }
-      const worker = runWorker(batch);
-      active.add(worker);
-      worker.finally(() => active.delete(worker));
+      // Normalize to array — claimFn can return a single batch or an array of sub-batches
+      const batches = Array.isArray(result) ? result : [result];
+      for (const batch of batches) {
+        // Wait for a slot if pool is full
+        while (active.size >= maxConcurrent) {
+          await Promise.race(active);
+        }
+        const worker = runWorker(batch);
+        active.add(worker);
+        worker.finally(() => active.delete(worker));
+      }
     } else {
       await Promise.race(active);
     }
@@ -38421,14 +38440,14 @@ async function runFilterPipeline() {
   const contentFetcherUrl = coreExports.getInput('content-fetcher-url');
   const emailProvider = coreExports.getInput('email-provider') || 'content-fetcher';
   const emailServiceUrl = coreExports.getInput('email-service-url');
-  const maxConcurrent = parseInt(coreExports.getInput('max-concurrent') || '5', 10);
+  const maxConcurrent = parseInt(coreExports.getInput('max-concurrent') || '70', 10);
   const batchSize = parseInt(coreExports.getInput('filter-batch-size') || '200', 10);
   const maxRetries = parseInt(coreExports.getInput('max-retries') || '6', 10);
-  const chunkSize = parseInt(coreExports.getInput('chunk-size') || '50', 10);
+  const fetchChunkSize = parseInt(coreExports.getInput('fetch-chunk-size') || coreExports.getInput('chunk-size') || '10', 10);
   const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '30000', 10);
 
   console.log(
-    `[run-filter-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${batchSize}, maxRetries=${maxRetries}, chunkSize=${chunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
+    `[run-filter-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${batchSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
   );
 
   // 1. Authenticate to SxT once at start
@@ -38539,7 +38558,7 @@ async function runFilterPipeline() {
       emailServiceUrl,
       userId,
       syncStateId,
-      chunkSize,
+      chunkSize: fetchChunkSize,
       fetchTimeoutMs,
       format: 'metadata',
     });
@@ -38925,14 +38944,15 @@ async function runClassifyPipeline() {
   const aiApiUrl = coreExports.getInput('ai-api-url') || 'https://api.hyperbolic.xyz/v1/chat/completions';
   const maxConcurrent = parseInt(coreExports.getInput('max-concurrent') || '70', 10);
   const classifyBatchSize = parseInt(coreExports.getInput('classify-batch-size') || '5', 10);
+  const claimSize = parseInt(coreExports.getInput('claim-size') || '5', 10);
   const maxRetries = parseInt(coreExports.getInput('max-retries') || '6', 10);
-  const chunkSize = parseInt(coreExports.getInput('chunk-size') || '10', 10);
+  const fetchChunkSize = parseInt(coreExports.getInput('fetch-chunk-size') || coreExports.getInput('chunk-size') || '10', 10);
   const fetchTimeoutMs = parseInt(coreExports.getInput('fetch-timeout-ms') || '120000', 10);
   const flushIntervalMs = parseInt(coreExports.getInput('flush-interval-ms') || '5000', 10);
   const flushThreshold = parseInt(coreExports.getInput('flush-threshold') || '5', 10);
 
   console.log(
-    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, maxRetries=${maxRetries}, chunkSize=${chunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
+    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
   );
 
   // 1. Authenticate to SxT once at start
@@ -38953,29 +38973,95 @@ async function runClassifyPipeline() {
   //  CLAIM FUNCTION (inline, same pattern as claim-classify-batch)
   // =========================================================================
 
+  /**
+   * Shared mega-split logic: group rows by THREAD_ID, chunk into sub-batches
+   * of classifyBatchSize threads, restamp in DB, push batch events.
+   * Returns an array of sub-batch objects for runPool.
+   */
+  async function megaSplit(megaBatchId, allRows, attempts) {
+    // Group rows by THREAD_ID
+    const rowsByThread = {};
+    for (const row of allRows) {
+      if (!rowsByThread[row.THREAD_ID]) rowsByThread[row.THREAD_ID] = [];
+      rowsByThread[row.THREAD_ID].push(row);
+    }
+    const threadIds = Object.keys(rowsByThread);
+
+    // Chunk thread groups into groups of classifyBatchSize
+    const chunks = [];
+    for (let i = 0; i < threadIds.length; i += classifyBatchSize) {
+      chunks.push(threadIds.slice(i, i + classifyBatchSize));
+    }
+
+    // Generate sub-batch IDs and build restamp groups
+    const groups = chunks.map((chunkThreadIds) => ({
+      subBatchId: v7(),
+      threadIds: chunkThreadIds,
+    }));
+
+    // Restamp sub-batches in DB
+    await exec(dealStates.restampSubBatches(schema, megaBatchId, groups));
+
+    // Insert batch events for each sub-batch
+    const batchEventValues = groups.map(
+      ({ subBatchId }) =>
+        `('${subBatchId}', '${subBatchId}', 'classify', 'new', CURRENT_TIMESTAMP)`,
+    );
+    await batcher.pushBatchEvents(batchEventValues);
+
+    // Build sub-batch objects
+    const subBatches = groups.map(({ subBatchId, threadIds: tids }) => {
+      const subRows = tids.flatMap((tid) => rowsByThread[tid]);
+      return { batch_id: subBatchId, count: subRows.length, attempts, rows: subRows }
+    });
+
+    console.log(
+      `[run-classify-pipeline] mega-split ${megaBatchId}: ${allRows.length} rows → ${subBatches.length} sub-batches (${threadIds.length} threads)`,
+    );
+
+    return subBatches
+  }
+
   async function claimBatch() {
     const claimStart = Date.now();
-    const batchId = v7();
+    const useMegaClaim = claimSize > classifyBatchSize;
 
-    // Atomic UPDATE for pending_classification threads (thread-aware, NOT EXISTS for pending/filtering)
-    await exec(dealStates.claimClassifyBatch(schema, batchId, classifyBatchSize));
+    if (useMegaClaim) {
+      // --- Mega-claim path ---
+      const megaId = v7();
+      const megaBatchId = `mega:${megaId}`;
 
-    // SELECT the claimed rows
-    const rows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, batchId));
+      await exec(dealStates.claimClassifyBatch(schema, megaBatchId, claimSize));
 
-    const count = rows ? rows.length : 0;
-    console.log(`[run-classify-pipeline] claimed ${count} pending rows in ${Date.now() - claimStart}ms`);
+      const rows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, megaBatchId));
 
-    // If claimed > 0, insert batch event and return
-    if (count > 0) {
-      await insertBatchEvent(exec, schema, {
-        triggerHash: batchId,
-        batchId,
-        batchType: 'classify',
-        eventType: 'new',
-      });
+      const count = rows ? rows.length : 0;
+      console.log(`[run-classify-pipeline] mega-claimed ${count} pending rows in ${Date.now() - claimStart}ms`);
 
-      return { batch_id: batchId, count, attempts: 0, rows }
+      if (count > 0) {
+        return await megaSplit(megaBatchId, rows, 0)
+      }
+    } else {
+      // --- Standard single-batch claim path ---
+      const batchId = v7();
+
+      await exec(dealStates.claimClassifyBatch(schema, batchId, classifyBatchSize));
+
+      const rows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, batchId));
+
+      const count = rows ? rows.length : 0;
+      console.log(`[run-classify-pipeline] claimed ${count} pending rows in ${Date.now() - claimStart}ms`);
+
+      if (count > 0) {
+        await insertBatchEvent(exec, schema, {
+          triggerHash: batchId,
+          batchId,
+          batchType: 'classify',
+          eventType: 'new',
+        });
+
+        return { batch_id: batchId, count, attempts: 0, rows }
+      }
     }
 
     // No pending rows — look for stuck batches (classifying >5min, attempts < maxRetries)
@@ -38998,7 +39084,22 @@ async function runClassifyPipeline() {
       `[run-classify-pipeline] re-claiming stuck batch ${stuckBatchId} (attempts=${attempts})`,
     );
 
-    // SELECT its rows
+    // Check if this is a stuck mega-batch
+    if (stuckBatchId.startsWith('mega:')) {
+      // SELECT all rows for the mega batch
+      const stuckRows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, stuckBatchId));
+
+      // UPDATE UPDATED_AT to prevent other instances from grabbing it
+      await exec(dealStates.refreshBatchTimestamp(schema, stuckBatchId));
+
+      const stuckCount = stuckRows ? stuckRows.length : 0;
+      if (stuckCount > 0) {
+        return await megaSplit(stuckBatchId, stuckRows, attempts)
+      }
+      return null
+    }
+
+    // Standard stuck batch recovery
     const stuckRows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, stuckBatchId));
 
     // UPDATE UPDATED_AT to prevent other instances from grabbing it
@@ -39082,7 +39183,7 @@ async function runClassifyPipeline() {
           emailServiceUrl,
           userId,
           syncStateId,
-          chunkSize,
+          chunkSize: fetchChunkSize,
           fetchTimeoutMs,
         });
       } catch {
