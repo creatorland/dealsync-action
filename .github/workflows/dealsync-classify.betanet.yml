@@ -1,6 +1,8 @@
 name: dealsync-classify-betanet
 authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
+  schedule:
+    - cron: '*/10 * * * *'
   workflow_dispatch:
     inputs:
       max_concurrent:
@@ -34,6 +36,7 @@ jobs:
     steps:
       - id: classify
         name: Run classify pipeline
+        timeout-minutes: 60
         uses: creatorland/dealsync-action@main
         with:
           command: run-classify-pipeline
@@ -50,7 +53,7 @@ jobs:
           rate-limiter-url: ${{ secrets.SXT_RATE_LIMITER_URL }}
           rate-limiter-api-key: ${{ secrets.SXT_RATE_LIMITER_API_KEY }}
           content-fetcher-url: ${{ secrets.CONTENT_FETCHER_URL }}
-          email-provider: ${{ inputs.email_provider }}
+          email-provider: ${{ secrets.EMAIL_PROVIDER || inputs.email_provider }}
           email-service-url: ${{ secrets.EMAIL_SERVICE_URL }}
           email-core-schema: EMAIL_CORE_PROD
           hyperbolic-key: ${{ secrets.HYPERBOLIC_KEY }}

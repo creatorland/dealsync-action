@@ -1,6 +1,8 @@
 name: dealsync-sync-betanet
 authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
+  schedule:
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -15,6 +17,7 @@ jobs:
     steps:
       - id: sync
         name: Sync deal states from email metadata
+        timeout-minutes: 60
         uses: creatorland/dealsync-action@main
         with:
           command: sync-deal-states
