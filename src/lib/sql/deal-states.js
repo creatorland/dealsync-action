@@ -112,6 +112,17 @@ export const dealStates = {
   },
 
 
+  restampSubBatches: (schema, megaBatchId, groups) => {
+    const s = sanitizeSchema(schema)
+    const megaBid = sanitizeId(megaBatchId)
+    const cases = groups.map(({ subBatchId, threadIds }) => {
+      const sid = sanitizeId(subBatchId)
+      const ids = threadIds.map((id) => `'${sanitizeId(id)}'`).join(',')
+      return `WHEN THREAD_ID IN (${ids}) THEN '${sid}'`
+    }).join(' ')
+    return `UPDATE ${s}.DEAL_STATES SET BATCH_ID = CASE ${cases} END, UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${megaBid}'`
+  },
+
   syncFromEmailMetadata: (schema, emailCoreSchema, limit = 50000) => {
     const s = sanitizeSchema(schema)
     const ecs = sanitizeSchema(emailCoreSchema)

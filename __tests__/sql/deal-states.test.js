@@ -142,6 +142,28 @@ describe('dealStates', () => {
     })
   })
 
+  describe('restampSubBatches', () => {
+    it('builds CASE WHEN UPDATE for sub-batch assignment', () => {
+      const groups = [
+        { subBatchId: 'sub-1', threadIds: ['t1', 't2', 't3'] },
+        { subBatchId: 'sub-2', threadIds: ['t4', 't5'] },
+      ]
+      const sql = dealStates.restampSubBatches(S, 'mega:mega-id', groups)
+      expect(sql).toContain(`UPDATE ${S}.DEAL_STATES`)
+      expect(sql).toContain('SET BATCH_ID = CASE')
+      expect(sql).toContain("WHEN THREAD_ID IN ('t1','t2','t3') THEN 'sub-1'")
+      expect(sql).toContain("WHEN THREAD_ID IN ('t4','t5') THEN 'sub-2'")
+      expect(sql).toContain('END')
+      expect(sql).toContain("WHERE BATCH_ID = 'mega:mega-id'")
+    })
+
+    it('rejects invalid mega batch ID', () => {
+      expect(() =>
+        dealStates.restampSubBatches(S, "'; DROP TABLE --", [])
+      ).toThrow('Invalid ID')
+    })
+  })
+
   describe('SQL injection prevention', () => {
     it('sanitizeId rejects malicious batch IDs', () => {
       expect(() => dealStates.claimFilterBatch(S, "'; DROP TABLE --", 10)).toThrow('Invalid ID')
