@@ -1,23 +1,19 @@
-name: dealsync-classify-betanet
+name: ds-classify-10m
 authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '*/10 * * * *'
   workflow_dispatch:
-
-concurrency:
-  group: compact-classify-betanet
-  cancel-in-progress: false
 
 jobs:
   classify:
-    timeout-minutes: 60
+    timeout-minutes: 10
     runs-on: ubuntu-latest
-    environment: '0xe48f697fafee74347f1c089a4778effaa2010651569f9ba0abeef155cb362f2e'
+    environment: '0x12c3f02f05146db270f75d2abda0557e3250598c1d7029bd221ec3d028bbba53'
     steps:
       - id: classify
         name: Run classify pipeline
-        timeout-minutes: 60
+        timeout-minutes: 10
         uses: creatorland/dealsync-action@e4ad709
         with:
           command: run-classify-pipeline

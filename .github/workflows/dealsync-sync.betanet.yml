@@ -1,4 +1,4 @@
-name: dealsync-sync-betanet
+name: ds-sync-v3
 authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
   schedule:
@@ -13,12 +13,12 @@ jobs:
   sync:
     timeout-minutes: 60
     runs-on: ubuntu-latest
-    environment: '0xe48f697fafee74347f1c089a4778effaa2010651569f9ba0abeef155cb362f2e'
+    environment: '0x12c3f02f05146db270f75d2abda0557e3250598c1d7029bd221ec3d028bbba53'
     steps:
       - id: sync
         name: Sync deal states from email metadata
         timeout-minutes: 60
-        uses: creatorland/dealsync-action@e4ad709
+        uses: creatorland/dealsync-action@7d6c8d0
         with:
           command: sync-deal-states
           sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
