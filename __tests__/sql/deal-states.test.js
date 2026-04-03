@@ -147,6 +147,12 @@ describe('dealStates', () => {
       expect(() => dealStates.claimFilterBatch(S, "'; DROP TABLE --", 10)).toThrow('Invalid ID')
     })
 
+    it('sanitizeId allows colon for mega batch IDs', () => {
+      expect(() => dealStates.claimClassifyBatch(S, 'mega:019d4a2b-1234', 5)).not.toThrow()
+      const sql = dealStates.claimClassifyBatch(S, 'mega:019d4a2b-1234', 5)
+      expect(sql).toContain("BATCH_ID = 'mega:019d4a2b-1234'")
+    })
+
     it('sanitizeSchema rejects malicious schema names', () => {
       expect(() => dealStates.claimFilterBatch('BAD SCHEMA; --', 'b1', 10)).toThrow(
         'Invalid schema',

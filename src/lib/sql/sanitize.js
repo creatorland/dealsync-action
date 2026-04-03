@@ -2,7 +2,7 @@
 // Extracted to break circular dependency between constants.js and sql builders.
 
 export function sanitizeId(id) {
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) {
+  if (!/^[a-zA-Z0-9_:-]+$/.test(id)) {
     throw new Error(`Invalid ID format: ${id}`)
   }
   return id
