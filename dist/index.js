@@ -38530,7 +38530,9 @@ async function runFilterPipeline() {
       const megaId = v7();
       const megaBatchId = `mega:${megaId}`;
 
-      await exec(dealStates.claimFilterBatch(schema, megaBatchId, claimSize));
+      const claimSql = dealStates.claimFilterBatch(schema, megaBatchId, claimSize);
+      console.log(`[run-filter-pipeline] mega-claim SQL LIMIT=${claimSize}, sql_length=${claimSql.length}, sql_tail=${claimSql.slice(-30)}`);
+      await exec(claimSql);
 
       const rows = await exec(dealStates.selectEmailsByBatch(schema, megaBatchId));
 

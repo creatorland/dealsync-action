@@ -105,7 +105,9 @@ export async function runFilterPipeline() {
       const megaId = uuidv7()
       const megaBatchId = `mega:${megaId}`
 
-      await exec(dealStatesSql.claimFilterBatch(schema, megaBatchId, claimSize))
+      const claimSql = dealStatesSql.claimFilterBatch(schema, megaBatchId, claimSize)
+      console.log(`[run-filter-pipeline] mega-claim SQL LIMIT=${claimSize}, sql_length=${claimSql.length}, sql_tail=${claimSql.slice(-30)}`)
+      await exec(claimSql)
 
       const rows = await exec(dealStatesSql.selectEmailsByBatch(schema, megaBatchId))
 
