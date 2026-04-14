@@ -11,13 +11,13 @@ concurrency:
 
 jobs:
   classify:
-    timeout-minutes: 60
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     environment: '0xead32ddc4a0d3f3845531916e59a52cdd21c97a41b7ad2806a0cefac57b402bb'
     steps:
       - id: classify
         name: Run classify pipeline
-        timeout-minutes: 60
+        timeout-minutes: 30
         uses: creatorland/dealsync-action@main
         with:
           command: run-classify-pipeline
