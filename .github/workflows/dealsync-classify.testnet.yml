@@ -1,6 +1,8 @@
-name: dealsync-classify-testnet
+name: ds-classify-5m-testnet
 authority: '0x553b60381dC74493d03b2865C818350f3347Ac7f'
 on:
+  schedule:
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 concurrency:

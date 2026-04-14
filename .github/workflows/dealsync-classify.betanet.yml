@@ -2,7 +2,7 @@ name: ds-classify-10m
 authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
