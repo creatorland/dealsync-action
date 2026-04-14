@@ -1,23 +1,6 @@
 {
   "permissions": {
-    "allow": [
-      "Read(//Users/rjlacanlaled/.claude/skills/work-on-clickup-task/**)",
-      "Edit(~/.claude/skills/work-on-clickup-task/**)",
-      "Bash(gh api:*)",
-      "mcp__clickup__clickup_get_task",
-      "Bash(curl -s -L \"https://developers.google.com/workspace/gmail/api/guides/performance\")",
-      "Bash(curl -s -L \"https://developers.google.com/workspace/gmail/api/reference/quota\")",
-      "Bash(gh issue:*)",
-      "Read(//Users/rjlacanlaled/Work/ardata/protocol/.local-config/deal-sync/production/**)",
-      "Edit(/.claude/skills/sxt/**)",
-      "Bash(gcloud logging:*)",
-      "Bash(node -e ':*)",
-      "Bash(node -e \"const b=require\\('fs'\\).readFileSync\\('/tmp/prod_sa_b64.txt','utf8'\\).trim\\(\\); const j=JSON.parse\\(Buffer.from\\(b,'base64'\\).toString\\(\\)\\); console.log\\('OK, project:', j.project_id, 'email:', j.client_email\\)\")",
-      "Bash(echo \"Verify: $\\(node -e \"const b=require\\('fs'\\).readFileSync\\('/tmp/prod_sa_b64.txt','utf8'\\).trim\\(\\); const j=JSON.parse\\(Buffer.from\\(b,'base64'\\).toString\\(\\)\\); console.log\\('OK, project:', j.project_id, 'email:', j.client_email\\)\"\\)\")",
-      "Bash(railway add:*)"
-    ],
-    "additionalDirectories": [
-      "/Users/rjlacanlaled/.claude/skills/work-on-clickup-task"
-    ]
+    "allow": [],
+    "additionalDirectories": []
   }
 }
