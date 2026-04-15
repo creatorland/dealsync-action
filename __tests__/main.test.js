@@ -36,6 +36,14 @@ jest.unstable_mockModule('../src/commands/run-classify-pipeline.js', () => ({
   runClassifyPipeline: jest.fn().mockRejectedValue(new Error('classify-pipeline not mocked')),
 }))
 
+jest.unstable_mockModule('../src/commands/run-recovery-pipeline.js', () => ({
+  runRecoveryPipeline: jest.fn().mockResolvedValue({ recovered: 0 }),
+}))
+
+jest.unstable_mockModule('../src/commands/sync-deal-values.js', () => ({
+  runSyncDealValues: jest.fn().mockResolvedValue({ recovered: 0, skipped: {}, totalScanned: 0 }),
+}))
+
 const core = await import('@actions/core')
 const { run } = await import('../src/main.js')
 

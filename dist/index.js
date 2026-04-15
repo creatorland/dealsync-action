@@ -27841,6 +27841,12 @@ const audits = {
     const safeEval = sanitizeString(evaluation);
     return `INSERT INTO ${s}.AI_EVALUATION_AUDITS (ID, BATCH_ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT) VALUES ('${safeId}', '${safeBid}', ${Number(threadCount)}, ${Number(emailCount)}, ${Number(cost)}, ${Number(inputTokens)}, ${Number(outputTokens)}, '${safeModel}', '${safeEval}', CURRENT_TIMESTAMP)`
   },
+
+  findByThread: (schema, threadId) => {
+    const s = sanitizeSchema(schema);
+    const safeTid = sanitizeId(threadId);
+    return `SELECT A.AI_EVALUATION FROM ${s}.AI_EVALUATION_AUDITS A JOIN ${s}.EMAIL_THREAD_EVALUATIONS E ON E.AI_EVALUATION_AUDIT_ID = A.ID WHERE E.THREAD_ID = '${safeTid}' LIMIT 1`
+  },
 };
 
 const evaluations = {
@@ -27869,6 +27875,22 @@ const deals = {
   selectByThreadIds: (schema, quotedThreadIds) => {
     const s = sanitizeSchema(schema);
     return `SELECT ID, THREAD_ID, USER_ID, UPDATED_AT FROM ${s}.DEALS WHERE THREAD_ID IN (${quotedThreadIds.join(',')})`
+  },
+
+  findAffectedForBackfill: (schema, { startDate, cursorId, limit }) => {
+    const s = sanitizeSchema(schema);
+    const safeDate = sanitizeString(startDate);
+    // Empty cursor means "start from the beginning" — use an empty string literal in SQL.
+    const safeCursor = cursorId ? sanitizeId(cursorId) : '';
+    return `SELECT ID, THREAD_ID, USER_ID FROM ${s}.DEALS WHERE (VALUE = 0 OR VALUE IS NULL) AND CREATED_AT >= '${safeDate}' AND ID > '${safeCursor}' ORDER BY ID LIMIT ${Number(limit)}`
+  },
+
+  backfillValue: (schema, { dealId, value, currency }) => {
+    const s = sanitizeSchema(schema);
+    const safeId = sanitizeId(dealId);
+    const safeCurrency = sanitizeString(currency || 'USD');
+    const numValue = Number.isFinite(value) && value >= 0 ? value : 0;
+    return `UPDATE ${s}.DEALS SET VALUE = ${numValue}, CURRENCY = '${safeCurrency}', UPDATED_AT = CURRENT_TIMESTAMP WHERE ID = '${safeId}' AND (VALUE = 0 OR VALUE IS NULL)`
   },
 };
 
@@ -43869,6 +43891,99 @@ async function runRecoveryPipeline() {
   }
 }
 
+async function runSyncDealValues() {
+  const authUrl = coreExports.getInput('sxt-auth-url');
+  const authSecret = coreExports.getInput('sxt-auth-secret');
+  const apiUrl = coreExports.getInput('sxt-api-url');
+  const biscuit = coreExports.getInput('sxt-biscuit');
+  const schema = sanitizeSchema(coreExports.getInput('sxt-schema'));
+  const startDate = coreExports.getInput('backfill-start-date') || '2026-03-31';
+  const batchSize = parseInt(coreExports.getInput('backfill-batch-size') || '500', 10);
+  const dryRun = coreExports.getInput('backfill-dry-run') === 'true';
+
+  console.log(
+    `[sync-deal-values] starting startDate=${startDate} batchSize=${batchSize} dryRun=${dryRun}`,
+  );
+
+  const jwt = await authenticate(authUrl, authSecret);
+  const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
+
+  const summary = {
+    recovered: 0,
+    skipped: { auditMissing: 0, threadNotFound: 0, valueNull: 0, parseError: 0 },
+    totalScanned: 0,
+  };
+
+  let cursorId = '';
+  while (true) {
+    const page = await exec(
+      deals.findAffectedForBackfill(schema, { startDate, cursorId, limit: batchSize }),
+    );
+    if (!page || page.length === 0) break
+
+    for (const row of page) {
+      summary.totalScanned++;
+      const dealId = row.ID;
+      const threadId = row.THREAD_ID;
+
+      const auditRows = await exec(audits.findByThread(schema, threadId));
+      if (!auditRows || auditRows.length === 0) {
+        console.warn(
+          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=audit_missing`,
+        );
+        summary.skipped.auditMissing++;
+        continue
+      }
+
+      let parsed;
+      try {
+        parsed = parseAndValidate(auditRows[0].AI_EVALUATION);
+      } catch (err) {
+        console.warn(
+          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=parse_error err=${err.message}`,
+        );
+        summary.skipped.parseError++;
+        continue
+      }
+
+      const entry = parsed.find((t) => t.thread_id === threadId);
+      if (!entry) {
+        console.warn(
+          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=thread_not_in_audit`,
+        );
+        summary.skipped.threadNotFound++;
+        continue
+      }
+      if (entry.deal_value == null) {
+        console.warn(
+          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=deal_value_null`,
+        );
+        summary.skipped.valueNull++;
+        continue
+      }
+
+      const value = Number(entry.deal_value);
+      const currency = entry.deal_currency || 'USD';
+      if (!dryRun) {
+        await exec(deals.backfillValue(schema, { dealId, value, currency }));
+      }
+      console.log(
+        `[sync-deal-values] ${dryRun ? 'would-recover' : 'recovered'} deal_id=${dealId} thread_id=${threadId} value=${value} currency=${currency}`,
+      );
+      summary.recovered++;
+    }
+
+    cursorId = page[page.length - 1].ID;
+    if (page.length < batchSize) break
+  }
+
+  console.log(
+    `[sync-deal-values] done recovered=${summary.recovered} skipped_audit_missing=${summary.skipped.auditMissing} skipped_thread_not_found=${summary.skipped.threadNotFound} skipped_value_null=${summary.skipped.valueNull} skipped_parse_error=${summary.skipped.parseError} scanned=${summary.totalScanned}`,
+  );
+
+  return summary
+}
+
 const COMMANDS = {
   'sync-deal-states': runSyncDealStates,
   eval: runEval,
@@ -43876,6 +43991,7 @@ const COMMANDS = {
   'run-filter-pipeline': runFilterPipeline,
   'run-classify-pipeline': runClassifyPipeline,
   'run-recovery-pipeline': runRecoveryPipeline,
+  'sync-deal-values': runSyncDealValues,
 };
 
 async function run() {
