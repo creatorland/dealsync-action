@@ -1,0 +1,30 @@
+name: ds-sync-deal-values-cb36159
+authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: sync-deal-values-betanet
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    environment: '0x12c3f02f05146db270f75d2abda0557e3250598c1d7029bd221ec3d028bbba53'
+    steps:
+      - id: backfill
+        name: Run deal-value backfill
+        timeout-minutes: 60
+        uses: creatorland/dealsync-action@cb36159
+        with:
+          command: sync-deal-values
+          sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
+          sxt-auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          sxt-api-url: ${{ secrets.SXT_API_URL }}
+          sxt-biscuit: ${{ secrets.SXT_BISCUIT }}
+          sxt-schema: ${{ secrets.SXT_SCHEMA }}
+          backfill-start-date: '2026-03-31'
+          backfill-batch-size: '500'
+          backfill-dry-run: 'true'
+          db-max-retries: ${{ secrets.DB_MAX_RETRIES }}
