@@ -24,13 +24,23 @@ export const deals = {
     return `SELECT ID, THREAD_ID, USER_ID FROM ${s}.DEALS WHERE (VALUE = 0 OR VALUE IS NULL) AND CREATED_AT >= '${safeDate}' AND ID > '${safeCursor}' ORDER BY ID LIMIT ${Number(limit)}`
   },
 
-  backfillValue: (schema, { dealId, value, currency }) => {
+  bulkBackfillValues: (schema, updates) => {
     const s = sanitizeSchema(schema)
-    const safeId = sanitizeId(dealId)
-    const safeCurrency = sanitizeString(currency || 'USD')
-    const numValue = Number.isFinite(value) && value >= 0 ? value : 0
-    return `UPDATE ${s}.DEALS SET VALUE = ${numValue}, CURRENCY = '${safeCurrency}', UPDATED_AT = CURRENT_TIMESTAMP WHERE ID = '${safeId}' AND (VALUE = 0 OR VALUE IS NULL)`
+    if (!updates || updates.length === 0) return null
+    const valueCases = []
+    const currencyCases = []
+    const ids = []
+    for (const { dealId, value, currency } of updates) {
+      const safeId = sanitizeId(dealId)
+      const numValue = Number.isFinite(value) && value >= 0 ? value : 0
+      const safeCurrency = sanitizeString(currency || 'USD')
+      valueCases.push(`WHEN '${safeId}' THEN ${numValue}`)
+      currencyCases.push(`WHEN '${safeId}' THEN '${safeCurrency}'`)
+      ids.push(`'${safeId}'`)
+    }
+    return `UPDATE ${s}.DEALS SET VALUE = CASE ID ${valueCases.join(' ')} ELSE VALUE END, CURRENCY = CASE ID ${currencyCases.join(' ')} ELSE CURRENCY END, UPDATED_AT = CURRENT_TIMESTAMP WHERE ID IN (${ids.join(', ')}) AND (VALUE = 0 OR VALUE IS NULL)`
   },
+
 }
 
 export const dealContacts = {

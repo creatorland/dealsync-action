@@ -13,10 +13,11 @@ export async function runSyncDealValues() {
   const schema = sanitizeSchema(core.getInput('sxt-schema'))
   const startDate = core.getInput('backfill-start-date') || '2026-03-31'
   const batchSize = parseInt(core.getInput('backfill-batch-size') || '500', 10)
+  const auditPageSize = parseInt(core.getInput('backfill-audit-page-size') || '500', 10)
   const dryRun = core.getInput('backfill-dry-run') === 'true'
 
   console.log(
-    `[sync-deal-values] starting startDate=${startDate} batchSize=${batchSize} dryRun=${dryRun}`,
+    `[sync-deal-values] starting startDate=${startDate} batchSize=${batchSize} auditPageSize=${auditPageSize} dryRun=${dryRun}`,
   )
 
   const jwt = await authenticate(authUrl, authSecret)
@@ -24,67 +25,101 @@ export async function runSyncDealValues() {
 
   const summary = {
     recovered: 0,
-    skipped: { auditMissing: 0, threadNotFound: 0, valueNull: 0, parseError: 0 },
+    skipped: { auditMissing: 0, valueNull: 0, parseError: 0 },
     totalScanned: 0,
+    auditsScanned: 0,
+    auditsParseFailed: 0,
+    threadEntries: 0,
+    pages: 0,
+    sqlCalls: 0,
   }
 
+  // ============================================================
+  // Step 1: Build thread_id → entry map by scanning all audits in window.
+  // ============================================================
+  const threadMap = {}
+  let auditCursor = ''
+  while (true) {
+    const auditPage = await exec(
+      auditsSql.selectSinceDatePage(schema, {
+        startDate,
+        cursorId: auditCursor,
+        limit: auditPageSize,
+      }),
+    )
+    summary.sqlCalls++
+    if (!auditPage || auditPage.length === 0) break
+    summary.auditsScanned += auditPage.length
+    for (const a of auditPage) {
+      try {
+        const parsed = parseAndValidate(a.AI_EVALUATION)
+        // Audits paginated by ID ASC (uuidv7 = time-ordered). Always overwrite
+        // so the final map holds the LATEST (re-)classification per thread.
+        for (const t of parsed) {
+          if (!t.thread_id) continue
+          if (!(t.thread_id in threadMap)) summary.threadEntries++
+          threadMap[t.thread_id] = {
+            deal_value: t.deal_value,
+            deal_currency: t.deal_currency,
+          }
+        }
+      } catch {
+        summary.auditsParseFailed++
+      }
+    }
+    auditCursor = auditPage[auditPage.length - 1].ID
+    if (auditPage.length < auditPageSize) break
+  }
+  console.log(
+    `[sync-deal-values] audit scan complete audits=${summary.auditsScanned} parse_failed=${summary.auditsParseFailed} thread_entries=${summary.threadEntries}`,
+  )
+
+  // ============================================================
+  // Step 2: Iterate affected deals; resolve from in-memory map; bulk update.
+  // ============================================================
   let cursorId = ''
   while (true) {
     const page = await exec(
       dealsSql.findAffectedForBackfill(schema, { startDate, cursorId, limit: batchSize }),
     )
+    summary.sqlCalls++
     if (!page || page.length === 0) break
+    summary.pages++
+    summary.totalScanned += page.length
 
-    for (const row of page) {
-      summary.totalScanned++
-      const dealId = row.ID
-      const threadId = row.THREAD_ID
-
-      const auditRows = await exec(auditsSql.findByThread(schema, threadId))
-      if (!auditRows || auditRows.length === 0) {
+    const updates = []
+    for (const deal of page) {
+      const entry = threadMap[deal.THREAD_ID]
+      if (!entry) {
         console.warn(
-          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=audit_missing`,
+          `[sync-deal-values] skip deal_id=${deal.ID} thread_id=${deal.THREAD_ID} reason=audit_missing`,
         )
         summary.skipped.auditMissing++
         continue
       }
-
-      let parsed
-      try {
-        parsed = parseAndValidate(auditRows[0].AI_EVALUATION)
-      } catch (err) {
-        console.warn(
-          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=parse_error err=${err.message}`,
-        )
-        summary.skipped.parseError++
-        continue
-      }
-
-      const entry = parsed.find((t) => t.thread_id === threadId)
-      if (!entry) {
-        console.warn(
-          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=thread_not_in_audit`,
-        )
-        summary.skipped.threadNotFound++
-        continue
-      }
       if (entry.deal_value == null) {
         console.warn(
-          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=deal_value_null`,
+          `[sync-deal-values] skip deal_id=${deal.ID} thread_id=${deal.THREAD_ID} reason=deal_value_null`,
         )
         summary.skipped.valueNull++
         continue
       }
-
       const value = Number(entry.deal_value)
       const currency = entry.deal_currency || 'USD'
-      if (!dryRun) {
-        await exec(dealsSql.backfillValue(schema, { dealId, value, currency }))
-      }
+      updates.push({ dealId: deal.ID, value, currency })
       console.log(
-        `[sync-deal-values] ${dryRun ? 'would-recover' : 'recovered'} deal_id=${dealId} thread_id=${threadId} value=${value} currency=${currency}`,
+        `[sync-deal-values] ${dryRun ? 'would-recover' : 'recovered'} deal_id=${deal.ID} thread_id=${deal.THREAD_ID} value=${value} currency=${currency}`,
       )
       summary.recovered++
+    }
+
+    if (!dryRun && updates.length > 0) {
+      const sql = dealsSql.bulkBackfillValues(schema, updates)
+      if (sql) {
+        await exec(sql)
+        summary.sqlCalls++
+        console.log(`[sync-deal-values] page=${summary.pages} bulk-updated ${updates.length} rows`)
+      }
     }
 
     cursorId = page[page.length - 1].ID
@@ -92,7 +127,7 @@ export async function runSyncDealValues() {
   }
 
   console.log(
-    `[sync-deal-values] done recovered=${summary.recovered} skipped_audit_missing=${summary.skipped.auditMissing} skipped_thread_not_found=${summary.skipped.threadNotFound} skipped_value_null=${summary.skipped.valueNull} skipped_parse_error=${summary.skipped.parseError} scanned=${summary.totalScanned}`,
+    `[sync-deal-values] done recovered=${summary.recovered} skipped_audit_missing=${summary.skipped.auditMissing} skipped_value_null=${summary.skipped.valueNull} skipped_parse_error=${summary.skipped.parseError} scanned=${summary.totalScanned} audits=${summary.auditsScanned} thread_entries=${summary.threadEntries} pages=${summary.pages} sql_calls=${summary.sqlCalls}`,
   )
 
   return summary

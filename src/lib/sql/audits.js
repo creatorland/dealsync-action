@@ -19,9 +19,10 @@ export const audits = {
     return `INSERT INTO ${s}.AI_EVALUATION_AUDITS (ID, BATCH_ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT) VALUES ('${safeId}', '${safeBid}', ${Number(threadCount)}, ${Number(emailCount)}, ${Number(cost)}, ${Number(inputTokens)}, ${Number(outputTokens)}, '${safeModel}', '${safeEval}', CURRENT_TIMESTAMP)`
   },
 
-  findByThread: (schema, threadId) => {
+  selectSinceDatePage: (schema, { startDate, cursorId, limit }) => {
     const s = sanitizeSchema(schema)
-    const safeTid = sanitizeId(threadId)
-    return `SELECT A.AI_EVALUATION FROM ${s}.AI_EVALUATION_AUDITS A JOIN ${s}.DEAL_STATES D ON D.BATCH_ID = A.BATCH_ID WHERE D.THREAD_ID = '${safeTid}' LIMIT 1`
+    const safeDate = sanitizeString(startDate)
+    const safeCursor = cursorId ? sanitizeId(cursorId) : ''
+    return `SELECT ID, AI_EVALUATION FROM ${s}.AI_EVALUATION_AUDITS WHERE CREATED_AT >= '${safeDate}' AND ID > '${safeCursor}' ORDER BY ID LIMIT ${Number(limit)}`
   },
 }

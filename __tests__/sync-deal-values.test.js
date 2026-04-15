@@ -37,6 +37,7 @@ const DEFAULTS = {
   'sxt-schema': 'dealsync_stg_v1',
   'backfill-start-date': '2026-03-31',
   'backfill-batch-size': '500',
+  'backfill-audit-page-size': '500',
   'backfill-dry-run': 'false',
 }
 
@@ -68,10 +69,10 @@ beforeEach(() => {
   setInputs(DEFAULTS)
 })
 
-test('backfills affected deal from audit JSON', async () => {
+test('happy path: builds map, finds deal, bulk-updates', async () => {
   executeSql
+    .mockResolvedValueOnce([{ ID: 'audit-1', AI_EVALUATION: auditJson }])
     .mockResolvedValueOnce([{ ID: 'deal-1', THREAD_ID: 'thread-1', USER_ID: 'u1' }])
-    .mockResolvedValueOnce([{ AI_EVALUATION: auditJson }])
     .mockResolvedValueOnce([])
     .mockResolvedValueOnce([])
 
@@ -80,17 +81,20 @@ test('backfills affected deal from audit JSON', async () => {
   expect(result.recovered).toBe(1)
   expect(result.skipped.auditMissing).toBe(0)
   expect(result.totalScanned).toBe(1)
+  expect(result.threadEntries).toBe(2)
+
   const updateCall = executeSql.mock.calls.find(([sql]) => sql.startsWith('UPDATE'))
-  expect(updateCall[0]).toContain('VALUE = 2500')
-  expect(updateCall[0]).toContain("CURRENCY = 'EUR'")
-  expect(updateCall[0]).toContain("WHERE ID = 'deal-1'")
+  expect(updateCall[0]).toContain('CASE ID')
+  expect(updateCall[0]).toContain("WHEN 'deal-1' THEN 2500")
+  expect(updateCall[0]).toContain("WHEN 'deal-1' THEN 'EUR'")
+  expect(updateCall[0]).toContain("WHERE ID IN ('deal-1')")
   expect(updateCall[0]).toContain('VALUE = 0 OR VALUE IS NULL')
 })
 
-test('skips when audit is missing', async () => {
+test('skips deal whose thread is not in any audit', async () => {
   executeSql
-    .mockResolvedValueOnce([{ ID: 'deal-1', THREAD_ID: 'thread-1', USER_ID: 'u1' }])
-    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([{ ID: 'audit-1', AI_EVALUATION: auditJson }])
+    .mockResolvedValueOnce([{ ID: 'deal-x', THREAD_ID: 'thread-missing', USER_ID: 'u1' }])
     .mockResolvedValueOnce([])
 
   const result = await runSyncDealValues()
@@ -100,22 +104,10 @@ test('skips when audit is missing', async () => {
   expect(executeSql.mock.calls.find(([sql]) => sql.startsWith('UPDATE'))).toBeUndefined()
 })
 
-test('skips when thread not present in audit payload', async () => {
+test('skips deal whose audit entry has null deal_value', async () => {
   executeSql
-    .mockResolvedValueOnce([{ ID: 'deal-1', THREAD_ID: 'thread-missing', USER_ID: 'u1' }])
-    .mockResolvedValueOnce([{ AI_EVALUATION: auditJson }])
-    .mockResolvedValueOnce([])
-
-  const result = await runSyncDealValues()
-
-  expect(result.recovered).toBe(0)
-  expect(result.skipped.threadNotFound).toBe(1)
-})
-
-test('skips when audit deal_value is null', async () => {
-  executeSql
+    .mockResolvedValueOnce([{ ID: 'audit-1', AI_EVALUATION: auditJson }])
     .mockResolvedValueOnce([{ ID: 'deal-2', THREAD_ID: 'thread-2', USER_ID: 'u1' }])
-    .mockResolvedValueOnce([{ AI_EVALUATION: auditJson }])
     .mockResolvedValueOnce([])
 
   const result = await runSyncDealValues()
@@ -124,23 +116,27 @@ test('skips when audit deal_value is null', async () => {
   expect(result.skipped.valueNull).toBe(1)
 })
 
-test('skips when audit JSON is unparsable', async () => {
+test('counts unparsable audits but continues', async () => {
   executeSql
+    .mockResolvedValueOnce([
+      { ID: 'audit-1', AI_EVALUATION: 'not valid json' },
+      { ID: 'audit-2', AI_EVALUATION: auditJson },
+    ])
     .mockResolvedValueOnce([{ ID: 'deal-1', THREAD_ID: 'thread-1', USER_ID: 'u1' }])
-    .mockResolvedValueOnce([{ AI_EVALUATION: 'not valid json' }])
+    .mockResolvedValueOnce([])
     .mockResolvedValueOnce([])
 
   const result = await runSyncDealValues()
 
-  expect(result.recovered).toBe(0)
-  expect(result.skipped.parseError).toBe(1)
+  expect(result.auditsParseFailed).toBe(1)
+  expect(result.recovered).toBe(1)
 })
 
-test('dry-run does not issue UPDATE but counts as recovered', async () => {
+test('dry-run does not issue UPDATE', async () => {
   setInputs({ ...DEFAULTS, 'backfill-dry-run': 'true' })
   executeSql
+    .mockResolvedValueOnce([{ ID: 'audit-1', AI_EVALUATION: auditJson }])
     .mockResolvedValueOnce([{ ID: 'deal-1', THREAD_ID: 'thread-1', USER_ID: 'u1' }])
-    .mockResolvedValueOnce([{ AI_EVALUATION: auditJson }])
     .mockResolvedValueOnce([])
 
   const result = await runSyncDealValues()
@@ -149,24 +145,41 @@ test('dry-run does not issue UPDATE but counts as recovered', async () => {
   expect(executeSql.mock.calls.find(([sql]) => sql.startsWith('UPDATE'))).toBeUndefined()
 })
 
-test('pagination advances via cursor and stops on short page', async () => {
+test('paginates deals, single bulk update per page', async () => {
   setInputs({ ...DEFAULTS, 'backfill-batch-size': '2' })
   executeSql
+    .mockResolvedValueOnce([{ ID: 'audit-1', AI_EVALUATION: auditJson }])
     .mockResolvedValueOnce([
       { ID: 'deal-a', THREAD_ID: 'thread-1', USER_ID: 'u1' },
       { ID: 'deal-b', THREAD_ID: 'thread-1', USER_ID: 'u1' },
     ])
-    .mockResolvedValueOnce([{ AI_EVALUATION: auditJson }])
-    .mockResolvedValueOnce([])
-    .mockResolvedValueOnce([{ AI_EVALUATION: auditJson }])
     .mockResolvedValueOnce([])
     .mockResolvedValueOnce([])
 
   const result = await runSyncDealValues()
 
   expect(result.recovered).toBe(2)
-  expect(result.totalScanned).toBe(2)
-  const selectCalls = executeSql.mock.calls.filter(([sql]) => sql.startsWith('SELECT ID'))
-  expect(selectCalls.length).toBeGreaterThanOrEqual(2)
-  expect(selectCalls[1][0]).toContain("ID > 'deal-b'")
+  expect(result.pages).toBe(1)
+
+  const updateCalls = executeSql.mock.calls.filter(([sql]) => sql.startsWith('UPDATE'))
+  expect(updateCalls).toHaveLength(1)
+  expect(updateCalls[0][0]).toContain("WHERE ID IN ('deal-a', 'deal-b')")
+})
+
+test('paginates audits via cursor', async () => {
+  setInputs({ ...DEFAULTS, 'backfill-audit-page-size': '1' })
+  executeSql
+    .mockResolvedValueOnce([{ ID: 'audit-1', AI_EVALUATION: auditJson }])
+    .mockResolvedValueOnce([{ ID: 'audit-2', AI_EVALUATION: auditJson }])
+    .mockResolvedValueOnce([])
+    .mockResolvedValueOnce([])
+
+  const result = await runSyncDealValues()
+
+  expect(result.auditsScanned).toBe(2)
+  const auditSelects = executeSql.mock.calls.filter(([sql]) =>
+    sql.includes('AI_EVALUATION_AUDITS'),
+  )
+  expect(auditSelects.length).toBe(3)
+  expect(auditSelects[1][0]).toContain("ID > 'audit-1'")
 })

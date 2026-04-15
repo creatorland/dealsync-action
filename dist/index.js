@@ -27842,10 +27842,11 @@ const audits = {
     return `INSERT INTO ${s}.AI_EVALUATION_AUDITS (ID, BATCH_ID, THREAD_COUNT, EMAIL_COUNT, INFERENCE_COST, INPUT_TOKENS, OUTPUT_TOKENS, MODEL_USED, AI_EVALUATION, CREATED_AT) VALUES ('${safeId}', '${safeBid}', ${Number(threadCount)}, ${Number(emailCount)}, ${Number(cost)}, ${Number(inputTokens)}, ${Number(outputTokens)}, '${safeModel}', '${safeEval}', CURRENT_TIMESTAMP)`
   },
 
-  findByThread: (schema, threadId) => {
+  selectSinceDatePage: (schema, { startDate, cursorId, limit }) => {
     const s = sanitizeSchema(schema);
-    const safeTid = sanitizeId(threadId);
-    return `SELECT A.AI_EVALUATION FROM ${s}.AI_EVALUATION_AUDITS A JOIN ${s}.DEAL_STATES D ON D.BATCH_ID = A.BATCH_ID WHERE D.THREAD_ID = '${safeTid}' LIMIT 1`
+    const safeDate = sanitizeString(startDate);
+    const safeCursor = cursorId ? sanitizeId(cursorId) : '';
+    return `SELECT ID, AI_EVALUATION FROM ${s}.AI_EVALUATION_AUDITS WHERE CREATED_AT >= '${safeDate}' AND ID > '${safeCursor}' ORDER BY ID LIMIT ${Number(limit)}`
   },
 };
 
@@ -27885,13 +27886,23 @@ const deals = {
     return `SELECT ID, THREAD_ID, USER_ID FROM ${s}.DEALS WHERE (VALUE = 0 OR VALUE IS NULL) AND CREATED_AT >= '${safeDate}' AND ID > '${safeCursor}' ORDER BY ID LIMIT ${Number(limit)}`
   },
 
-  backfillValue: (schema, { dealId, value, currency }) => {
+  bulkBackfillValues: (schema, updates) => {
     const s = sanitizeSchema(schema);
-    const safeId = sanitizeId(dealId);
-    const safeCurrency = sanitizeString(currency || 'USD');
-    const numValue = Number.isFinite(value) && value >= 0 ? value : 0;
-    return `UPDATE ${s}.DEALS SET VALUE = ${numValue}, CURRENCY = '${safeCurrency}', UPDATED_AT = CURRENT_TIMESTAMP WHERE ID = '${safeId}' AND (VALUE = 0 OR VALUE IS NULL)`
+    if (!updates || updates.length === 0) return null
+    const valueCases = [];
+    const currencyCases = [];
+    const ids = [];
+    for (const { dealId, value, currency } of updates) {
+      const safeId = sanitizeId(dealId);
+      const numValue = Number.isFinite(value) && value >= 0 ? value : 0;
+      const safeCurrency = sanitizeString(currency || 'USD');
+      valueCases.push(`WHEN '${safeId}' THEN ${numValue}`);
+      currencyCases.push(`WHEN '${safeId}' THEN '${safeCurrency}'`);
+      ids.push(`'${safeId}'`);
+    }
+    return `UPDATE ${s}.DEALS SET VALUE = CASE ID ${valueCases.join(' ')} ELSE VALUE END, CURRENCY = CASE ID ${currencyCases.join(' ')} ELSE CURRENCY END, UPDATED_AT = CURRENT_TIMESTAMP WHERE ID IN (${ids.join(', ')}) AND (VALUE = 0 OR VALUE IS NULL)`
   },
+
 };
 
 const dealContacts = {
@@ -43899,10 +43910,11 @@ async function runSyncDealValues() {
   const schema = sanitizeSchema(coreExports.getInput('sxt-schema'));
   const startDate = coreExports.getInput('backfill-start-date') || '2026-03-31';
   const batchSize = parseInt(coreExports.getInput('backfill-batch-size') || '500', 10);
+  const auditPageSize = parseInt(coreExports.getInput('backfill-audit-page-size') || '500', 10);
   const dryRun = coreExports.getInput('backfill-dry-run') === 'true';
 
   console.log(
-    `[sync-deal-values] starting startDate=${startDate} batchSize=${batchSize} dryRun=${dryRun}`,
+    `[sync-deal-values] starting startDate=${startDate} batchSize=${batchSize} auditPageSize=${auditPageSize} dryRun=${dryRun}`,
   );
 
   const jwt = await authenticate(authUrl, authSecret);
@@ -43910,67 +43922,101 @@ async function runSyncDealValues() {
 
   const summary = {
     recovered: 0,
-    skipped: { auditMissing: 0, threadNotFound: 0, valueNull: 0, parseError: 0 },
+    skipped: { auditMissing: 0, valueNull: 0, parseError: 0 },
     totalScanned: 0,
+    auditsScanned: 0,
+    auditsParseFailed: 0,
+    threadEntries: 0,
+    pages: 0,
+    sqlCalls: 0,
   };
 
+  // ============================================================
+  // Step 1: Build thread_id → entry map by scanning all audits in window.
+  // ============================================================
+  const threadMap = {};
+  let auditCursor = '';
+  while (true) {
+    const auditPage = await exec(
+      audits.selectSinceDatePage(schema, {
+        startDate,
+        cursorId: auditCursor,
+        limit: auditPageSize,
+      }),
+    );
+    summary.sqlCalls++;
+    if (!auditPage || auditPage.length === 0) break
+    summary.auditsScanned += auditPage.length;
+    for (const a of auditPage) {
+      try {
+        const parsed = parseAndValidate(a.AI_EVALUATION);
+        // Audits paginated by ID ASC (uuidv7 = time-ordered). Always overwrite
+        // so the final map holds the LATEST (re-)classification per thread.
+        for (const t of parsed) {
+          if (!t.thread_id) continue
+          if (!(t.thread_id in threadMap)) summary.threadEntries++;
+          threadMap[t.thread_id] = {
+            deal_value: t.deal_value,
+            deal_currency: t.deal_currency,
+          };
+        }
+      } catch {
+        summary.auditsParseFailed++;
+      }
+    }
+    auditCursor = auditPage[auditPage.length - 1].ID;
+    if (auditPage.length < auditPageSize) break
+  }
+  console.log(
+    `[sync-deal-values] audit scan complete audits=${summary.auditsScanned} parse_failed=${summary.auditsParseFailed} thread_entries=${summary.threadEntries}`,
+  );
+
+  // ============================================================
+  // Step 2: Iterate affected deals; resolve from in-memory map; bulk update.
+  // ============================================================
   let cursorId = '';
   while (true) {
     const page = await exec(
       deals.findAffectedForBackfill(schema, { startDate, cursorId, limit: batchSize }),
     );
+    summary.sqlCalls++;
     if (!page || page.length === 0) break
+    summary.pages++;
+    summary.totalScanned += page.length;
 
-    for (const row of page) {
-      summary.totalScanned++;
-      const dealId = row.ID;
-      const threadId = row.THREAD_ID;
-
-      const auditRows = await exec(audits.findByThread(schema, threadId));
-      if (!auditRows || auditRows.length === 0) {
+    const updates = [];
+    for (const deal of page) {
+      const entry = threadMap[deal.THREAD_ID];
+      if (!entry) {
         console.warn(
-          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=audit_missing`,
+          `[sync-deal-values] skip deal_id=${deal.ID} thread_id=${deal.THREAD_ID} reason=audit_missing`,
         );
         summary.skipped.auditMissing++;
         continue
       }
-
-      let parsed;
-      try {
-        parsed = parseAndValidate(auditRows[0].AI_EVALUATION);
-      } catch (err) {
-        console.warn(
-          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=parse_error err=${err.message}`,
-        );
-        summary.skipped.parseError++;
-        continue
-      }
-
-      const entry = parsed.find((t) => t.thread_id === threadId);
-      if (!entry) {
-        console.warn(
-          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=thread_not_in_audit`,
-        );
-        summary.skipped.threadNotFound++;
-        continue
-      }
       if (entry.deal_value == null) {
         console.warn(
-          `[sync-deal-values] skip deal_id=${dealId} thread_id=${threadId} reason=deal_value_null`,
+          `[sync-deal-values] skip deal_id=${deal.ID} thread_id=${deal.THREAD_ID} reason=deal_value_null`,
         );
         summary.skipped.valueNull++;
         continue
       }
-
       const value = Number(entry.deal_value);
       const currency = entry.deal_currency || 'USD';
-      if (!dryRun) {
-        await exec(deals.backfillValue(schema, { dealId, value, currency }));
-      }
+      updates.push({ dealId: deal.ID, value, currency });
       console.log(
-        `[sync-deal-values] ${dryRun ? 'would-recover' : 'recovered'} deal_id=${dealId} thread_id=${threadId} value=${value} currency=${currency}`,
+        `[sync-deal-values] ${dryRun ? 'would-recover' : 'recovered'} deal_id=${deal.ID} thread_id=${deal.THREAD_ID} value=${value} currency=${currency}`,
       );
       summary.recovered++;
+    }
+
+    if (!dryRun && updates.length > 0) {
+      const sql = deals.bulkBackfillValues(schema, updates);
+      if (sql) {
+        await exec(sql);
+        summary.sqlCalls++;
+        console.log(`[sync-deal-values] page=${summary.pages} bulk-updated ${updates.length} rows`);
+      }
     }
 
     cursorId = page[page.length - 1].ID;
@@ -43978,7 +44024,7 @@ async function runSyncDealValues() {
   }
 
   console.log(
-    `[sync-deal-values] done recovered=${summary.recovered} skipped_audit_missing=${summary.skipped.auditMissing} skipped_thread_not_found=${summary.skipped.threadNotFound} skipped_value_null=${summary.skipped.valueNull} skipped_parse_error=${summary.skipped.parseError} scanned=${summary.totalScanned}`,
+    `[sync-deal-values] done recovered=${summary.recovered} skipped_audit_missing=${summary.skipped.auditMissing} skipped_value_null=${summary.skipped.valueNull} skipped_parse_error=${summary.skipped.parseError} scanned=${summary.totalScanned} audits=${summary.auditsScanned} thread_entries=${summary.threadEntries} pages=${summary.pages} sql_calls=${summary.sqlCalls}`,
   );
 
   return summary
