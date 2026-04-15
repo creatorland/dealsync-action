@@ -26,5 +26,5 @@ jobs:
           sxt-schema: ${{ secrets.SXT_SCHEMA }}
           backfill-start-date: '2026-03-31'
           backfill-batch-size: '500'
-          backfill-dry-run: 'true'
+          backfill-dry-run: 'false'
           db-max-retries: ${{ secrets.DB_MAX_RETRIES }}
