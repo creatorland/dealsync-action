@@ -1,4 +1,4 @@
-name: ds-sync-deal-values-cb36159
+name: ds-sync-deal-values-0d78024
 authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ jobs:
       - id: backfill
         name: Run deal-value backfill
         timeout-minutes: 60
-        uses: creatorland/dealsync-action@cb36159
+        uses: creatorland/dealsync-action@0d78024
         with:
           command: sync-deal-values
           sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
