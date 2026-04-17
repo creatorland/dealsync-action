@@ -42,8 +42,12 @@ jest.unstable_mockModule('../src/lib/db.js', () => ({
 
 // Mock emails
 const mockFetchEmails = jest.fn()
+const mockDeriveFallbackMainContact = jest.fn(() => null)
+const mockIsBlockedSenderAddress = jest.fn(() => false)
 jest.unstable_mockModule('../src/lib/emails.js', () => ({
   fetchEmails: mockFetchEmails,
+  deriveFallbackMainContact: mockDeriveFallbackMainContact,
+  isBlockedSenderAddress: mockIsBlockedSenderAddress,
 }))
 
 // Mock ai
@@ -182,6 +186,7 @@ function makeThreads(rows, { allDeals = false } = {}) {
 describe('run-classify-pipeline command', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    mockExecuteSql.mockReset()
     uuidCallCount = 0
     for (const key of Object.keys(outputs)) delete outputs[key]
     mockAuthenticate.mockResolvedValue('test-jwt')
@@ -348,6 +353,142 @@ describe('run-classify-pipeline command', () => {
 
     // But batcher should still have been used
     expect(mockBatcherInstance.pushEvals).toHaveBeenCalledTimes(1)
+  })
+
+  // ----------------------------------------------------------
+  // Step 6a: main_contact fallback (Copilot review coverage)
+  // ----------------------------------------------------------
+
+  it('Step 6a Pass 1: calls deriveFallbackMainContact and writes deal_contacts when AI main_contact is null', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(1)
+    const threads = [
+      {
+        thread_id: 'thread-1',
+        is_deal: true,
+        ai_score: 8,
+        ai_summary: 'Deal without AI contact',
+        category: 'new',
+        deal_name: 'Outreach',
+        deal_type: 'brand_collaboration',
+        deal_value: '0',
+        currency: 'USD',
+        main_contact: null,
+      },
+    ]
+
+    const fallbackMc = {
+      email: 'gatsby@protonmail.com',
+      name: 'Gatsby',
+      company: null,
+      title: null,
+      phone_number: null,
+    }
+    mockDeriveFallbackMainContact.mockReturnValue(fallbackMc)
+    mockIsBlockedSenderAddress.mockReturnValue(false)
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql.mockResolvedValueOnce([]).mockResolvedValueOnce(rows)
+      const batch = await claimFn()
+
+      mockExecuteSql.mockResolvedValueOnce([]) // audit empty
+      const emails = [
+        {
+          messageId: rows[0].MESSAGE_ID,
+          threadId: 'thread-1',
+          body: 'Thanks for reaching out',
+          topLevelHeaders: [
+            { name: 'From', value: 'Gatsby <gatsby@protonmail.com>' },
+            { name: 'Date', value: '2026-01-02T00:00:00Z' },
+          ],
+        },
+      ]
+      mockFetchEmails.mockResolvedValueOnce(emails)
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds — no existing deals
+      mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
+      mockCallModel.mockResolvedValueOnce({ content: '[]' })
+      mockParseAndValidate.mockReturnValueOnce(threads)
+      mockExecuteSql.mockResolvedValueOnce([]) // insert audit
+
+      await workerFn(batch, { attempt: 0 })
+
+      expect(mockDeriveFallbackMainContact).toHaveBeenCalled()
+      const derivedArg = mockDeriveFallbackMainContact.mock.calls[0][0]
+      expect(Array.isArray(derivedArg)).toBe(true)
+      expect(derivedArg.length).toBeGreaterThan(0)
+
+      expect(mockBatcherInstance.pushContacts).toHaveBeenCalled()
+      const contactTuples = mockBatcherInstance.pushContacts.mock.calls[0][0]
+      expect(contactTuples.some((t) => t.includes('gatsby@protonmail.com'))).toBe(true)
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+  })
+
+  it('Step 6a Pass 2: EMAIL_SENDERS lookup when audit cache skips fetch (allEmails null)', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(1)
+    const threads = [
+      {
+        thread_id: 'thread-1',
+        is_deal: true,
+        ai_score: 7,
+        ai_summary: 'Cached deal',
+        category: 'new',
+        deal_name: 'Cached',
+        deal_type: 'sponsorship',
+        deal_value: '0',
+        currency: 'USD',
+        main_contact: null,
+      },
+    ]
+    const cachedAudit = { threads }
+
+    mockDeriveFallbackMainContact.mockClear()
+    mockIsBlockedSenderAddress.mockReturnValue(false)
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // claim UPDATE
+        .mockResolvedValueOnce(rows) // claim SELECT
+      const batch = await claimFn()
+
+      mockExecuteSql
+        .mockResolvedValueOnce([{ AI_EVALUATION: JSON.stringify(cachedAudit) }]) // selectByBatch audit
+        .mockResolvedValueOnce([
+          {
+            THREAD_ID: 'thread-1',
+            RECEIVED_AT: '2026-01-03T00:00:00Z',
+            SENDER_EMAIL: 'fromdb@example.com',
+            SENDER_NAME: 'Db Sender',
+          },
+        ]) // EMAIL_METADATA + EMAIL_SENDERS fallback
+        .mockResolvedValueOnce([]) // updateStatusByIds → deal
+
+      await workerFn(batch, { attempt: 0 })
+
+      expect(mockFetchEmails).not.toHaveBeenCalled()
+      expect(mockDeriveFallbackMainContact).not.toHaveBeenCalled()
+
+      const senderSqlCalls = mockExecuteSql.mock.calls.filter(
+        (c) => typeof c[3] === 'string' && c[3].includes('EMAIL_SENDERS'),
+      )
+      expect(senderSqlCalls.length).toBeGreaterThanOrEqual(1)
+      expect(senderSqlCalls[0][3]).toContain("em.USER_ID = 'user-1'")
+      expect(senderSqlCalls[0][3]).toMatch(/LIMIT 500\b/)
+
+      expect(mockBatcherInstance.pushContacts).toHaveBeenCalled()
+      const contactTuples = mockBatcherInstance.pushContacts.mock.calls[0][0]
+      expect(contactTuples.some((t) => t.includes('fromdb@example.com'))).toBe(true)
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
   })
 
   // ----------------------------------------------------------
