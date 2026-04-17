@@ -1,6 +1,6 @@
 import * as core from '@actions/core'
 import { authenticate, executeSql } from '../lib/db.js'
-import { sanitizeSchema, scanCompleteEligibility } from '../lib/sql/index.js'
+import { scanCompleteEligibility } from '../lib/sql/index.js'
 import {
   getGoogleDatastoreAccessToken,
   userHasScanCompleteSentAt,
@@ -93,9 +93,7 @@ export async function runEmitScanCompleteWebhooks() {
     throw new Error('Firestore service account JSON must include a non-empty project_id')
   }
 
-  const dealsyncSchema = sanitizeSchema(sxtSchemaRaw)
-  const emailCoreSchema = sanitizeSchema(emailCoreSchemaRaw)
-  const sql = scanCompleteEligibility.selectEligibleUsers(emailCoreSchema, dealsyncSchema)
+  const sql = scanCompleteEligibility.selectEligibleUsers(emailCoreSchemaRaw, sxtSchemaRaw)
   const jwt = await authenticate(authUrl, authSecret)
   const exec = (q) => executeSql(apiUrl, jwt, biscuit, q)
 
