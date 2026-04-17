@@ -478,6 +478,8 @@ describe('run-classify-pipeline command', () => {
         (c) => typeof c[3] === 'string' && c[3].includes('EMAIL_SENDERS'),
       )
       expect(senderSqlCalls.length).toBeGreaterThanOrEqual(1)
+      expect(senderSqlCalls[0][3]).toContain("em.USER_ID = 'user-1'")
+      expect(senderSqlCalls[0][3]).toMatch(/LIMIT 500\b/)
 
       expect(mockBatcherInstance.pushContacts).toHaveBeenCalled()
       const contactTuples = mockBatcherInstance.pushContacts.mock.calls[0][0]
