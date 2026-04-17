@@ -27655,8 +27655,8 @@ function sanitizeSchema(schema) {
 // DEAL_STATES table SQL builders.
 // Pure functions: params in, SQL string out. No DB connection, no side effects.
 //
-// SxT constraints:
-//   - No CTEs (WITH ... AS)
+// SxT constraints for these row-level deal-states builders:
+//   - Avoid CTEs (WITH ... AS) for mutation/query compatibility in this module
 //   - No division operator
 //   - INTERVAL syntax: INTERVAL 'N' MINUTE
 //   - ON CONFLICT (...) DO UPDATE supported
@@ -40316,8 +40316,8 @@ async function runEmitScanCompleteWebhooks() {
   const authSecret = coreExports.getInput('sxt-auth-secret');
   const apiUrl = coreExports.getInput('sxt-api-url');
   const biscuit = coreExports.getInput('sxt-biscuit');
-  const dealsyncSchema = sanitizeSchema(coreExports.getInput('sxt-schema'));
-  const emailCoreSchema = sanitizeSchema(coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING');
+  const sxtSchemaRaw = coreExports.getInput('sxt-schema');
+  const emailCoreSchemaRaw = coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING';
 
   const backendBaseUrl = coreExports.getInput('dealsync-backend-base-url');
   const sharedSecret = coreExports.getInput('dealsync-v2-shared-secret');
@@ -40327,8 +40327,10 @@ async function runEmitScanCompleteWebhooks() {
     'scan-complete-webhook-concurrency',
   );
 
-  if (!authUrl || !authSecret || !apiUrl || !biscuit) {
-    throw new Error('sxt-auth-url, sxt-auth-secret, sxt-api-url, and sxt-biscuit are required')
+  if (!authUrl || !authSecret || !apiUrl || !biscuit || !sxtSchemaRaw) {
+    throw new Error(
+      'sxt-auth-url, sxt-auth-secret, sxt-api-url, sxt-biscuit, and sxt-schema are required',
+    )
   }
   if (!backendBaseUrl || !sharedSecret || !saJsonRaw) {
     throw new Error(
@@ -40350,6 +40352,8 @@ async function runEmitScanCompleteWebhooks() {
     throw new Error('firestore-service-account-json must include a non-empty project_id')
   }
 
+  const dealsyncSchema = sanitizeSchema(sxtSchemaRaw);
+  const emailCoreSchema = sanitizeSchema(emailCoreSchemaRaw);
   const sql = scanCompleteEligibility.selectEligibleUsers(emailCoreSchema, dealsyncSchema);
   const jwt = await authenticate(authUrl, authSecret);
   const exec = (q) => executeSql(apiUrl, jwt, biscuit, q);

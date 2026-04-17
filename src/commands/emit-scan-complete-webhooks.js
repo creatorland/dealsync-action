@@ -39,8 +39,8 @@ export async function runEmitScanCompleteWebhooks() {
   const authSecret = core.getInput('sxt-auth-secret')
   const apiUrl = core.getInput('sxt-api-url')
   const biscuit = core.getInput('sxt-biscuit')
-  const dealsyncSchema = sanitizeSchema(core.getInput('sxt-schema'))
-  const emailCoreSchema = sanitizeSchema(core.getInput('email-core-schema') || 'EMAIL_CORE_STAGING')
+  const sxtSchemaRaw = core.getInput('sxt-schema')
+  const emailCoreSchemaRaw = core.getInput('email-core-schema') || 'EMAIL_CORE_STAGING'
 
   const backendBaseUrl = core.getInput('dealsync-backend-base-url')
   const sharedSecret = core.getInput('dealsync-v2-shared-secret')
@@ -50,8 +50,10 @@ export async function runEmitScanCompleteWebhooks() {
     'scan-complete-webhook-concurrency',
   )
 
-  if (!authUrl || !authSecret || !apiUrl || !biscuit) {
-    throw new Error('sxt-auth-url, sxt-auth-secret, sxt-api-url, and sxt-biscuit are required')
+  if (!authUrl || !authSecret || !apiUrl || !biscuit || !sxtSchemaRaw) {
+    throw new Error(
+      'sxt-auth-url, sxt-auth-secret, sxt-api-url, sxt-biscuit, and sxt-schema are required',
+    )
   }
   if (!backendBaseUrl || !sharedSecret || !saJsonRaw) {
     throw new Error(
@@ -73,6 +75,8 @@ export async function runEmitScanCompleteWebhooks() {
     throw new Error('firestore-service-account-json must include a non-empty project_id')
   }
 
+  const dealsyncSchema = sanitizeSchema(sxtSchemaRaw)
+  const emailCoreSchema = sanitizeSchema(emailCoreSchemaRaw)
   const sql = scanCompleteEligibility.selectEligibleUsers(emailCoreSchema, dealsyncSchema)
   const jwt = await authenticate(authUrl, authSecret)
   const exec = (q) => executeSql(apiUrl, jwt, biscuit, q)
