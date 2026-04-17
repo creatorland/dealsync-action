@@ -31,6 +31,21 @@ export function normalizeOptionalProjectId(raw) {
 }
 
 /**
+ * GCP service account JSON: GitHub Action input `firestore-service-account-json`, or env `FIRESTORE_SERVICE_ACCOUNT_JSON`
+ * (stringified JSON). Input wins when non-empty so workflows keep explicit precedence.
+ * @returns {string}
+ */
+export function resolveFirestoreServiceAccountJson() {
+  const fromInput = String(core.getInput('firestore-service-account-json') ?? '').trim()
+  if (fromInput) return fromInput
+  const fromEnv = process.env.FIRESTORE_SERVICE_ACCOUNT_JSON
+  if (fromEnv !== undefined && String(fromEnv).trim() !== '') {
+    return String(fromEnv).trim()
+  }
+  return ''
+}
+
+/**
  * Cron: eligible first LOOKBACK completions → Firestore dedupe → POST /dealsync-v2/webhooks (scan_complete).
  * @see docs/plans/2026-04-16-scan-complete-w3-cron-tech-spec.md
  */
@@ -44,7 +59,10 @@ export async function runEmitScanCompleteWebhooks() {
 
   const backendBaseUrl = core.getInput('dealsync-backend-base-url')
   const sharedSecret = core.getInput('dealsync-v2-shared-secret')
-  const saJsonRaw = core.getInput('firestore-service-account-json')
+  const saJsonRaw = resolveFirestoreServiceAccountJson()
+  if (saJsonRaw) {
+    core.setSecret(saJsonRaw)
+  }
   const concurrency = parsePositiveIntegerInput(
     core.getInput('scan-complete-webhook-concurrency') || '5',
     'scan-complete-webhook-concurrency',
@@ -57,7 +75,7 @@ export async function runEmitScanCompleteWebhooks() {
   }
   if (!backendBaseUrl || !sharedSecret || !saJsonRaw) {
     throw new Error(
-      'dealsync-backend-base-url, dealsync-v2-shared-secret, and firestore-service-account-json are required',
+      'dealsync-backend-base-url, dealsync-v2-shared-secret, and Firestore service account JSON are required (action input firestore-service-account-json or env FIRESTORE_SERVICE_ACCOUNT_JSON)',
     )
   }
 
@@ -65,14 +83,14 @@ export async function runEmitScanCompleteWebhooks() {
   try {
     credentials = JSON.parse(saJsonRaw)
   } catch {
-    throw new Error('firestore-service-account-json must be valid JSON')
+    throw new Error('Firestore service account JSON must be valid JSON')
   }
   const firestoreProjectId =
     typeof credentials.project_id === 'string'
       ? normalizeOptionalProjectId(credentials.project_id)
       : ''
   if (!firestoreProjectId) {
-    throw new Error('firestore-service-account-json must include a non-empty project_id')
+    throw new Error('Firestore service account JSON must include a non-empty project_id')
   }
 
   const dealsyncSchema = sanitizeSchema(sxtSchemaRaw)

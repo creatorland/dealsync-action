@@ -560,7 +560,7 @@ describe('run-filter-pipeline command', () => {
 
     const [, , opts] = mockRunPool.mock.calls[0]
     expect(opts).toEqual({
-      maxConcurrent: 70,
+      maxConcurrent: 30,
       maxRetries: 6,
       onDeadLetter: expect.any(Function),
     })
