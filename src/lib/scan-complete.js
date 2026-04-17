@@ -69,12 +69,24 @@ export async function getGoogleDatastoreAccessToken(credentials) {
 }
 
 /**
+ * Firestore REST encodes int64 as string; only treat as set when it parses as an integer.
+ * @param {unknown} raw
+ */
+function isValidFirestoreIntegerString(raw) {
+  if (raw == null || raw === '') return false
+  const s = String(raw).trim()
+  return s !== '' && /^-?\d+$/.test(s)
+}
+
+/**
  * @param {unknown} doc — Firestore REST GET document JSON
  */
 export function firestoreDocumentHasScanCompleteSentAt(doc) {
   const field = doc?.fields?.scanCompleteSentAt
   if (!field || typeof field !== 'object') return false
-  if (field.integerValue != null && field.integerValue !== '') return true
+  if (field.integerValue != null && field.integerValue !== '') {
+    return isValidFirestoreIntegerString(field.integerValue)
+  }
   if (field.doubleValue != null && Number.isFinite(Number(field.doubleValue))) return true
   return false
 }

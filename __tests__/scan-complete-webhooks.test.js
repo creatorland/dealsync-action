@@ -89,6 +89,14 @@ describe('firestoreDocumentHasScanCompleteSentAt', () => {
     ).toBe(true)
   })
 
+  it('is false for non-numeric integerValue strings', () => {
+    expect(
+      firestoreDocumentHasScanCompleteSentAt({
+        fields: { scanCompleteSentAt: { integerValue: 'not-a-timestamp' } },
+      }),
+    ).toBe(false)
+  })
+
   it('is true for doubleValue', () => {
     expect(
       firestoreDocumentHasScanCompleteSentAt({
