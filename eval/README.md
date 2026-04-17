@@ -30,8 +30,8 @@ The workflow runs three jobs: `eval-a` and `eval-b` in parallel, then `compare` 
 |-------|------|---------|-------------|
 | `hash_a` | string | `4274af0` | Prompt commit hash for variant A (baseline) |
 | `hash_b` | string | `57e99ad` | Prompt commit hash for variant B (candidate) |
-| `model_a` | string | `Qwen/Qwen3-235B-A22B-Instruct-2507` | Model for variant A |
-| `model_b` | string | `Qwen/Qwen3-235B-A22B-Instruct-2507` | Model for variant B |
+| `model_a` | string | `deepseek-ai/DeepSeek-V3-0324` | Model for variant A |
+| `model_b` | string | `deepseek-ai/DeepSeek-V3-0324` | Model for variant B |
 | `runs` | string | `1` | Number of eval runs per variant |
 | `temperature` | string | `0` | AI temperature (0 = deterministic) |
 | `batch_size` | string | `1` | Threads per AI call |
@@ -47,21 +47,13 @@ The workflow runs three jobs: `eval-a` and `eval-b` in parallel, then `compare` 
 
 All models served via the Hyperbolic API.
 
-| Model | Context | Cost/M tokens | Notes |
-|-------|---------|---------------|-------|
-| `Qwen/Qwen3-235B-A22B-Instruct-2507` | 262K | $0.25 | Default, production |
-| `moonshotai/Kimi-K2-Instruct` | 131K | $2.00 | Current fallback |
-| `deepseek-ai/DeepSeek-V3-0324` | 131K | $1.25 | |
-| `deepseek-ai/DeepSeek-V3` | 131K | $0.25 | |
-| `deepseek-ai/DeepSeek-R1-0528` | 164K | $3.00 | Reasoning model |
-| `deepseek-ai/DeepSeek-R1` | 131K | $2.00 | Reasoning model |
-| `openai/gpt-oss-120b` | 131K | $0.30 | |
-| `openai/gpt-oss-20b` | 131K | $0.10 | Cheapest |
-| `meta-llama/Llama-3.3-70B-Instruct` | 131K | $0.40 | |
-| `meta-llama/Meta-Llama-3.1-405B-Instruct` | 131K | $4.00 | |
-| `Qwen/Qwen3-Coder-480B-A35B-Instruct` | 262K | $0.40 | |
-| `Qwen/Qwen3-Next-80B-A3B-Instruct` | 262K | $0.30 | |
-| `Qwen/QwQ-32B` | 131K | $0.25 | No tool use support |
+| Model | Notes |
+|-------|-------|
+| `deepseek-ai/DeepSeek-V3-0324` | Default, current production |
+| `deepseek-ai/DeepSeek-R1-0528` | Reasoning model, newest |
+| `deepseek-ai/DeepSeek-R1` | Reasoning model |
+| `Qwen/Qwen3-Coder-480B-A35B-Instruct` | Coder model, newest |
+| `meta-llama/Llama-3.3-70B-Instruct` | Smallest |
 
 ## Prompt Versioning
 

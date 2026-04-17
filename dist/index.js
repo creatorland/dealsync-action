@@ -35281,9 +35281,9 @@ var systemTemplateLlama = "You are an email classifier for a content creator's i
 
 var classificationInstructions = "Classify the email threads below. Return one JSON object per thread in a JSON array.\n\n# Threads to Classify\n\n{{THREAD_DATA}}\n";
 
-// --- Prompt building ---
+// --- Prompt building (unchanged from ai.js) ---
 
-function groupByThread(emails) {
+function groupByThread$1(emails) {
   const threads = {};
   for (const email of emails) {
     const threadId = email.threadId || email.id;
@@ -35293,8 +35293,8 @@ function groupByThread(emails) {
   return threads
 }
 
-function buildThreadData(emails) {
-  const threads = groupByThread(emails);
+function buildThreadData$1(emails) {
+  const threads = groupByThread$1(emails);
   const parts = [];
   const threadOrder = [];
   let threadIndex = 0;
@@ -35334,10 +35334,9 @@ function buildThreadData(emails) {
   return { text: parts.join('\n'), threadOrder }
 }
 
-function buildPrompt(emails, { systemOverride, userOverride, creatorEmail, model } = {}) {
-  const { text: threadData, threadOrder } = buildThreadData(emails);
+function buildPrompt$1(emails, { systemOverride, userOverride, creatorEmail, model } = {}) {
+  const { text: threadData, threadOrder } = buildThreadData$1(emails);
 
-  // Select model-specific prompt: use Llama variant for Llama models
   const isLlama = model && model.toLowerCase().includes('llama');
   const defaultTemplate = isLlama ? systemTemplateLlama : systemTemplate;
   const systemPrompt = (systemOverride || defaultTemplate).trim();
@@ -35358,13 +35357,13 @@ function buildPrompt(emails, { systemOverride, userOverride, creatorEmail, model
 }
 
 // --- Constants ---
-const AI_REQUEST_TIMEOUT_MS = 240000;
-const AI_RETRY_DELAY_MS = 2000;
-const MAX_HTTP_RETRIES = parseInt(coreExports.getInput('ai-max-retries') || '3', 10);
-const MAX_TOKENS = 20480;
+const AI_REQUEST_TIMEOUT_MS$1 = 240000;
+const AI_RETRY_DELAY_MS$1 = 2000;
+const MAX_HTTP_RETRIES$1 = parseInt(coreExports.getInput('ai-max-retries') || '3', 10);
+const MAX_TOKENS$1 = 20480;
 
-// --- Valid categories and deal types for validation ---
-const VALID_CATEGORIES = new Set([
+// --- Valid categories and deal types ---
+const VALID_CATEGORIES$1 = new Set([
   'new',
   'in_progress',
   'completed',
@@ -35372,7 +35371,7 @@ const VALID_CATEGORIES = new Set([
   'likely_scam',
   'low_confidence',
 ]);
-const VALID_DEAL_TYPES = new Set([
+const VALID_DEAL_TYPES$1 = new Set([
   'brand_collaboration',
   'sponsorship',
   'affiliate',
@@ -35383,24 +35382,63 @@ const VALID_DEAL_TYPES = new Set([
   'other_business',
 ]);
 
-// --- AI client ---
+// --- JSON Schema for structured output ---
+const CLASSIFICATION_SCHEMA = {
+  name: 'deal_classifications',
+  strict: true,
+  schema: {
+    type: 'object',
+    properties: {
+      results: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            thread_index: { type: 'integer' },
+            is_deal: { type: 'boolean' },
+            is_english: { type: 'boolean' },
+            language: { type: ['string', 'null'] },
+            ai_score: { type: 'integer' },
+            category: { type: ['string', 'null'] },
+            likely_scam: { type: 'boolean' },
+            ai_insight: { type: 'string' },
+            ai_summary: { type: 'string' },
+            main_contact: { type: ['string', 'null'] },
+            deal_brand: { type: ['string', 'null'] },
+            deal_type: { type: ['string', 'null'] },
+            deal_name: { type: ['string', 'null'] },
+            deal_value: { type: ['number', 'null'] },
+            deal_currency: { type: ['string', 'null'] },
+          },
+          required: [
+            'thread_index',
+            'is_deal',
+            'is_english',
+            'ai_score',
+            'category',
+            'likely_scam',
+            'ai_insight',
+            'ai_summary',
+          ],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['results'],
+    additionalProperties: false,
+  },
+};
 
-/**
- * Call a model with HTTP retries + exponential backoff.
- * Returns { content, usage } or throws on total failure.
- *
- * @param {string} model - Model ID
- * @param {Array} messages - Chat messages
- * @param {Object} opts - { temperature, apiUrl, apiKey }
- */
-const MAX_RATE_LIMIT_WAITS = 10;
+// --- AI client with json_schema ---
 
-async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = {}) {
+const MAX_RATE_LIMIT_WAITS$1 = 10;
+
+async function callModel$1(model, messages, { temperature = 0, apiUrl, apiKey } = {}) {
   let lastError;
   let rateLimitWaits = 0;
-  for (let attempt = 1; attempt <= MAX_HTTP_RETRIES; attempt++) {
+  for (let attempt = 1; attempt <= MAX_HTTP_RETRIES$1; attempt++) {
     try {
-      console.log(`[ai-client] ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES})`);
+      console.log(`[ai-client] ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES$1})`);
       const resp = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -35411,10 +35449,10 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
           model,
           messages,
           temperature,
-          max_tokens: MAX_TOKENS,
-          response_format: { type: 'json_object' },
+          max_tokens: MAX_TOKENS$1,
+          response_format: { type: 'json_schema', json_schema: CLASSIFICATION_SCHEMA },
         }),
-        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS$1),
       });
 
       if (!resp.ok) {
@@ -35422,20 +35460,19 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
         lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 500)}`);
         console.log(`[ai-client] ${model} HTTP ${resp.status}: ${errBody.substring(0, 500)}`);
 
-        // 429: respect Retry-After or wait 5s, don't consume retry budget
-        if (resp.status === 429 && rateLimitWaits < MAX_RATE_LIMIT_WAITS) {
+        if (resp.status === 429 && rateLimitWaits < MAX_RATE_LIMIT_WAITS$1) {
           rateLimitWaits++;
           const retryAfter = parseInt(resp.headers.get('retry-after') || '5', 10) * 1000;
           console.log(
-            `[ai-client] ${model} rate limited (${rateLimitWaits}/${MAX_RATE_LIMIT_WAITS}), waiting ${retryAfter}ms`,
+            `[ai-client] ${model} rate limited (${rateLimitWaits}/${MAX_RATE_LIMIT_WAITS$1}), waiting ${retryAfter}ms`,
           );
           await sleep(retryAfter);
-          attempt--; // don't consume attempt
+          attempt--;
           continue
         }
 
-        if (attempt < MAX_HTTP_RETRIES) {
-          await sleep(backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS }));
+        if (attempt < MAX_HTTP_RETRIES$1) {
+          await sleep(backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS$1 }));
           continue
         }
         throw lastError
@@ -35449,8 +35486,8 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
       return { content, usage }
     } catch (err) {
       lastError = err;
-      if (attempt < MAX_HTTP_RETRIES) {
-        const delay = backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS });
+      if (attempt < MAX_HTTP_RETRIES$1) {
+        const delay = backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS$1 });
         console.log(
           `[ai-client] ${model} attempt ${attempt} failed: ${err.message}, retrying in ${delay}ms`,
         );
@@ -35458,81 +35495,35 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
       }
     }
   }
-  throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES} attempts`)
+  throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES$1} attempts`)
 }
 
 /**
- * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
- * @param {string} raw — raw AI response
- * @param {string[]} [threadOrder] — maps thread_index (1-based) to thread_id
+ * Parse and validate structured JSON schema output.
+ * Expects { results: [...] } from json_schema constrained decoding.
+ * Only does schema coercion — no repair logic needed.
  */
-function parseAndValidate(raw, threadOrder) {
-  let content = raw.trim();
+function parseAndValidate$1(raw, threadOrder) {
+  const parsed = JSON.parse(raw.trim());
+  const results = parsed.results || parsed;
 
-  // Strip markdown fences
-  content = content
-    .replace(/^```(?:json)?\s*\n?/gi, '')
-    .replace(/\n?```\s*$/gi, '')
-    .trim();
+  const items = Array.isArray(results) ? results : [results];
 
-  // Try to find JSON array in mixed output
-  if (!content.startsWith('[')) {
-    const arrayStart = content.indexOf('[');
-    const arrayEnd = content.lastIndexOf(']');
-    if (arrayStart !== -1 && arrayEnd > arrayStart) {
-      content = content.slice(arrayStart, arrayEnd + 1);
-    }
-  }
-
-  // Parse
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    // Try to extract from wrapper object like {"results": [...]}
-    const objStart = content.indexOf('{');
-    const objEnd = content.lastIndexOf('}');
-    if (objStart !== -1 && objEnd > objStart) {
-      const obj = JSON.parse(content.slice(objStart, objEnd + 1));
-      const arrays = Object.values(obj).filter(Array.isArray);
-      if (arrays.length === 1) {
-        parsed = arrays[0];
-      } else {
-        throw new Error('Cannot extract JSON array from response')
-      }
-    } else {
-      throw new Error('No valid JSON found in response')
-    }
-  }
-
-  // Unwrap if object with single array property
-  if (!Array.isArray(parsed)) {
-    const arrays = Object.values(parsed).filter(Array.isArray);
-    if (arrays.length === 1) {
-      parsed = arrays[0];
-    } else {
-      throw new Error('Response is not a JSON array')
-    }
-  }
-
-  // Schema validation and coercion
-  return parsed.map((r) => ({
+  return items.map((r) => ({
     thread_id:
-      threadOrder && r.thread_index != null
-        ? threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || '')
-        : String(r.thread_id || ''),
+      String(r.thread_id || ''),
     is_deal: Boolean(r.is_deal),
     is_english: r.is_english !== false,
     language: r.language || null,
     ai_score: Math.min(10, Math.max(1, Math.round(Number(r.ai_score) || 5))),
-    category: r.is_deal ? (VALID_CATEGORIES.has(r.category) ? r.category : 'low_confidence') : null,
+    category: r.is_deal ? (VALID_CATEGORIES$1.has(r.category) ? r.category : 'low_confidence') : null,
     likely_scam: Boolean(r.likely_scam) || r.category === 'likely_scam',
     ai_insight: String(r.ai_insight || ''),
     ai_summary: String(r.ai_summary || '').slice(0, 1000),
     main_contact: r.is_deal ? r.main_contact || null : null,
     deal_brand: r.is_deal ? r.deal_brand || null : null,
     deal_type: r.is_deal
-      ? VALID_DEAL_TYPES.has(r.deal_type)
+      ? VALID_DEAL_TYPES$1.has(r.deal_type)
         ? r.deal_type
         : 'other_business'
       : null,
@@ -38153,7 +38144,7 @@ async function runEval() {
     // Process batches with concurrency pool
     async function processBatch(batch, batchIdx) {
       const allEmails = batch.flatMap((gt) => gt.emails);
-      const { systemPrompt, userPrompt } = buildPrompt(allEmails, promptOverrides);
+      const { systemPrompt, userPrompt } = buildPrompt$1(allEmails, promptOverrides);
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
@@ -38162,7 +38153,7 @@ async function runEval() {
       let rawContent = null;
       let usage = {};
       try {
-        const result = await callModel(model, messages, { temperature, ...aiOpts });
+        const result = await callModel$1(model, messages, { temperature, ...aiOpts });
         rawContent = result.content;
         usage = result.usage || {};
       } catch (apiErr) {
@@ -38170,33 +38161,15 @@ async function runEval() {
         return { threads: [], health: 'failed', usage }
       }
 
-      // Layer 1: Local JSON repair
+      // json_schema enforces structure — just parse and coerce
       try {
-        const parsed = parseAndValidate(rawContent);
+        const parsed = parseAndValidate$1(rawContent);
         return { threads: parsed, health: 'clean', usage }
       } catch (parseErr) {
-        // Layer 2: Corrective retry
-        try {
-          const correctiveMessages = [
-            ...messages,
-            { role: 'assistant', content: rawContent },
-            {
-              role: 'user',
-              content: `Your previous response could not be parsed as valid JSON.\n\nParse error:\n${parseErr.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting. Return ONLY the JSON array.`,
-            },
-          ];
-          const corrected = await callModel(model, correctiveMessages, {
-            temperature: 0,
-            ...aiOpts,
-          });
-          const parsed = parseAndValidate(corrected.content);
-          return { threads: parsed, health: 'corrective_retry', usage }
-        } catch (correctiveErr) {
-          console.log(
-            `[eval] run ${run} batch ${batchIdx + 1}: corrective retry failed: ${correctiveErr.message}`,
-          );
-          return { threads: [], health: 'failed', usage }
-        }
+        console.log(
+          `[eval] run ${run} batch ${batchIdx + 1}: parse failed: ${parseErr.message}`,
+        );
+        return { threads: [], health: 'failed', usage }
       }
     }
 
@@ -38895,6 +38868,267 @@ async function runFilterPipeline() {
     total_rejected: totalRejected,
     stuck_failed: stuckFailed,
   }
+}
+
+// --- Prompt building ---
+
+function groupByThread(emails) {
+  const threads = {};
+  for (const email of emails) {
+    const threadId = email.threadId || email.id;
+    if (!threads[threadId]) threads[threadId] = [];
+    threads[threadId].push(email);
+  }
+  return threads
+}
+
+function buildThreadData(emails) {
+  const threads = groupByThread(emails);
+  const parts = [];
+  const threadOrder = [];
+  let threadIndex = 0;
+
+  for (const [threadId, threadEmails] of Object.entries(threads)) {
+    threadIndex++;
+    threadOrder.push(threadId);
+    let section = `THREAD_ID_INDEX: ${threadIndex}\n`;
+    section += `MODE: FULL_THREAD\n`;
+    section += `Message Count: ${threadEmails.length}\n`;
+
+    const previousSummary = threadEmails[0].previousAiSummary;
+    section += `PREVIOUS_AI_SUMMARY: ${previousSummary || 'None'}\n\n`;
+
+    threadEmails.forEach((email, i) => {
+      const from = getHeader(email, 'from');
+      const date = getHeader(email, 'date');
+      const subject = getHeader(email, 'subject');
+      section += `[Message ${i + 1}]\n`;
+      section += `From: ${from}\n`;
+      section += `Date: ${date}\n`;
+      section += `Subject: ${subject}\n\n`;
+      const rawBody = email.body || email.replyBody || '';
+      const body = sanitizeEmailBody(rawBody) || '[no body]';
+      section += `${body}\n\n`;
+      if (rawBody.length > 5000) {
+        console.log(
+          `[ai-prompt] thread=${threadId} msg=${i + 1}: rawBody=${rawBody.length} chars → sanitized=${body.length} chars`,
+        );
+      }
+    });
+
+    section += '===\n';
+    parts.push(section);
+  }
+
+  return { text: parts.join('\n'), threadOrder }
+}
+
+function buildPrompt(emails, { systemOverride, userOverride, creatorEmail, model } = {}) {
+  const { text: threadData, threadOrder } = buildThreadData(emails);
+
+  // Select model-specific prompt: use Llama variant for Llama models
+  const isLlama = model && model.toLowerCase().includes('llama');
+  const defaultTemplate = isLlama ? systemTemplateLlama : systemTemplate;
+  const systemPrompt = (systemOverride || defaultTemplate).trim();
+
+  const creatorLine = creatorEmail ? `Creator email: ${creatorEmail}\n\n` : '';
+
+  const userPrompt = (userOverride || classificationInstructions)
+    .replace('{{THREAD_DATA}}', creatorLine + threadData)
+    .trim();
+
+  console.log(
+    `[ai-prompt] ${emails.length} emails, ${threadOrder.length} threads, ` +
+      `system=${systemPrompt.length} chars, user=${userPrompt.length} chars, ` +
+      `threadData=${threadData.length} chars`,
+  );
+
+  return { systemPrompt, userPrompt, threadOrder }
+}
+
+// --- Constants ---
+const AI_REQUEST_TIMEOUT_MS = 240000;
+const AI_RETRY_DELAY_MS = 2000;
+const MAX_HTTP_RETRIES = parseInt(coreExports.getInput('ai-max-retries') || '3', 10);
+const MAX_TOKENS = 20480;
+
+// --- Valid categories and deal types for validation ---
+const VALID_CATEGORIES = new Set([
+  'new',
+  'in_progress',
+  'completed',
+  'not_interested',
+  'likely_scam',
+  'low_confidence',
+]);
+const VALID_DEAL_TYPES = new Set([
+  'brand_collaboration',
+  'sponsorship',
+  'affiliate',
+  'product_seeding',
+  'ambassador',
+  'content_partnership',
+  'paid_placement',
+  'other_business',
+]);
+
+// --- AI client ---
+
+/**
+ * Call a model with HTTP retries + exponential backoff.
+ * Returns { content, usage } or throws on total failure.
+ *
+ * @param {string} model - Model ID
+ * @param {Array} messages - Chat messages
+ * @param {Object} opts - { temperature, apiUrl, apiKey }
+ */
+const MAX_RATE_LIMIT_WAITS = 10;
+
+async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = {}) {
+  let lastError;
+  let rateLimitWaits = 0;
+  for (let attempt = 1; attempt <= MAX_HTTP_RETRIES; attempt++) {
+    try {
+      console.log(`[ai-client] ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES})`);
+      const resp = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens: MAX_TOKENS,
+          response_format: { type: 'json_object' },
+        }),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+      });
+
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 500)}`);
+        console.log(`[ai-client] ${model} HTTP ${resp.status}: ${errBody.substring(0, 500)}`);
+
+        // 429: respect Retry-After or wait 5s, don't consume retry budget
+        if (resp.status === 429 && rateLimitWaits < MAX_RATE_LIMIT_WAITS) {
+          rateLimitWaits++;
+          const retryAfter = parseInt(resp.headers.get('retry-after') || '5', 10) * 1000;
+          console.log(
+            `[ai-client] ${model} rate limited (${rateLimitWaits}/${MAX_RATE_LIMIT_WAITS}), waiting ${retryAfter}ms`,
+          );
+          await sleep(retryAfter);
+          attempt--; // don't consume attempt
+          continue
+        }
+
+        if (attempt < MAX_HTTP_RETRIES) {
+          await sleep(backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS }));
+          continue
+        }
+        throw lastError
+      }
+
+      const result = await resp.json();
+      const content = result.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Empty response from model')
+
+      const usage = result.usage || {};
+      return { content, usage }
+    } catch (err) {
+      lastError = err;
+      if (attempt < MAX_HTTP_RETRIES) {
+        const delay = backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS });
+        console.log(
+          `[ai-client] ${model} attempt ${attempt} failed: ${err.message}, retrying in ${delay}ms`,
+        );
+        await sleep(delay);
+      }
+    }
+  }
+  throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES} attempts`)
+}
+
+/**
+ * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
+ * @param {string} raw — raw AI response
+ * @param {string[]} [threadOrder] — maps thread_index (1-based) to thread_id
+ */
+function parseAndValidate(raw, threadOrder) {
+  let content = raw.trim();
+
+  // Strip markdown fences
+  content = content
+    .replace(/^```(?:json)?\s*\n?/gi, '')
+    .replace(/\n?```\s*$/gi, '')
+    .trim();
+
+  // Try to find JSON array in mixed output
+  if (!content.startsWith('[')) {
+    const arrayStart = content.indexOf('[');
+    const arrayEnd = content.lastIndexOf(']');
+    if (arrayStart !== -1 && arrayEnd > arrayStart) {
+      content = content.slice(arrayStart, arrayEnd + 1);
+    }
+  }
+
+  // Parse
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    // Try to extract from wrapper object like {"results": [...]}
+    const objStart = content.indexOf('{');
+    const objEnd = content.lastIndexOf('}');
+    if (objStart !== -1 && objEnd > objStart) {
+      const obj = JSON.parse(content.slice(objStart, objEnd + 1));
+      const arrays = Object.values(obj).filter(Array.isArray);
+      if (arrays.length === 1) {
+        parsed = arrays[0];
+      } else {
+        throw new Error('Cannot extract JSON array from response')
+      }
+    } else {
+      throw new Error('No valid JSON found in response')
+    }
+  }
+
+  // Unwrap if object with single array property
+  if (!Array.isArray(parsed)) {
+    const arrays = Object.values(parsed).filter(Array.isArray);
+    if (arrays.length === 1) {
+      parsed = arrays[0];
+    } else {
+      throw new Error('Response is not a JSON array')
+    }
+  }
+
+  // Schema validation and coercion
+  return parsed.map((r) => ({
+    thread_id:
+      threadOrder && r.thread_index != null
+        ? threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || '')
+        : String(r.thread_id || ''),
+    is_deal: Boolean(r.is_deal),
+    is_english: r.is_english !== false,
+    language: r.language || null,
+    ai_score: Math.min(10, Math.max(1, Math.round(Number(r.ai_score) || 5))),
+    category: r.is_deal ? (VALID_CATEGORIES.has(r.category) ? r.category : 'low_confidence') : null,
+    likely_scam: Boolean(r.likely_scam) || r.category === 'likely_scam',
+    ai_insight: String(r.ai_insight || ''),
+    ai_summary: String(r.ai_summary || '').slice(0, 1000),
+    main_contact: r.is_deal ? r.main_contact || null : null,
+    deal_brand: r.is_deal ? r.deal_brand || null : null,
+    deal_type: r.is_deal
+      ? VALID_DEAL_TYPES.has(r.deal_type)
+        ? r.deal_type
+        : 'other_business'
+      : null,
+    deal_name: r.is_deal ? r.deal_name || null : null,
+    deal_value: r.deal_value != null ? Number(r.deal_value) : null,
+    deal_currency: r.deal_currency || null,
+  }))
 }
 
 /**

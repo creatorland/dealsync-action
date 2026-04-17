@@ -1,5 +1,5 @@
 import * as core from '@actions/core'
-import { buildPrompt, callModel, parseAndValidate } from '../lib/ai.js'
+import { buildPrompt, callModel, parseAndValidate } from '../lib/ai-v2.js'
 import { isRejected } from '../lib/emails.js'
 import {
   computeDetectionMetrics,
@@ -115,33 +115,15 @@ export async function runEval() {
         return { threads: [], health: 'failed', usage }
       }
 
-      // Layer 1: Local JSON repair
+      // json_schema enforces structure — just parse and coerce
       try {
         const parsed = parseAndValidate(rawContent)
         return { threads: parsed, health: 'clean', usage }
       } catch (parseErr) {
-        // Layer 2: Corrective retry
-        try {
-          const correctiveMessages = [
-            ...messages,
-            { role: 'assistant', content: rawContent },
-            {
-              role: 'user',
-              content: `Your previous response could not be parsed as valid JSON.\n\nParse error:\n${parseErr.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting. Return ONLY the JSON array.`,
-            },
-          ]
-          const corrected = await callModel(model, correctiveMessages, {
-            temperature: 0,
-            ...aiOpts,
-          })
-          const parsed = parseAndValidate(corrected.content)
-          return { threads: parsed, health: 'corrective_retry', usage }
-        } catch (correctiveErr) {
-          console.log(
-            `[eval] run ${run} batch ${batchIdx + 1}: corrective retry failed: ${correctiveErr.message}`,
-          )
-          return { threads: [], health: 'failed', usage }
-        }
+        console.log(
+          `[eval] run ${run} batch ${batchIdx + 1}: parse failed: ${parseErr.message}`,
+        )
+        return { threads: [], health: 'failed', usage }
       }
     }
 
