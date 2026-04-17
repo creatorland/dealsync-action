@@ -84,9 +84,10 @@ export function firestoreDocumentHasScanCompleteSentAt(doc) {
  */
 export async function userHasScanCompleteSentAt({ projectId, userId, accessToken }) {
   const path = `projects/${encodeURIComponent(projectId)}/databases/(default)/documents/users/${encodeURIComponent(userId)}`
-  const url = `https://firestore.googleapis.com/v1/${path}`
+  const url = new URL(`https://firestore.googleapis.com/v1/${path}`)
+  url.searchParams.set('mask.fieldPaths', 'scanCompleteSentAt')
 
-  const resp = await fetch(url, {
+  const resp = await fetch(url.toString(), {
     method: 'GET',
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: AbortSignal.timeout(30000),

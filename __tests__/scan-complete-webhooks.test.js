@@ -5,6 +5,7 @@ import {
   getRowUserId,
   coerceNumber,
   firestoreDocumentHasScanCompleteSentAt,
+  userHasScanCompleteSentAt,
   postScanCompleteWebhook,
 } from '../src/lib/scan-complete.js'
 
@@ -86,6 +87,37 @@ describe('firestoreDocumentHasScanCompleteSentAt', () => {
         fields: { scanCompleteSentAt: { doubleValue: 1710000000 } },
       }),
     ).toBe(true)
+  })
+})
+
+describe('userHasScanCompleteSentAt', () => {
+  const origFetch = global.fetch
+
+  afterEach(() => {
+    global.fetch = origFetch
+  })
+
+  it('requests only scanCompleteSentAt via field mask', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ fields: { scanCompleteSentAt: { integerValue: '1710000000' } } }),
+    })
+
+    const hasSentAt = await userHasScanCompleteSentAt({
+      projectId: 'creatorland-prod',
+      userId: 'user-1',
+      accessToken: 'token',
+    })
+
+    expect(hasSentAt).toBe(true)
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://firestore.googleapis.com/v1/projects/creatorland-prod/databases/(default)/documents/users/user-1?mask.fieldPaths=scanCompleteSentAt',
+      expect.objectContaining({
+        method: 'GET',
+        headers: expect.objectContaining({ Authorization: 'Bearer token' }),
+      }),
+    )
   })
 })
 
