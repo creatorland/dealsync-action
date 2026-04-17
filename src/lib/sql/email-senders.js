@@ -2,7 +2,9 @@
 //
 // Cross-schema read of EMAIL_CORE.EMAIL_METADATA + EMAIL_SENDERS, used
 // by the classify pipeline's main_contact fallback when no fetched email
-// payload is available (e.g. cached-audit retries).
+// payload is available (e.g. cached-audit retries). Classify calls this once
+// per thread so a shared LIMIT cannot hide quieter threads behind a very
+// active one under global ORDER BY RECEIVED_AT DESC.
 //
 // SxT constraints (same as deal-states.js):
 //   - No CTEs

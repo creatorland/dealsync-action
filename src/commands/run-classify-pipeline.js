@@ -656,37 +656,40 @@ export async function runClassifyPipeline() {
         // contact — covers the cached-audit retry path where allEmails is null.
         const stillMissing = fallbackCandidates.filter((t) => !isUsableContact(t.main_contact))
         if (stillMissing.length > 0) {
-          const quotedTids = [...new Set(stillMissing.map((t) => `'${sanitizeId(t.thread_id)}'`))]
-          try {
-            const senderRows = await execNoRL(
-              emailSendersSql.selectByThreadIds(coreSchema, quotedTids),
-            )
-            // Rows are ordered by RECEIVED_AT DESC — keep the first usable
-            // sender per thread.
-            const latestByThread = {}
-            for (const row of senderRows || []) {
-              const tid = row.THREAD_ID
-              if (!tid || latestByThread[tid]) continue
-              const addr = (row.SENDER_EMAIL || '').trim().toLowerCase()
-              if (!addr) continue
-              if (creatorLower && addr === creatorLower) continue
-              if (isBlockedSenderAddress(addr)) continue
-              latestByThread[tid] = {
-                email: addr,
-                name: row.SENDER_NAME || null,
-                company: null,
-                title: null,
-                phone_number: null,
+          // One query per thread so a global LIMIT + ORDER BY RECEIVED_AT DESC cannot
+          // starve quieter threads when another thread dominates the newest rows.
+          const latestByThread = {}
+          for (const thread of stillMissing) {
+            const tid = thread.thread_id
+            const quotedTids = [`'${sanitizeId(tid)}'`]
+            try {
+              const senderRows = await execNoRL(
+                emailSendersSql.selectByThreadIds(coreSchema, quotedTids),
+              )
+              for (const row of senderRows || []) {
+                if (row.THREAD_ID !== tid) continue
+                const addr = (row.SENDER_EMAIL || '').trim().toLowerCase()
+                if (!addr) continue
+                if (creatorLower && addr === creatorLower) continue
+                if (isBlockedSenderAddress(addr)) continue
+                latestByThread[tid] = {
+                  email: addr,
+                  name: row.SENDER_NAME || null,
+                  company: null,
+                  title: null,
+                  phone_number: null,
+                }
+                break
               }
+            } catch (err) {
+              console.error(
+                `[run-classify-pipeline] main_contact DB fallback for thread ${tid} failed (non-fatal): ${err.message}`,
+              )
             }
-            for (const thread of stillMissing) {
-              const derived = latestByThread[thread.thread_id]
-              if (derived) thread.main_contact = derived
-            }
-          } catch (err) {
-            console.error(
-              `[run-classify-pipeline] main_contact DB fallback lookup failed (non-fatal): ${err.message}`,
-            )
+          }
+          for (const thread of stillMissing) {
+            const derived = latestByThread[thread.thread_id]
+            if (derived) thread.main_contact = derived
           }
         }
 
