@@ -34966,20 +34966,11 @@ function isRejected(email) {
     if (!hasDkim && !hasSpf && !hasDmarc) return true
   }
 
-  // Rule 2: Blocked sender
+  // Rule 2: Blocked sender (single source of truth with isBlockedSenderAddress)
   const fromValue = getHeader(email, 'from');
   if (fromValue) {
     const emailAddr = extractEmailAddress(fromValue);
-    for (const prefix of blockedPrefixes) {
-      if (emailAddr.startsWith(prefix)) return true
-    }
-    const atIndex = emailAddr.indexOf('@');
-    if (atIndex !== -1) {
-      const domain = emailAddr.slice(atIndex + 1);
-      for (const blockedDomain of blockedDomains) {
-        if (domain.includes(blockedDomain)) return true
-      }
-    }
+    if (emailAddr && isBlockedSenderAddress(emailAddr)) return true
   }
 
   // Rule 3: Bulk headers
