@@ -60,6 +60,17 @@ These are redundant with the `json_schema` and can confuse the model if they con
 - Check `eval/thresholds.json` for current pass/fail criteria before evaluating.
 - See `prompts/system.md` for the current production prompt as reference.
 
+## Promoting a passing variant
+
+When a prompt variant passes evaluation:
+
+1. Update `prompts/system.md` (and `prompts/user.md` if changed) with the new prompt.
+2. Run the eval with bundled prompts (10 runs, batch_size=5) to capture the new baseline.
+3. Copy the result JSON to `eval/baseline.json`.
+4. Archive the comparison in `eval/history/` (see below).
+5. If pass/fail criteria need adjusting, update `eval/thresholds.json`. Each boolean criterion can be set to `false` to disable it, and numeric thresholds (`min_recall`, `min_precision`, `max_recall_stddev`) can be tuned.
+6. PR everything to main: updated prompts, baseline, history, and thresholds if changed.
+
 ## Archiving results
 
 After running an eval comparison, archive results to `eval/history/` following this structure:

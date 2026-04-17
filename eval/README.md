@@ -59,11 +59,12 @@ Three W3 workflows on testnet. Click to open in the W3 Explorer:
 
 When a prompt variant passes:
 
-1. Update `prompts/system.md` with the new prompt.
-2. Run `dealsync-eval-v4` with bundled prompts (10 runs).
-3. Copy the result JSON to `eval/baseline.json`.
-4. Archive the comparison in `eval/history/`.
-5. PR everything to main.
+1. Update `prompts/system.md` (and `prompts/user.md` if changed) with the new prompt.
+2. Run `dealsync-eval-v4` with bundled prompts (10 runs, batch_size=5) to capture the new baseline.
+3. Copy the result JSON to `eval/baseline.json` — this becomes the new baseline for all future comparisons.
+4. Archive the comparison in `eval/history/` (see [Archiving Eval Results](#archiving-eval-results)).
+5. If pass/fail criteria need adjusting, update `eval/thresholds.json` (see [Pass/Fail Criteria](#passfail-criteria)).
+6. PR everything to main: updated prompts, baseline, history, and thresholds if changed.
 
 ## Workflow Inputs
 
