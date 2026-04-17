@@ -42,8 +42,12 @@ jest.unstable_mockModule('../src/lib/db.js', () => ({
 
 // Mock emails
 const mockFetchEmails = jest.fn()
+const mockDeriveFallbackMainContact = jest.fn(() => null)
+const mockIsBlockedSenderAddress = jest.fn(() => false)
 jest.unstable_mockModule('../src/lib/emails.js', () => ({
   fetchEmails: mockFetchEmails,
+  deriveFallbackMainContact: mockDeriveFallbackMainContact,
+  isBlockedSenderAddress: mockIsBlockedSenderAddress,
 }))
 
 // Mock ai

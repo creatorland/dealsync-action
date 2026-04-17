@@ -2,7 +2,7 @@ import { v7 as uuidv7 } from 'uuid'
 import * as core from '@actions/core'
 import { authenticate, executeSql, acquireRateLimitToken } from '../lib/db.js'
 import { callModel, parseAndValidate, buildPrompt } from '../lib/ai.js'
-import { fetchEmails } from '../lib/emails.js'
+import { fetchEmails, deriveFallbackMainContact, isBlockedSenderAddress } from '../lib/emails.js'
 import { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
 import { WriteBatcher } from '../lib/batcher.js'
 import {
@@ -15,6 +15,7 @@ import {
   audits as auditsSql,
   evaluations as evalSql,
   deals as dealsSql,
+  emailSenders as emailSendersSql,
 } from '../lib/sql/index.js'
 
 /**
@@ -240,6 +241,10 @@ export async function runClassifyPipeline() {
     // -----------------------------------------------------------------------
 
     let threads = null
+    // Hoisted so Step 6 can derive a main_contact fallback from the thread's
+    // latest external sender when the AI did not return one. Remains null on
+    // cached-audit retries — Step 6 falls back to a DB lookup in that case.
+    let allEmails = null
 
     t0 = Date.now()
     const existingAudit = await execNoRL(auditsSql.selectByBatch(schema, batchId))
@@ -271,7 +276,6 @@ export async function runClassifyPipeline() {
       const syncStateId = rows[0].SYNC_STATE_ID
       const messageIds = rows.map((r) => r.MESSAGE_ID)
 
-      let allEmails
       t0 = Date.now()
       try {
         allEmails = await fetchEmails(messageIds, metaByMessageId, {
@@ -611,6 +615,87 @@ export async function runClassifyPipeline() {
     // -----------------------------------------------------------------------
 
     if (dealThreads.length > 0) {
+      // ---------------------------------------------------------------------
+      // Step 6a: main_contact fallback — derive from the thread's latest
+      // external sender when the AI returned a null/unusable main_contact.
+      // A "usable" contact still must be: non-empty email, not the creator,
+      // and not a blocked/automated sender (mailer-daemon, no-reply, etc.).
+      // ---------------------------------------------------------------------
+
+      const creatorLower = (creatorEmail || '').trim().toLowerCase()
+      const isUsableContact = (mc) => {
+        if (!mc) return false
+        const email = (mc.email || '').trim().toLowerCase()
+        if (!email) return false
+        if (creatorLower && email === creatorLower) return false
+        if (isBlockedSenderAddress(email)) return false
+        return true
+      }
+
+      const fallbackCandidates = dealThreads.filter((t) => !isUsableContact(t.main_contact))
+
+      if (fallbackCandidates.length > 0) {
+        // Pass 1: use fetched email bodies (fresh-classification path).
+        if (Array.isArray(allEmails) && allEmails.length > 0) {
+          const emailsByThread = {}
+          for (const email of allEmails) {
+            if (!email.threadId) continue
+            if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = []
+            emailsByThread[email.threadId].push(email)
+          }
+
+          for (const thread of fallbackCandidates) {
+            if (isUsableContact(thread.main_contact)) continue
+            const threadEmails = emailsByThread[thread.thread_id]
+            const derived = deriveFallbackMainContact(threadEmails, creatorEmail)
+            if (derived && isUsableContact(derived)) thread.main_contact = derived
+          }
+        }
+
+        // Pass 2: DB lookup via EMAIL_SENDERS for threads still missing a
+        // contact — covers the cached-audit retry path where allEmails is null.
+        const stillMissing = fallbackCandidates.filter((t) => !isUsableContact(t.main_contact))
+        if (stillMissing.length > 0) {
+          const quotedTids = [...new Set(stillMissing.map((t) => `'${sanitizeId(t.thread_id)}'`))]
+          try {
+            const senderRows = await execNoRL(
+              emailSendersSql.selectByThreadIds(coreSchema, quotedTids),
+            )
+            // Rows are ordered by RECEIVED_AT DESC — keep the first usable
+            // sender per thread.
+            const latestByThread = {}
+            for (const row of senderRows || []) {
+              const tid = row.THREAD_ID
+              if (!tid || latestByThread[tid]) continue
+              const addr = (row.SENDER_EMAIL || '').trim().toLowerCase()
+              if (!addr) continue
+              if (creatorLower && addr === creatorLower) continue
+              if (isBlockedSenderAddress(addr)) continue
+              latestByThread[tid] = {
+                email: addr,
+                name: row.SENDER_NAME || null,
+                company: null,
+                title: null,
+                phone_number: null,
+              }
+            }
+            for (const thread of stillMissing) {
+              const derived = latestByThread[thread.thread_id]
+              if (derived) thread.main_contact = derived
+            }
+          } catch (err) {
+            console.error(
+              `[run-classify-pipeline] main_contact DB fallback lookup failed (non-fatal): ${err.message}`,
+            )
+          }
+        }
+
+        const recovered = fallbackCandidates.filter((t) => isUsableContact(t.main_contact)).length
+        console.log(
+          `[run-classify-pipeline] main_contact fallback: ${recovered}/${fallbackCandidates.length} recovered (${fallbackCandidates.length - recovered} still unresolved)`,
+        )
+      }
+
       const coreContactValues = []
       const dealContactValues = []
 

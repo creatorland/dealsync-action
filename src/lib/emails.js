@@ -82,19 +82,76 @@ export function sanitizeEmailBody(body) {
 // Filter rules
 // ---------------------------------------------------------------------------
 
-function extractEmailAddress(from) {
+export function extractEmailAddress(from) {
+  if (!from) return ''
   const match = from.match(/<([^>]+)>/)
   return (match ? match[1] : from).trim().toLowerCase()
 }
 
-function extractDisplayName(from) {
+export function extractDisplayName(from) {
+  if (!from) return ''
   const match = from.match(/^(.+?)\s*</)
-  return match
-    ? match[1]
-        .trim()
-        .replace(/^["']|["']$/g, '')
-        .toLowerCase()
-    : ''
+  return match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
+}
+
+/**
+ * Check whether a sender address matches blocked prefixes / domains.
+ * Mirrors filter rule 2 so main_contact fallback does not derive from
+ * automated senders, bounce addresses, or marketing-only domains.
+ */
+export function isBlockedSenderAddress(addr) {
+  if (!addr) return true
+  const lower = addr.trim().toLowerCase()
+  if (!lower) return true
+  for (const prefix of blockedPrefixes) {
+    if (lower.startsWith(prefix)) return true
+  }
+  const atIndex = lower.indexOf('@')
+  if (atIndex !== -1) {
+    const domain = lower.slice(atIndex + 1)
+    for (const blockedDomain of blockedDomains) {
+      if (domain.includes(blockedDomain)) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Derive a fallback main_contact from a thread's messages when the AI
+ * did not return one. Picks the latest external sender (not the creator,
+ * not blocked) and returns it in the same shape as AI's main_contact.
+ *
+ * @param {object[]} threadEmails - fetched email objects for a single thread
+ * @param {string} creatorEmail - creator's email (excluded from candidates)
+ * @returns {{email: string, name: string|null, company: null, title: null, phone_number: null}|null}
+ */
+export function deriveFallbackMainContact(threadEmails, creatorEmail) {
+  if (!threadEmails || threadEmails.length === 0) return null
+  const creatorLower = (creatorEmail || '').trim().toLowerCase()
+
+  const sorted = [...threadEmails].sort((a, b) => {
+    const da = new Date(getHeader(a, 'date') || 0).getTime() || 0
+    const db = new Date(getHeader(b, 'date') || 0).getTime() || 0
+    return db - da
+  })
+
+  for (const email of sorted) {
+    const fromHeader = getHeader(email, 'from')
+    if (!fromHeader) continue
+    const addr = extractEmailAddress(fromHeader)
+    if (!addr) continue
+    if (creatorLower && addr === creatorLower) continue
+    if (isBlockedSenderAddress(addr)) continue
+    const displayName = extractDisplayName(fromHeader)
+    return {
+      email: addr,
+      name: displayName || null,
+      company: null,
+      title: null,
+      phone_number: null,
+    }
+  }
+  return null
 }
 
 export function isRejected(email) {
@@ -149,7 +206,7 @@ export function isRejected(email) {
 
   // Rule 5: Non-personalized sender name
   if (fromValue) {
-    const displayName = extractDisplayName(fromValue)
+    const displayName = extractDisplayName(fromValue).toLowerCase()
     if (displayName && nonPersonalizedNames.some((name) => displayName === name.toLowerCase())) {
       return true
     }
