@@ -27,7 +27,7 @@ This is a **GitHub Action** (Node 24, ESM) that implements a multi-stage email d
 
 ### Command Dispatch Pattern
 
-Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command` GitHub Action input selects which handler runs. Available commands: `run-filter-pipeline`, `run-classify-pipeline`, `sync-deal-states`, `eval`, `eval-compare`. All commands are async, return a JSON result, and set `success`/`result`/`error` outputs via `@actions/core`.
+Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command` GitHub Action input selects which handler runs. Available commands: `run-filter-pipeline`, `run-classify-pipeline`, `run-recovery-pipeline`, `sync-deal-states`, `emit-scan-complete-webhooks`, `eval`, `eval-compare`. All commands are async, return a JSON result, and set `success`/`result`/`error` outputs via `@actions/core`.
 
 ### Pipeline Commands
 
@@ -36,6 +36,8 @@ Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command`
 **`run-classify-pipeline`** — Claims batches of pending_classification emails, fetches full content via `fetchThreadEmails()`, calls AI classification, saves audit checkpoint to AI_EVALUATION_AUDITS, upserts evaluations/deals/contacts, and sets terminal deal states. Throws on unfetchable threads to trigger batch-level retry. Uses `WriteBatcher` (`src/lib/batcher.js`) for batched SQL writes. Runs batches concurrently via `runPool()`.
 
 **`sync-deal-states`** — Paginated sync of deal states.
+
+**`emit-scan-complete-webhooks`** — Read-only SxT query (`src/lib/sql/scan-complete-eligibility.js`), Firestore dedupe + `POST /dealsync-v2/webhooks` (`src/lib/scan-complete.js`). Service account token via `node:crypto` JWT, not `google-auth-library`.
 
 **`eval` / `eval-compare`** — Evaluation system (see below).
 

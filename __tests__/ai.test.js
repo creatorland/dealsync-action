@@ -12,6 +12,10 @@ jest.unstable_mockModule('../prompts/system.md', () => ({
   default: 'You are an email classifier for influencer inboxes. Return JSON only.',
 }))
 
+jest.unstable_mockModule('../prompts/system-llama.md', () => ({
+  default: 'You are an email classifier (llama). Return JSON only.',
+}))
+
 jest.unstable_mockModule('../prompts/user.md', () => ({
   default:
     'Classify the email threads below. Return one JSON object per thread in a JSON array.\n\n# Threads to Classify\n\n{{THREAD_DATA}}',

@@ -36,6 +36,12 @@ jest.unstable_mockModule('../src/commands/run-classify-pipeline.js', () => ({
   runClassifyPipeline: jest.fn().mockRejectedValue(new Error('classify-pipeline not mocked')),
 }))
 
+jest.unstable_mockModule('../src/commands/emit-scan-complete-webhooks.js', () => ({
+  runEmitScanCompleteWebhooks: jest
+    .fn()
+    .mockResolvedValue({ scanned: 0, skippedDeduped: 0, posted: 0, errors: 0 }),
+}))
+
 const core = await import('@actions/core')
 const { run } = await import('../src/main.js')
 
@@ -56,6 +62,22 @@ describe('dealsync main (command router)', () => {
       batches_failed: 0,
       total_filtered: 0,
       total_rejected: 0,
+    })
+  })
+
+  it('routes emit-scan-complete-webhooks', async () => {
+    core.getInput.mockImplementation((name) =>
+      name === 'command' ? 'emit-scan-complete-webhooks' : '',
+    )
+
+    await run()
+
+    expect(outputs['success']).toBe('true')
+    expect(JSON.parse(outputs['result'])).toEqual({
+      scanned: 0,
+      skippedDeduped: 0,
+      posted: 0,
+      errors: 0,
     })
   })
 

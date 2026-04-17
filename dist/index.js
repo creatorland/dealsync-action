@@ -26,6 +26,7 @@ import require$$0$7 from 'diagnostics_channel';
 import require$$2$2 from 'child_process';
 import require$$6$1 from 'timers';
 import { createRequire as createRequire$1 } from 'module';
+import { createSign, createPrivateKey } from 'node:crypto';
 
 var commonjsGlobal = typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : typeof global !== 'undefined' ? global : typeof self !== 'undefined' ? self : {};
 
@@ -27654,8 +27655,8 @@ function sanitizeSchema(schema) {
 // DEAL_STATES table SQL builders.
 // Pure functions: params in, SQL string out. No DB connection, no side effects.
 //
-// SxT constraints:
-//   - No CTEs (WITH ... AS)
+// SxT constraints for these row-level deal-states builders:
+//   - Avoid CTEs (WITH ... AS) for mutation/query compatibility in this module
 //   - No division operator
 //   - INTERVAL syntax: INTERVAL 'N' MINUTE
 //   - ON CONFLICT (...) DO UPDATE supported
@@ -27888,6 +27889,135 @@ const contacts = {
   upsert: (schema, valueTuples) => {
     const s = sanitizeSchema(schema);
     return `INSERT INTO ${s}.CONTACTS (USER_ID, EMAIL, NAME, COMPANY_NAME, TITLE, PHONE_NUMBER, CREATED_AT, UPDATED_AT) VALUES ${valueTuples.join(', ')} ON CONFLICT (USER_ID, EMAIL) DO UPDATE SET NAME = EXCLUDED.NAME, COMPANY_NAME = EXCLUDED.COMPANY_NAME, TITLE = EXCLUDED.TITLE, PHONE_NUMBER = EXCLUDED.PHONE_NUMBER, UPDATED_AT = CURRENT_TIMESTAMP`
+  },
+};
+
+// Read-only eligibility query for scan_complete webhook (first completed LOOKBACK only).
+// Uses CTEs — unlike row-level builders in deal-states.js — OK for this analytics-style read.
+// Parity: backend/src/services/dealsync-v2.sync.service.ts (getSyncStatus, isFirstCompletedSync)
+// Plan: docs/plans/2026-04-16-scan-complete-w3-cron-tech-spec.md
+
+
+const scanCompleteEligibility = {
+  /**
+   * @param {string} emailCoreSchema
+   * @param {string} dealsyncSchema
+   * @returns {string}
+   */
+  selectEligibleUsers(emailCoreSchema, dealsyncSchema) {
+    const ec = sanitizeSchema(emailCoreSchema);
+    const ds = sanitizeSchema(dealsyncSchema);
+    return `WITH latest_sync AS (
+  SELECT sync_state_id, user_id, created_at, sync_strategy
+  FROM (
+    SELECT
+      id AS sync_state_id,
+      user_id,
+      created_at,
+      sync_strategy,
+      ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC) AS rn
+    FROM ${ec}.sync_states
+  ) ranked
+  WHERE rn = 1
+),
+status_inputs AS (
+  SELECT
+    ls.user_id,
+    ls.sync_state_id,
+    ls.created_at AS initiated_at,
+    (SELECT COUNT(*) FROM ${ec}.email_metadata em WHERE em.user_id = ls.user_id) AS total_messages,
+    COALESCE((
+      SELECT SUM(
+        CASE WHEN ds.status NOT IN ('pending','filtering','pending_classification','classifying')
+          THEN 1 ELSE 0 END
+      )
+      FROM ${ds}.deal_states ds
+      WHERE ds.user_id = ls.user_id
+    ), 0) AS processed_messages
+  FROM latest_sync ls
+  WHERE ls.sync_strategy = 'LOOKBACK'
+),
+completed_candidates AS (
+  SELECT *
+  FROM status_inputs
+  WHERE initiated_at IS NOT NULL
+    AND processed_messages >= total_messages
+),
+prior_lookback_success AS (
+  SELECT ss.user_id, ss.created_at
+  FROM ${ec}.sync_states ss
+  WHERE ss.sync_strategy = 'LOOKBACK'
+    AND EXISTS (
+      SELECT 1
+      FROM ${ec}.sync_events se_s
+      WHERE se_s.sync_state_id = ss.id
+        AND se_s.event IN ('metadata_ingestion_end','content_ingestion_end','completed')
+        AND se_s.created_at = (
+          SELECT MAX(se2.created_at)
+          FROM ${ec}.sync_events se2
+          WHERE se2.sync_state_id = ss.id
+            AND se2.event IN ('metadata_ingestion_end','content_ingestion_end','completed')
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM ${ec}.sync_events se_f
+          WHERE se_f.sync_state_id = ss.id
+            AND se_f.event IN ('metadata_ingestion_failed','content_ingestion_failed')
+            AND se_f.created_at > se_s.created_at
+        )
+    )
+),
+eligible AS (
+  SELECT c.*
+  FROM completed_candidates c
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM prior_lookback_success pls
+    WHERE pls.user_id = c.user_id
+      AND pls.created_at < c.initiated_at
+  )
+),
+deal_agg AS (
+  SELECT
+    e.user_id,
+    SUM(CASE WHEN d.category = 'new' THEN 1 ELSE 0 END) AS db_new,
+    SUM(CASE WHEN d.category = 'in_progress' THEN 1 ELSE 0 END) AS db_in_progress,
+    SUM(CASE WHEN d.category = 'completed' THEN 1 ELSE 0 END) AS db_completed,
+    SUM(CASE WHEN d.category = 'not_interested' THEN 1 ELSE 0 END) AS db_not_interested,
+    SUM(CASE WHEN d.category = 'likely_scam' THEN 1 ELSE 0 END) AS db_likely_scam,
+    SUM(CASE WHEN d.category = 'low_confidence' THEN 1 ELSE 0 END) AS db_low_confidence
+  FROM eligible e
+  LEFT JOIN ${ds}.deals d
+    ON d.user_id = e.user_id AND d.updated_at >= e.initiated_at
+  GROUP BY e.user_id
+),
+contact_agg AS (
+  SELECT
+    e.user_id,
+    COUNT(DISTINCT c.email) AS contacts_added
+  FROM eligible e
+  INNER JOIN ${ds}.deal_contacts dc
+    ON dc.user_id = e.user_id
+  INNER JOIN ${ds}.deals d
+    ON d.id = dc.deal_id AND d.user_id = e.user_id AND d.updated_at >= e.initiated_at
+  INNER JOIN ${ec}.contacts c
+    ON c.user_id = dc.user_id AND c.email = dc.email
+  GROUP BY e.user_id
+)
+SELECT
+  e.user_id,
+  e.initiated_at,
+  COALESCE(da.db_new, 0) AS db_new,
+  COALESCE(da.db_in_progress, 0) AS db_in_progress,
+  COALESCE(da.db_completed, 0) AS db_completed,
+  COALESCE(da.db_not_interested, 0) AS db_not_interested,
+  COALESCE(da.db_likely_scam, 0) AS db_likely_scam,
+  COALESCE(da.db_low_confidence, 0) AS db_low_confidence,
+  COALESCE(ca.contacts_added, 0) AS contacts_added
+FROM eligible e
+LEFT JOIN deal_agg da ON da.user_id = e.user_id
+LEFT JOIN contact_agg ca ON ca.user_id = e.user_id
+ORDER BY e.initiated_at DESC`
   },
 };
 
@@ -39980,6 +40110,349 @@ async function runRecoveryPipeline() {
   }
 }
 
+/**
+ * scan_complete cron helpers: Firestore dedupe (read-only), backend webhook POST, SxT row → DTO.
+ * @see backend/src/dtos/dealsync-v2.webhooks.dto.ts
+ */
+
+
+const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const FIRESTORE_SCOPE = 'https://www.googleapis.com/auth/datastore';
+
+function base64UrlJson(obj) {
+  return Buffer.from(JSON.stringify(obj), 'utf8')
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+}
+
+function base64UrlBuffer(buf) {
+  return Buffer.from(buf)
+    .toString('base64')
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+}
+
+/**
+ * @param {{ client_email: string, private_key: string }} credentials — service account JSON fields
+ * @returns {Promise<string>} access_token
+ */
+async function getGoogleDatastoreAccessToken(credentials) {
+  const { client_email: iss, private_key: privateKeyPem } = credentials;
+  if (!iss || !privateKeyPem)
+    throw new Error('Service account JSON missing client_email or private_key')
+
+  const now = Math.floor(Date.now() / 1000);
+  const header = { alg: 'RS256', typ: 'JWT' };
+  const payload = {
+    iss,
+    sub: iss,
+    aud: OAUTH_TOKEN_URL,
+    iat: now,
+    exp: now + 3600,
+    scope: FIRESTORE_SCOPE,
+  };
+  const unsigned = `${base64UrlJson(header)}.${base64UrlJson(payload)}`;
+  const sign = createSign('RSA-SHA256');
+  sign.update(unsigned);
+  sign.end();
+  const signature = base64UrlBuffer(sign.sign(createPrivateKey(privateKeyPem)));
+
+  const jwt = `${unsigned}.${signature}`;
+  const resp = await fetch(OAUTH_TOKEN_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+      assertion: jwt,
+    }),
+    signal: AbortSignal.timeout(30000),
+  });
+  const body = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(`OAuth token ${resp.status}: ${JSON.stringify(body)}`)
+  }
+  const token = body.access_token;
+  if (!token || typeof token !== 'string') throw new Error('OAuth response missing access_token')
+  return token
+}
+
+/**
+ * Firestore REST encodes int64 as string; only treat as set when it parses as an integer.
+ * @param {unknown} raw
+ */
+function isValidFirestoreIntegerString(raw) {
+  if (raw == null || raw === '') return false
+  const s = String(raw).trim();
+  return s !== '' && /^-?\d+$/.test(s)
+}
+
+/**
+ * @param {unknown} doc — Firestore REST GET document JSON
+ */
+function firestoreDocumentHasScanCompleteSentAt(doc) {
+  const field = doc?.fields?.scanCompleteSentAt;
+  if (!field || typeof field !== 'object') return false
+  if (field.integerValue != null && field.integerValue !== '') {
+    return isValidFirestoreIntegerString(field.integerValue)
+  }
+  if (field.doubleValue != null && Number.isFinite(Number(field.doubleValue))) return true
+  return false
+}
+
+/**
+ * @param {{ projectId: string, userId: string, accessToken: string }} args
+ */
+async function userHasScanCompleteSentAt({ projectId, userId, accessToken }) {
+  const path = `projects/${encodeURIComponent(projectId)}/databases/(default)/documents/users/${encodeURIComponent(userId)}`;
+  const url = new URL(`https://firestore.googleapis.com/v1/${path}`);
+  url.searchParams.set('mask.fieldPaths', 'scanCompleteSentAt');
+
+  const resp = await fetch(url.toString(), {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (resp.status === 404) return false
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Firestore GET ${resp.status}: ${text}`)
+  }
+  const doc = await resp.json();
+  return firestoreDocumentHasScanCompleteSentAt(doc)
+}
+
+/**
+ * Coerce a single cell value from an SxT row to a finite number (else 0).
+ * @param {unknown} v
+ */
+function coerceNumber(v) {
+  if (v === null || v === undefined) return 0
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0
+}
+
+/** @param {Record<string, unknown>} row */
+function col(row, upper) {
+  if (row[upper] !== undefined && row[upper] !== null) return row[upper]
+  const lower = upper.toLowerCase();
+  if (row[lower] !== undefined && row[lower] !== null) return row[lower]
+  return undefined
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ * @returns {string}
+ */
+function getRowUserId(row) {
+  const v = col(row, 'USER_ID');
+  if (v === undefined || v === null || String(v).trim() === '') {
+    throw new Error('Eligible row missing USER_ID')
+  }
+  return String(v)
+}
+
+/**
+ * @param {Record<string, unknown>} row
+ */
+function rowToScanCompleteWebhookBody(row) {
+  const userId = getRowUserId(row);
+  return {
+    userId,
+    eventType: 'scan_complete',
+    eventData: {
+      dealCounts: {
+        new: coerceNumber(col(row, 'DB_NEW')),
+        inProgress: coerceNumber(col(row, 'DB_IN_PROGRESS')),
+        completed: coerceNumber(col(row, 'DB_COMPLETED')),
+        likelyScam: coerceNumber(col(row, 'DB_LIKELY_SCAM')),
+        lowConfidence: coerceNumber(col(row, 'DB_LOW_CONFIDENCE')),
+        notInterested: coerceNumber(col(row, 'DB_NOT_INTERESTED')),
+      },
+      contactsAdded: coerceNumber(col(row, 'CONTACTS_ADDED')),
+    },
+  }
+}
+
+/**
+ * @param {string} baseUrl
+ * @param {string} sharedSecret
+ * @param {{ userId: string, eventType: string, eventData: object }} body
+ */
+async function postScanCompleteWebhook(baseUrl, sharedSecret, body) {
+  const root = baseUrl.replace(/\/+$/, '');
+  const url = `${root}/dealsync-v2/webhooks`;
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-shared-secret': sharedSecret,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    return { ok: false, status: resp.status, text }
+  }
+  return { ok: true, status: resp.status, text: '' }
+}
+
+/**
+ * @param {string} raw
+ * @param {string} inputName
+ * @returns {number}
+ */
+function parsePositiveIntegerInput(raw, inputName) {
+  const normalized = String(raw ?? '').trim();
+  if (!/^[1-9][0-9]*$/.test(normalized)) {
+    throw new Error(`${inputName} must be a positive integer`)
+  }
+  return Number(normalized)
+}
+
+/**
+ * @param {string} raw
+ * @returns {string}
+ */
+function normalizeOptionalProjectId(raw) {
+  return String(raw ?? '').trim()
+}
+
+/**
+ * GCP service account JSON: GitHub Action input `firestore-service-account-json`, or env `FIRESTORE_SERVICE_ACCOUNT_JSON`
+ * (stringified JSON). Input wins when non-empty so workflows keep explicit precedence.
+ * @returns {string}
+ */
+function resolveFirestoreServiceAccountJson() {
+  const fromInput = String(coreExports.getInput('firestore-service-account-json') ?? '').trim();
+  if (fromInput) return fromInput
+  const fromEnv = process.env.FIRESTORE_SERVICE_ACCOUNT_JSON;
+  if (fromEnv !== undefined && String(fromEnv).trim() !== '') {
+    return String(fromEnv).trim()
+  }
+  return ''
+}
+
+/**
+ * Cron: eligible first LOOKBACK completions → Firestore dedupe → POST /dealsync-v2/webhooks (scan_complete).
+ * @see docs/plans/2026-04-16-scan-complete-w3-cron-tech-spec.md
+ */
+async function runEmitScanCompleteWebhooks() {
+  const authUrl = coreExports.getInput('sxt-auth-url');
+  const authSecret = coreExports.getInput('sxt-auth-secret');
+  const apiUrl = coreExports.getInput('sxt-api-url');
+  const biscuit = coreExports.getInput('sxt-biscuit');
+  const sxtSchemaRaw = coreExports.getInput('sxt-schema');
+  const emailCoreSchemaRaw = coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING';
+
+  const backendBaseUrl = coreExports.getInput('dealsync-backend-base-url');
+  const sharedSecret = coreExports.getInput('dealsync-v2-shared-secret');
+  const saJsonRaw = resolveFirestoreServiceAccountJson();
+  if (saJsonRaw) {
+    coreExports.setSecret(saJsonRaw);
+  }
+  const concurrency = parsePositiveIntegerInput(
+    coreExports.getInput('scan-complete-webhook-concurrency') || '5',
+    'scan-complete-webhook-concurrency',
+  );
+
+  if (!authUrl || !authSecret || !apiUrl || !biscuit || !sxtSchemaRaw) {
+    throw new Error(
+      'sxt-auth-url, sxt-auth-secret, sxt-api-url, sxt-biscuit, and sxt-schema are required',
+    )
+  }
+  if (!backendBaseUrl || !sharedSecret || !saJsonRaw) {
+    throw new Error(
+      'dealsync-backend-base-url, dealsync-v2-shared-secret, and Firestore service account JSON are required (action input firestore-service-account-json or env FIRESTORE_SERVICE_ACCOUNT_JSON)',
+    )
+  }
+
+  let credentials;
+  try {
+    credentials = JSON.parse(saJsonRaw);
+  } catch {
+    throw new Error('Firestore service account JSON must be valid JSON')
+  }
+  const firestoreProjectId =
+    typeof credentials.project_id === 'string'
+      ? normalizeOptionalProjectId(credentials.project_id)
+      : '';
+  if (!firestoreProjectId) {
+    throw new Error('Firestore service account JSON must include a non-empty project_id')
+  }
+
+  const sql = scanCompleteEligibility.selectEligibleUsers(emailCoreSchemaRaw, sxtSchemaRaw);
+  const jwt = await authenticate(authUrl, authSecret);
+  const exec = (q) => executeSql(apiUrl, jwt, biscuit, q);
+
+  console.log('[emit-scan-complete-webhooks] executing eligibility query');
+  const result = await exec(sql);
+  const rows = Array.isArray(result) ? result : [];
+  console.log(`[emit-scan-complete-webhooks] eligibility rows=${rows.length}`);
+
+  let firestoreToken = '';
+  if (rows.length > 0) {
+    firestoreToken = await getGoogleDatastoreAccessToken(credentials);
+  }
+
+  let scanned = rows.length;
+  let skippedDeduped = 0;
+  let posted = 0;
+  let errors = 0;
+
+  for (let i = 0; i < rows.length; i += concurrency) {
+    const chunk = rows.slice(i, i + concurrency);
+    await Promise.all(
+      chunk.map(async (row) => {
+        let userId;
+        try {
+          userId = getRowUserId(row);
+        } catch (err) {
+          coreExports.error(`[emit-scan-complete-webhooks] skip invalid row: ${err.message}`);
+          errors++;
+          return
+        }
+
+        try {
+          const alreadySent = await userHasScanCompleteSentAt({
+            projectId: firestoreProjectId,
+            userId,
+            accessToken: firestoreToken,
+          });
+          if (alreadySent) {
+            skippedDeduped++;
+            console.log(`[emit-scan-complete-webhooks] skip dedupe userId=${userId}`);
+            return
+          }
+
+          const body = rowToScanCompleteWebhookBody(row);
+          const res = await postScanCompleteWebhook(backendBaseUrl, sharedSecret, body);
+          if (!res.ok) {
+            errors++;
+            coreExports.error(
+              `[emit-scan-complete-webhooks] POST failed userId=${userId} status=${res.status} body=${(res.text || '').slice(0, 500)}`,
+            );
+            return
+          }
+          posted++;
+          console.log(`[emit-scan-complete-webhooks] posted userId=${userId}`);
+        } catch (err) {
+          errors++;
+          coreExports.error(`[emit-scan-complete-webhooks] error userId=${userId ?? '?'}: ${err.message}`);
+        }
+      }),
+    );
+  }
+
+  const summary = { scanned, skippedDeduped, posted, errors };
+  console.log(`[emit-scan-complete-webhooks] done ${JSON.stringify(summary)}`);
+  return summary
+}
+
 const COMMANDS = {
   'sync-deal-states': runSyncDealStates,
   eval: runEval,
@@ -39987,6 +40460,7 @@ const COMMANDS = {
   'run-filter-pipeline': runFilterPipeline,
   'run-classify-pipeline': runClassifyPipeline,
   'run-recovery-pipeline': runRecoveryPipeline,
+  'emit-scan-complete-webhooks': runEmitScanCompleteWebhooks,
 };
 
 async function run() {
