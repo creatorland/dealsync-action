@@ -65,7 +65,7 @@ These are redundant with the `json_schema` and can confuse the model if they con
 After running an eval comparison, archive results to `eval/history/` following this structure:
 
 ```
-eval/history/YYYY-MM-DD-<name>/
+eval/history/YYYY-MM-DD-<what-changed>/
   README.md          ← findings, verdict, decision, next steps
   system-a.md        ← variant A system prompt
   system-b.md        ← variant B system prompt
@@ -75,4 +75,4 @@ eval/history/YYYY-MM-DD-<name>/
   result-b.json      ← variant B eval result (full JSON)
 ```
 
-The README should cover: what was tested and why, configuration, metrics tables, regressions, verdict, decision, and next steps. See [eval/history/2026-04-17-v1-vs-v3/](history/2026-04-17-v1-vs-v3/) for a complete example.
+The README should cover: what was tested and why, configuration, metrics tables, regressions, verdict, decision, and next steps. See [eval/history/2026-04-17-strict-exclusion-rules/](history/2026-04-17-strict-exclusion-rules/) for a complete example.

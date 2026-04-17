@@ -11,7 +11,7 @@ eval/
   ground-truth.json      ← labeled email threads for evaluation
   thresholds.json        ← configurable pass/fail criteria
   history/               ← archived eval comparisons
-    YYYY-MM-DD-<name>/
+    YYYY-MM-DD-<what-changed>/
       README.md          ← findings, decision
       system-a.md        ← baseline prompt
       system-b.md        ← candidate prompt
@@ -184,7 +184,7 @@ After each comparison, archive to `eval/history/` for a full audit trail.
 ### Structure
 
 ```
-eval/history/YYYY-MM-DD-<name>/
+eval/history/YYYY-MM-DD-<what-changed>/
   README.md          ← findings, verdict, decision, next steps
   system-a.md        ← variant A system prompt
   system-b.md        ← variant B system prompt
@@ -196,7 +196,7 @@ eval/history/YYYY-MM-DD-<name>/
 
 ### Steps
 
-1. Create `eval/history/YYYY-MM-DD-<name>/` (e.g. `2026-04-17-v1-vs-v3`).
+1. Create `eval/history/YYYY-MM-DD-<what-changed>/` (e.g. `2026-04-17-strict-exclusion-rules`).
 2. Copy both system and user prompts that were tested.
 3. Copy both result JSONs from the eval outputs.
 4. Write a `README.md` covering:
@@ -211,7 +211,7 @@ eval/history/YYYY-MM-DD-<name>/
    - Recommended next steps
 5. PR to main.
 
-See [eval/history/2026-04-17-v1-vs-v3/](history/2026-04-17-v1-vs-v3/) for a complete example.
+See [eval/history/2026-04-17-strict-exclusion-rules/](history/2026-04-17-strict-exclusion-rules/) for a complete example.
 
 ## Required Secrets
 
