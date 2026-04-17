@@ -73,9 +73,9 @@ Email arrives → metadata ingestion (GCP) → email_metadata in SxT
 | -------------- | ------- |
 | `command` | `emit-scan-complete-webhooks` |
 | `sxt-*`, `sxt-schema`, `email-core-schema` | Same as other commands — Space and Time access |
-| `dealsync-backend-base-url` | Backend base URL (no trailing slash), e.g. `https://api.example.com` |
+| `dealsync-backend-base-url` | Backend base URL; trailing slashes are accepted and normalized, e.g. `https://api.example.com` |
 | `dealsync-v2-shared-secret` | `DEALSYNC_V2_SHARED_SECRET` → header `x-shared-secret` |
-| `firestore-service-account-json` | Full GCP service account JSON (Firestore read-only role on `users` is enough; must include `project_id`) |
+| `firestore-service-account-json` | Full GCP service account JSON (Firestore read-only role on `users` is enough); must include a non-empty `project_id`. Same JSON may be provided via env `FIRESTORE_SERVICE_ACCOUNT_JSON`. |
 | `scan-complete-webhook-concurrency` | Max parallel Firestore reads + webhook POSTs per batch (default `5`) |
 
 Schedule this command from W3 or GitHub Actions on a 5–15 minute cadence; wire secrets in the host’s secret store. SQL builder: `src/lib/sql/scan-complete-eligibility.js` (parity with `backend/src/services/dealsync-v2.sync.service.ts`).

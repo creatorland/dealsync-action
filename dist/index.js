@@ -40214,7 +40214,8 @@ async function userHasScanCompleteSentAt({ projectId, userId, accessToken }) {
 }
 
 /**
- * @param {Record<string, unknown>} row — SxT row (UPPERCASE keys)
+ * Coerce a single cell value from an SxT row to a finite number (else 0).
+ * @param {unknown} v
  */
 function coerceNumber(v) {
   if (v === null || v === undefined) return 0
