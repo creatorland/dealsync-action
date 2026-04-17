@@ -4,7 +4,7 @@ author: 'creatorland'
 
 inputs:
   command:
-    description: 'Operation: run-filter-pipeline, run-classify-pipeline, sync-deal-states, emit-scan-complete-webhooks, eval, eval-compare'
+    description: 'Operation: run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, sync-deal-states, emit-scan-complete-webhooks, eval, eval-compare'
     required: true
   sxt-auth-url:
     description: 'SxT auth proxy URL'
