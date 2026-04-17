@@ -40281,9 +40281,11 @@ async function postScanCompleteWebhook(baseUrl, sharedSecret, body) {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(120000),
   });
-  const text = await resp.text();
-  if (!resp.ok) return { ok: false, status: resp.status, text }
-  return { ok: true, status: resp.status, text }
+  if (!resp.ok) {
+    const text = await resp.text();
+    return { ok: false, status: resp.status, text }
+  }
+  return { ok: true, status: resp.status, text: '' }
 }
 
 /**

@@ -1,6 +1,8 @@
 import { jest } from '@jest/globals'
+import { generateKeyPairSync } from 'node:crypto'
 import { scanCompleteEligibility } from '../src/lib/sql/index.js'
 import {
+  getGoogleDatastoreAccessToken,
   rowToScanCompleteWebhookBody,
   getRowUserId,
   coerceNumber,
@@ -8,6 +10,12 @@ import {
   userHasScanCompleteSentAt,
   postScanCompleteWebhook,
 } from '../src/lib/scan-complete.js'
+
+function decodeBase64UrlJson(segment) {
+  const pad = segment.length % 4 === 0 ? '' : '='.repeat(4 - (segment.length % 4))
+  const base64 = segment.replace(/-/g, '+').replace(/_/g, '/') + pad
+  return JSON.parse(Buffer.from(base64, 'base64').toString('utf8'))
+}
 
 describe('scanCompleteEligibility.selectEligibleUsers', () => {
   it('substitutes sanitized schemas', () => {
@@ -129,10 +137,11 @@ describe('postScanCompleteWebhook', () => {
   })
 
   it('POSTs JSON with x-shared-secret', async () => {
+    const text = jest.fn().mockResolvedValue('')
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
       status: 201,
-      text: async () => '',
+      text,
     })
     const body = {
       userId: 'u',
@@ -153,5 +162,110 @@ describe('postScanCompleteWebhook', () => {
     )
     const call = global.fetch.mock.calls[0]
     expect(JSON.parse(call[1].body)).toEqual(body)
+    expect(text).not.toHaveBeenCalled()
+  })
+
+  it('reads response body only on non-2xx', async () => {
+    const text = jest.fn().mockResolvedValue('bad request')
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text,
+    })
+
+    const result = await postScanCompleteWebhook('https://api.example.com', 'sec', {
+      userId: 'u',
+      eventType: 'scan_complete',
+      eventData: { dealCounts: {}, contactsAdded: 0 },
+    })
+
+    expect(result).toEqual({ ok: false, status: 400, text: 'bad request' })
+    expect(text).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('getGoogleDatastoreAccessToken', () => {
+  const origFetch = global.fetch
+
+  afterEach(() => {
+    global.fetch = origFetch
+  })
+
+  it('forms OAuth JWT bearer request with expected audience and scope', async () => {
+    const { privateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    })
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: 'tok-123' }),
+    })
+
+    const token = await getGoogleDatastoreAccessToken({
+      client_email: 'svc@project.iam.gserviceaccount.com',
+      private_key: privateKey,
+    })
+
+    expect(token).toBe('tok-123')
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://oauth2.googleapis.com/token',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      }),
+    )
+
+    const call = global.fetch.mock.calls[0][1]
+    expect(call.body.get('grant_type')).toBe('urn:ietf:params:oauth:grant-type:jwt-bearer')
+    const assertion = call.body.get('assertion')
+    expect(typeof assertion).toBe('string')
+    expect(assertion.length).toBeGreaterThan(20)
+
+    const [, payloadSegment] = assertion.split('.')
+    const payload = decodeBase64UrlJson(payloadSegment)
+    expect(payload.aud).toBe('https://oauth2.googleapis.com/token')
+    expect(payload.scope).toBe('https://www.googleapis.com/auth/datastore')
+  })
+
+  it('throws when oauth response is non-2xx', async () => {
+    const { privateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    })
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: 'forbidden' }),
+    })
+
+    await expect(
+      getGoogleDatastoreAccessToken({
+        client_email: 'svc@project.iam.gserviceaccount.com',
+        private_key: privateKey,
+      }),
+    ).rejects.toThrow('OAuth token 403:')
+  })
+
+  it('throws when access_token is missing from oauth response', async () => {
+    const { privateKey } = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      publicKeyEncoding: { type: 'spki', format: 'pem' },
+    })
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({}),
+    })
+
+    await expect(
+      getGoogleDatastoreAccessToken({
+        client_email: 'svc@project.iam.gserviceaccount.com',
+        private_key: privateKey,
+      }),
+    ).rejects.toThrow('OAuth response missing access_token')
   })
 })
