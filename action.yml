@@ -116,8 +116,6 @@ inputs:
     description: 'DEALSYNC_V2_SHARED_SECRET for x-shared-secret on webhook POST. Required for emit-scan-complete-webhooks.'
   firestore-service-account-json:
     description: 'GCP service account JSON (full object) for Firestore REST read of users/{id}.scanCompleteSentAt. Required for emit-scan-complete-webhooks.'
-  firestore-project-id:
-    description: 'GCP / Firebase project id for Firestore. Optional if service account JSON includes project_id.'
   scan-complete-webhook-concurrency:
     description: 'Max parallel Firestore reads + webhook POSTs per batch (emit-scan-complete-webhooks)'
     default: '5'

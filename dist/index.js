@@ -40326,7 +40326,6 @@ async function runEmitScanCompleteWebhooks() {
   const backendBaseUrl = coreExports.getInput('dealsync-backend-base-url');
   const sharedSecret = coreExports.getInput('dealsync-v2-shared-secret');
   const saJsonRaw = coreExports.getInput('firestore-service-account-json');
-  let firestoreProjectId = normalizeOptionalProjectId(coreExports.getInput('firestore-project-id'));
   const concurrency = parsePositiveIntegerInput(
     coreExports.getInput('scan-complete-webhook-concurrency') || '5',
     'scan-complete-webhook-concurrency',
@@ -40347,11 +40346,12 @@ async function runEmitScanCompleteWebhooks() {
   } catch {
     throw new Error('firestore-service-account-json must be valid JSON')
   }
-  if (!firestoreProjectId && typeof credentials.project_id === 'string') {
-    firestoreProjectId = normalizeOptionalProjectId(credentials.project_id);
-  }
+  const firestoreProjectId =
+    typeof credentials.project_id === 'string'
+      ? normalizeOptionalProjectId(credentials.project_id)
+      : '';
   if (!firestoreProjectId) {
-    throw new Error('firestore-project-id is required (or project_id in service account JSON)')
+    throw new Error('firestore-service-account-json must include a non-empty project_id')
   }
 
   const sql = scanCompleteEligibility.selectEligibleUsers(emailCoreSchema, dealsyncSchema);
