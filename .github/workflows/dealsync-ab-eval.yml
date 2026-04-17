@@ -59,7 +59,7 @@ jobs:
     steps:
       - id: run-eval
         name: Evaluate variant A
-        uses: creatorland/dealsync-action@main
+        uses: creatorland/dealsync-action@4d04256
         with:
           command: eval
           ai-api-key: ${{ secrets.AI_API_KEY }}
@@ -75,7 +75,7 @@ jobs:
     steps:
       - id: run-eval
         name: Evaluate variant B
-        uses: creatorland/dealsync-action@main
+        uses: creatorland/dealsync-action@4d04256
         with:
           command: eval
           ai-api-key: ${{ secrets.AI_API_KEY }}
@@ -92,7 +92,7 @@ jobs:
     steps:
       - id: compare
         name: Compare A vs B
-        uses: creatorland/dealsync-action@main
+        uses: creatorland/dealsync-action@4d04256
         with:
           command: eval-compare
           result-a: ${{ needs.eval-a.outputs.result }}
