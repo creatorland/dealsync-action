@@ -38291,6 +38291,9 @@ var thresholds = {
 	min_precision: min_precision,
 	max_recall_stddev: max_recall_stddev};
 
+var baseline = {
+	};
+
 function compareMetric(valA, valB) {
   const delta = +(valB - valA).toFixed(4);
   const winner = delta > 0.001 ? 'b' : delta < -1e-3 ? 'a' : 'tie';
@@ -38409,10 +38412,15 @@ async function runEvalCompare() {
   const resultAStr = coreExports.getInput('result-a');
   const resultBStr = coreExports.getInput('result-b');
 
-  if (!resultAStr || !resultBStr) throw new Error('result-a and result-b are required')
+  if (!resultBStr) throw new Error('result-b is required')
 
-  const a = JSON.parse(resultAStr);
+  // Use bundled eval/baseline.json when result-a is not provided
+  const a = resultAStr ? JSON.parse(resultAStr) : baseline;
   const b = JSON.parse(resultBStr);
+
+  if (!resultAStr) {
+    console.log(`[eval-compare] using bundled baseline (model=${a.model}, prompt=${a.prompt_hash || 'bundled'}, runs=${a.runs})`);
+  }
 
   // Side-by-side metric comparison
   const comparison = {

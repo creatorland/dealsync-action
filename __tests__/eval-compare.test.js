@@ -179,8 +179,8 @@ describe('runEvalCompare', () => {
     expect(result.report_markdown).toContain('Precision')
   })
 
-  it('throws when inputs missing', async () => {
+  it('throws when result-b missing', async () => {
     core.getInput.mockReturnValue('')
-    await expect(runEvalCompare()).rejects.toThrow('result-a and result-b are required')
+    await expect(runEvalCompare()).rejects.toThrow('result-b is required')
   })
 })

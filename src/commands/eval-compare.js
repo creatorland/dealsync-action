@@ -1,5 +1,6 @@
 import * as core from '@actions/core'
 import thresholds from '../../eval/thresholds.json'
+import baseline from '../../eval/baseline.json'
 
 function compareMetric(valA, valB) {
   const delta = +(valB - valA).toFixed(4)
@@ -119,10 +120,15 @@ export async function runEvalCompare() {
   const resultAStr = core.getInput('result-a')
   const resultBStr = core.getInput('result-b')
 
-  if (!resultAStr || !resultBStr) throw new Error('result-a and result-b are required')
+  if (!resultBStr) throw new Error('result-b is required')
 
-  const a = JSON.parse(resultAStr)
+  // Use bundled eval/baseline.json when result-a is not provided
+  const a = resultAStr ? JSON.parse(resultAStr) : baseline
   const b = JSON.parse(resultBStr)
+
+  if (!resultAStr) {
+    console.log(`[eval-compare] using bundled baseline (model=${a.model}, prompt=${a.prompt_hash || 'bundled'}, runs=${a.runs})`)
+  }
 
   // Side-by-side metric comparison
   const comparison = {
