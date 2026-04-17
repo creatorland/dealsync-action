@@ -410,7 +410,7 @@ ORDER BY e.initiated_at DESC;
 ### Codebase patterns
 
 - Commands are registered in `src/main.js` (`COMMANDS` map) and exposed via `action.yml` `command` input.
-- SxT access uses `src/lib/sxt-client.js` (`authenticate`, `executeSql`).
+- SxT access uses `src/lib/db.js` (`authenticate`, `executeSql`).
 - Schema names: `schema` (dealsync) and `email-core-schema` (default `EMAIL_CORE_STAGING`) per `action.yml`.
 
 ### Files to reference
@@ -419,9 +419,9 @@ ORDER BY e.initiated_at DESC;
 | ---- | ------- |
 | `src/main.js` | Register new command |
 | `action.yml` | New inputs: backend base URL, shared secret, Firestore/GCP, webhook concurrency; document command |
-| `src/lib/sxt-client.js` | Execute eligibility SQL |
+| `src/lib/db.js` | Execute eligibility SQL |
 | `src/lib/sql/sanitize.js` | Schema sanitization (shared with other SQL builders) |
-| `src/commands/sxt-execute.js` | Pattern for parameterized SQL execution |
+| `src/commands/emit-scan-complete-webhooks.js` | Pattern for command wiring, SQL execution, and scan-complete orchestration |
 | `src/lib/sql/scan-complete-eligibility.js` | `scanCompleteEligibility.selectEligibleUsers` — parity SQL with backend references in file header |
 | `src/commands/emit-scan-complete-webhooks.js` | Orchestrate query → Firestore → POST |
 | New tests under `__tests__/` | Mock `fetch`, Firestore, SxT |
