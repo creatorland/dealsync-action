@@ -34808,7 +34808,7 @@ function getHeader(email, name) {
   return header?.value || ''
 }
 
-const MAX_BODY_CHARS = 3000; // Per email — keeps token usage reasonable for batches of 5
+// No hard cap — models have 131K+ context, truncation loses classification signal
 
 /**
  * Sanitize an email body for AI classification.
@@ -34852,10 +34852,7 @@ function sanitizeEmailBody(body) {
     .replace(/^\s+$/gm, '') // Remove whitespace-only lines
     .trim();
 
-  // Step 4: Truncate
-  if (text.length > MAX_BODY_CHARS) {
-    text = text.substring(0, MAX_BODY_CHARS) + '\n[... truncated]';
-  }
+  // No truncation — full content sent to model
 
   return text
 }
