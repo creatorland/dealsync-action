@@ -14,7 +14,7 @@
 # NOTE: W3 does not currently resolve ${{ inputs.X }} expressions.
 # To change variants, edit the default values below and redeploy.
 
-name: dealsync-ab-eval-4d04256v4
+name: dealsync-ab-eval-2c4942cv2
 on:
   workflow_dispatch:
     inputs:
@@ -51,10 +51,12 @@ jobs:
   eval-a:
     runs-on: ubuntu-latest
     environment: '0x248d3b31f1ffc78c4dcd0993da48b6568fe1f58cfac9f61554804f505dafd140'
+    outputs:
+      result: ${{ steps.run-eval.outputs.result }}
     steps:
       - id: run-eval
         name: Evaluate variant A
-        uses: creatorland/dealsync-action@4d04256
+        uses: creatorland/dealsync-action@2c4942c
         with:
           command: eval
           ai-api-key: ${{ secrets.AI_API_KEY }}
@@ -68,10 +70,12 @@ jobs:
   eval-b:
     runs-on: ubuntu-latest
     environment: '0x248d3b31f1ffc78c4dcd0993da48b6568fe1f58cfac9f61554804f505dafd140'
+    outputs:
+      result: ${{ steps.run-eval.outputs.result }}
     steps:
       - id: run-eval
         name: Evaluate variant B
-        uses: creatorland/dealsync-action@4d04256
+        uses: creatorland/dealsync-action@2c4942c
         with:
           command: eval
           ai-api-key: ${{ secrets.AI_API_KEY }}
@@ -89,7 +93,7 @@ jobs:
     steps:
       - id: compare
         name: Compare A vs B
-        uses: creatorland/dealsync-action@4d04256
+        uses: creatorland/dealsync-action@2c4942c
         with:
           command: eval-compare
           result-a: ${{ needs.eval-a.outputs.result }}
