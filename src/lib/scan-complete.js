@@ -3,6 +3,7 @@
  * @see backend/src/dtos/dealsync-v2.webhooks.dto.ts
  */
 
+import * as core from '@actions/core'
 import { createPrivateKey, createSign } from 'node:crypto'
 
 const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
@@ -65,6 +66,7 @@ export async function getGoogleDatastoreAccessToken(credentials) {
   }
   const token = body.access_token
   if (!token || typeof token !== 'string') throw new Error('OAuth response missing access_token')
+  core.setSecret(token)
   return token
 }
 
@@ -187,5 +189,7 @@ export async function postScanCompleteWebhook(baseUrl, sharedSecret, body) {
     const text = await resp.text()
     return { ok: false, status: resp.status, text }
   }
+  // Release the socket promptly without buffering the body into memory.
+  await resp.body?.cancel().catch(() => {})
   return { ok: true, status: resp.status, text: '' }
 }
