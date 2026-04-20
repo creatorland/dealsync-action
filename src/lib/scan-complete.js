@@ -5,6 +5,9 @@
 
 import * as core from '@actions/core'
 import { createPrivateKey, createSign } from 'node:crypto'
+import { sleep, backoffMs } from './retry.js'
+
+const TRANSIENT_MAX_ATTEMPTS = 3
 
 const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const FIRESTORE_SCOPE = 'https://www.googleapis.com/auth/datastore'
@@ -101,19 +104,38 @@ export async function userHasScanCompleteSentAt({ projectId, userId, accessToken
   const url = new URL(`https://firestore.googleapis.com/v1/${path}`)
   url.searchParams.set('mask.fieldPaths', 'scanCompleteSentAt')
 
-  const resp = await fetch(url.toString(), {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(30000),
-  })
+  let lastErr
+  for (let attempt = 0; attempt < TRANSIENT_MAX_ATTEMPTS; attempt++) {
+    try {
+      const resp = await fetch(url.toString(), {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(30000),
+      })
 
-  if (resp.status === 404) return false
-  if (!resp.ok) {
-    const text = await resp.text()
-    throw new Error(`Firestore GET ${resp.status}: ${text}`)
+      if (resp.status === 404) return false
+      if (resp.status >= 500 && attempt < TRANSIENT_MAX_ATTEMPTS - 1) {
+        await resp.body?.cancel().catch(() => {})
+        lastErr = new Error(`Firestore GET ${resp.status}`)
+        await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }))
+        continue
+      }
+      if (!resp.ok) {
+        const text = await resp.text()
+        throw new Error(`Firestore GET ${resp.status}: ${text}`)
+      }
+      const doc = await resp.json()
+      return firestoreDocumentHasScanCompleteSentAt(doc)
+    } catch (err) {
+      lastErr = err
+      // Final attempt or non-retryable (a thrown Firestore <500) — propagate immediately.
+      if (attempt >= TRANSIENT_MAX_ATTEMPTS - 1 || /Firestore GET [1-4]\d\d:/.test(err.message)) {
+        throw err
+      }
+      await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }))
+    }
   }
-  const doc = await resp.json()
-  return firestoreDocumentHasScanCompleteSentAt(doc)
+  throw lastErr ?? new Error('Firestore GET failed after retries')
 }
 
 /**
@@ -173,23 +195,36 @@ export function rowToScanCompleteWebhookBody(row) {
  * @param {string} sharedSecret
  * @param {{ userId: string, eventType: string, eventData: object }} body
  */
-export async function postScanCompleteWebhook(baseUrl, sharedSecret, body) {
+export async function postScanCompleteWebhook(baseUrl, sharedSecret, body, headers = {}) {
   const root = baseUrl.replace(/\/+$/, '')
   const url = `${root}/dealsync-v2/webhooks`
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-shared-secret': sharedSecret,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120000),
-  })
-  if (!resp.ok) {
-    const text = await resp.text()
-    return { ok: false, status: resp.status, text }
+  const payload = JSON.stringify(body)
+  let last = { ok: false, status: 0, text: '' }
+  for (let attempt = 0; attempt < TRANSIENT_MAX_ATTEMPTS; attempt++) {
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-shared-secret': sharedSecret,
+          ...headers,
+        },
+        body: payload,
+        signal: AbortSignal.timeout(120000),
+      })
+      if (resp.ok) {
+        await resp.body?.cancel().catch(() => {})
+        return { ok: true, status: resp.status, text: '' }
+      }
+      const text = await resp.text()
+      last = { ok: false, status: resp.status, text }
+      // Retry 5xx only; 4xx is a client problem and should not be retried.
+      if (resp.status < 500 || attempt >= TRANSIENT_MAX_ATTEMPTS - 1) return last
+    } catch (err) {
+      last = { ok: false, status: 0, text: String(err?.message ?? err) }
+      if (attempt >= TRANSIENT_MAX_ATTEMPTS - 1) return last
+    }
+    await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }))
   }
-  // Release the socket promptly without buffering the body into memory.
-  await resp.body?.cancel().catch(() => {})
-  return { ok: true, status: resp.status, text: '' }
+  return last
 }
