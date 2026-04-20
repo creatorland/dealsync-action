@@ -135,6 +135,51 @@ describe('userHasScanCompleteSentAt', () => {
       }),
     )
   })
+
+  it('retries on 429 then succeeds', async () => {
+    let call = 0
+    global.fetch = jest.fn(async () => {
+      call++
+      if (call === 1) {
+        return {
+          ok: false,
+          status: 429,
+          headers: { get: (h) => (h.toLowerCase() === 'retry-after' ? '0' : null) },
+          body: { cancel: async () => {} },
+          text: async () => 'too many',
+        }
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ fields: { scanCompleteSentAt: { integerValue: '1710000000' } } }),
+      }
+    })
+
+    const hasSentAt = await userHasScanCompleteSentAt({
+      projectId: 'p',
+      userId: 'u',
+      getAccessToken: async () => 'tok',
+    })
+    expect(hasSentAt).toBe(true)
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry on 403 (non-retryable client error)', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      text: async () => 'forbidden',
+    })
+    await expect(
+      userHasScanCompleteSentAt({
+        projectId: 'p',
+        userId: 'u',
+        getAccessToken: async () => 'tok',
+      }),
+    ).rejects.toThrow(/Firestore GET 403:/)
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('postScanCompleteWebhook', () => {
@@ -189,6 +234,45 @@ describe('postScanCompleteWebhook', () => {
 
     expect(result).toEqual({ ok: false, status: 400, text: 'bad request' })
     expect(text).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries on 429 then succeeds', async () => {
+    let call = 0
+    global.fetch = jest.fn(async () => {
+      call++
+      if (call === 1) {
+        return {
+          ok: false,
+          status: 429,
+          headers: { get: (h) => (h.toLowerCase() === 'retry-after' ? '0' : null) },
+          text: async () => 'slow down',
+        }
+      }
+      return { ok: true, status: 201, body: { cancel: async () => {} } }
+    })
+
+    const result = await postScanCompleteWebhook('https://api.example.com', 'sec', {
+      userId: 'u',
+      eventType: 'scan_complete',
+      eventData: { dealCounts: {}, contactsAdded: 0 },
+    })
+    expect(result).toEqual({ ok: true, status: 201, text: '' })
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry on 400 (client error)', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      text: async () => 'bad',
+    })
+    const result = await postScanCompleteWebhook('https://api.example.com', 'sec', {
+      userId: 'u',
+      eventType: 'scan_complete',
+      eventData: { dealCounts: {}, contactsAdded: 0 },
+    })
+    expect(result).toEqual({ ok: false, status: 400, text: 'bad' })
+    expect(global.fetch).toHaveBeenCalledTimes(1)
   })
 })
 
