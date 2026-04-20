@@ -67,6 +67,10 @@ export async function runEmitScanCompleteWebhooks() {
     core.getInput('scan-complete-webhook-concurrency') || '5',
     'scan-complete-webhook-concurrency',
   )
+  const batchSize = parsePositiveIntegerInput(
+    core.getInput('scan-complete-batch-size') || '500',
+    'scan-complete-batch-size',
+  )
 
   if (!authUrl || !authSecret || !apiUrl || !biscuit || !sxtSchemaRaw) {
     throw new Error(
@@ -93,7 +97,11 @@ export async function runEmitScanCompleteWebhooks() {
     throw new Error('Firestore service account JSON must include a non-empty project_id')
   }
 
-  const sql = scanCompleteEligibility.selectEligibleUsers(emailCoreSchemaRaw, sxtSchemaRaw)
+  const sql = scanCompleteEligibility.selectEligibleUsers(
+    emailCoreSchemaRaw,
+    sxtSchemaRaw,
+    batchSize,
+  )
   const jwt = await authenticate(authUrl, authSecret)
   const exec = (q) => executeSql(apiUrl, jwt, biscuit, q)
 

@@ -9,11 +9,17 @@ export const scanCompleteEligibility = {
   /**
    * @param {string} emailCoreSchema
    * @param {string} dealsyncSchema
+   * @param {number} [batchSize=500] hard cap on rows returned per run; safety against unbounded
+   *   cross-user scans. Firestore dedupe makes it safe to re-run each tick, so bounding per tick
+   *   is preferable to streaming a full result set and risking the 120s SxT timeout.
    * @returns {string}
    */
-  selectEligibleUsers(emailCoreSchema, dealsyncSchema) {
+  selectEligibleUsers(emailCoreSchema, dealsyncSchema, batchSize = 500) {
     const ec = sanitizeSchema(emailCoreSchema)
     const ds = sanitizeSchema(dealsyncSchema)
+    if (!Number.isInteger(batchSize) || batchSize <= 0) {
+      throw new Error(`batchSize must be a positive integer: ${batchSize}`)
+    }
     return `WITH latest_sync AS (
   SELECT sync_state_id, user_id, created_at, sync_strategy
   FROM (
@@ -125,6 +131,7 @@ SELECT
 FROM eligible e
 LEFT JOIN deal_agg da ON da.user_id = e.user_id
 LEFT JOIN contact_agg ca ON ca.user_id = e.user_id
-ORDER BY e.initiated_at ASC`
+ORDER BY e.initiated_at ASC
+LIMIT ${batchSize}`
   },
 }

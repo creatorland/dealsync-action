@@ -119,6 +119,9 @@ inputs:
   scan-complete-webhook-concurrency:
     description: 'Max parallel Firestore reads + webhook POSTs per batch (emit-scan-complete-webhooks)'
     default: '5'
+  scan-complete-batch-size:
+    description: 'Max eligible users returned per cron run (LIMIT on SxT eligibility query). Firestore dedupe makes this safe to cap (emit-scan-complete-webhooks).'
+    default: '500'
 
 outputs:
   success:
