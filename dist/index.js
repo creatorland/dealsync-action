@@ -40125,9 +40125,40 @@ async function runRecoveryPipeline() {
 
 
 const TRANSIENT_MAX_ATTEMPTS = 3;
+const RETRY_AFTER_CAP_MS = 30_000;
 
 const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const FIRESTORE_SCOPE = 'https://www.googleapis.com/auth/datastore';
+
+/**
+ * Retryable HTTP statuses: 408 (Request Timeout), 429 (Too Many Requests), 5xx.
+ * 4xx other than 408/429 are client errors and should not be retried.
+ * @param {number} status
+ */
+function isRetryableStatus(status) {
+  return status === 408 || status === 429 || status >= 500
+}
+
+/**
+ * Honor RFC 7231 Retry-After if present (delta-seconds or HTTP-date), otherwise fall back to
+ * jittered exponential backoff. Capped at {@link RETRY_AFTER_CAP_MS} to bound tick duration.
+ * @param {Response} resp
+ * @param {number} attempt
+ */
+function retryAfterMs(resp, attempt) {
+  const header = resp?.headers?.get?.('retry-after');
+  if (header) {
+    const asNumber = Number(header);
+    if (Number.isFinite(asNumber) && asNumber >= 0) {
+      return Math.min(asNumber * 1000, RETRY_AFTER_CAP_MS)
+    }
+    const asDate = Date.parse(header);
+    if (Number.isFinite(asDate)) {
+      return Math.max(0, Math.min(asDate - Date.now(), RETRY_AFTER_CAP_MS))
+    }
+  }
+  return backoffMs(attempt, { base: 500, max: 4000, jitter: true })
+}
 
 function base64UrlJson(obj) {
   return Buffer.from(JSON.stringify(obj), 'utf8')
@@ -40208,13 +40239,15 @@ function makeGoogleDatastoreTokenProvider(credentials) {
 }
 
 /**
- * Firestore REST encodes int64 as string; only treat as set when it parses as an integer.
+ * Firestore REST encodes int64 as string. A valid `scanCompleteSentAt` must be a positive
+ * Unix-seconds value — 0/negative are sentinel/corruption, not "sent", and must not dedupe.
  * @param {unknown} raw
  */
 function isValidFirestoreIntegerString(raw) {
   if (raw == null || raw === '') return false
   const s = String(raw).trim();
-  return s !== '' && /^-?\d+$/.test(s)
+  if (!/^-?\d+$/.test(s)) return false
+  return Number(s) > 0
 }
 
 /**
@@ -40226,7 +40259,10 @@ function firestoreDocumentHasScanCompleteSentAt(doc) {
   if (field.integerValue != null && field.integerValue !== '') {
     return isValidFirestoreIntegerString(field.integerValue)
   }
-  if (field.doubleValue != null && Number.isFinite(Number(field.doubleValue))) return true
+  if (field.doubleValue != null) {
+    const n = Number(field.doubleValue);
+    if (Number.isFinite(n) && n > 0) return true
+  }
   return false
 }
 
@@ -40240,6 +40276,7 @@ async function userHasScanCompleteSentAt({ projectId, userId, getAccessToken }) 
 
   let lastErr;
   for (let attempt = 0; attempt < TRANSIENT_MAX_ATTEMPTS; attempt++) {
+    let waitMs = backoffMs(attempt, { base: 500, max: 4000, jitter: true });
     try {
       const accessToken = await getAccessToken();
       const resp = await fetch(url.toString(), {
@@ -40249,26 +40286,27 @@ async function userHasScanCompleteSentAt({ projectId, userId, getAccessToken }) 
       });
 
       if (resp.status === 404) return false
-      if (resp.status >= 500 && attempt < TRANSIENT_MAX_ATTEMPTS - 1) {
-        await resp.body?.cancel().catch(() => {});
-        lastErr = new Error(`Firestore GET ${resp.status}`);
-        await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }));
-        continue
+      if (resp.ok) {
+        const doc = await resp.json();
+        return firestoreDocumentHasScanCompleteSentAt(doc)
       }
-      if (!resp.ok) {
+      if (isRetryableStatus(resp.status) && attempt < TRANSIENT_MAX_ATTEMPTS - 1) {
+        await resp.body?.cancel().catch(() => {});
+        lastErr = new Error(`Firestore GET ${resp.status} (retrying)`);
+        waitMs = retryAfterMs(resp, attempt);
+      } else {
         const text = await resp.text();
         throw new Error(`Firestore GET ${resp.status}: ${text}`)
       }
-      const doc = await resp.json();
-      return firestoreDocumentHasScanCompleteSentAt(doc)
     } catch (err) {
       lastErr = err;
-      // Final attempt or non-retryable (a thrown Firestore <500) — propagate immediately.
-      if (attempt >= TRANSIENT_MAX_ATTEMPTS - 1 || /Firestore GET [1-4]\d\d:/.test(err.message)) {
+      // Terminal status error (has "Firestore GET <code>: <body>") or final attempt → stop.
+      // Plain network/abort errors fall through to retry.
+      if (attempt >= TRANSIENT_MAX_ATTEMPTS - 1 || /Firestore GET \d+:/.test(err.message)) {
         throw err
       }
-      await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }));
     }
+    await sleep(waitMs);
   }
   throw lastErr ?? new Error('Firestore GET failed after retries')
 }
@@ -40336,6 +40374,7 @@ async function postScanCompleteWebhook(baseUrl, sharedSecret, body, headers = {}
   const payload = JSON.stringify(body);
   let last = { ok: false, status: 0, text: '' };
   for (let attempt = 0; attempt < TRANSIENT_MAX_ATTEMPTS; attempt++) {
+    let waitMs = backoffMs(attempt, { base: 500, max: 4000, jitter: true });
     try {
       const resp = await fetch(url, {
         method: 'POST',
@@ -40353,13 +40392,14 @@ async function postScanCompleteWebhook(baseUrl, sharedSecret, body, headers = {}
       }
       const text = await resp.text();
       last = { ok: false, status: resp.status, text };
-      // Retry 5xx only; 4xx is a client problem and should not be retried.
-      if (resp.status < 500 || attempt >= TRANSIENT_MAX_ATTEMPTS - 1) return last
+      // Retry 408/429/5xx; all other 4xx are client errors and terminal.
+      if (!isRetryableStatus(resp.status) || attempt >= TRANSIENT_MAX_ATTEMPTS - 1) return last
+      waitMs = retryAfterMs(resp, attempt);
     } catch (err) {
       last = { ok: false, status: 0, text: String(err?.message ?? err) };
       if (attempt >= TRANSIENT_MAX_ATTEMPTS - 1) return last
     }
-    await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }));
+    await sleep(waitMs);
   }
   return last
 }
