@@ -122,13 +122,15 @@ export function makeGoogleDatastoreTokenProvider(credentials) {
 }
 
 /**
- * Firestore REST encodes int64 as string; only treat as set when it parses as an integer.
+ * Firestore REST encodes int64 as string. A valid `scanCompleteSentAt` must be a positive
+ * Unix-seconds value — 0/negative are sentinel/corruption, not "sent", and must not dedupe.
  * @param {unknown} raw
  */
 function isValidFirestoreIntegerString(raw) {
   if (raw == null || raw === '') return false
   const s = String(raw).trim()
-  return s !== '' && /^-?\d+$/.test(s)
+  if (!/^-?\d+$/.test(s)) return false
+  return Number(s) > 0
 }
 
 /**
@@ -140,7 +142,10 @@ export function firestoreDocumentHasScanCompleteSentAt(doc) {
   if (field.integerValue != null && field.integerValue !== '') {
     return isValidFirestoreIntegerString(field.integerValue)
   }
-  if (field.doubleValue != null && Number.isFinite(Number(field.doubleValue))) return true
+  if (field.doubleValue != null) {
+    const n = Number(field.doubleValue)
+    if (Number.isFinite(n) && n > 0) return true
+  }
   return false
 }
 

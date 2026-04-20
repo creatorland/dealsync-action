@@ -97,12 +97,38 @@ describe('firestoreDocumentHasScanCompleteSentAt', () => {
     ).toBe(false)
   })
 
+  it('is false for zero/negative integerValue (sentinel, not a real timestamp)', () => {
+    expect(
+      firestoreDocumentHasScanCompleteSentAt({
+        fields: { scanCompleteSentAt: { integerValue: '0' } },
+      }),
+    ).toBe(false)
+    expect(
+      firestoreDocumentHasScanCompleteSentAt({
+        fields: { scanCompleteSentAt: { integerValue: '-1' } },
+      }),
+    ).toBe(false)
+  })
+
   it('is true for doubleValue', () => {
     expect(
       firestoreDocumentHasScanCompleteSentAt({
         fields: { scanCompleteSentAt: { doubleValue: 1710000000 } },
       }),
     ).toBe(true)
+  })
+
+  it('is false for zero/negative doubleValue', () => {
+    expect(
+      firestoreDocumentHasScanCompleteSentAt({
+        fields: { scanCompleteSentAt: { doubleValue: 0 } },
+      }),
+    ).toBe(false)
+    expect(
+      firestoreDocumentHasScanCompleteSentAt({
+        fields: { scanCompleteSentAt: { doubleValue: -1.5 } },
+      }),
+    ).toBe(false)
   })
 })
 
