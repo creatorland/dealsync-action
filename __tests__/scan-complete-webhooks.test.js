@@ -18,8 +18,11 @@ function decodeBase64UrlJson(segment) {
 }
 
 describe('scanCompleteEligibility.selectEligibleUsers', () => {
+  const sampleSql = () =>
+    scanCompleteEligibility.selectEligibleUsers('EMAIL_CORE_STAGING', 'DEALSYNC_STG_V1')
+
   it('substitutes sanitized schemas', () => {
-    const sql = scanCompleteEligibility.selectEligibleUsers('EMAIL_CORE_STAGING', 'DEALSYNC_STG_V1')
+    const sql = sampleSql()
     expect(sql).toContain('EMAIL_CORE_STAGING.sync_states')
     expect(sql).toContain('DEALSYNC_STG_V1.deal_states')
   })
@@ -30,10 +33,59 @@ describe('scanCompleteEligibility.selectEligibleUsers', () => {
     )
   })
 
+  it('rejects invalid batchSize', () => {
+    expect(() =>
+      scanCompleteEligibility.selectEligibleUsers('EMAIL_CORE_STAGING', 'DEALSYNC_STG_V1', 0),
+    ).toThrow('batchSize must be a positive integer')
+    expect(() =>
+      scanCompleteEligibility.selectEligibleUsers('EMAIL_CORE_STAGING', 'DEALSYNC_STG_V1', 1.5),
+    ).toThrow('batchSize must be a positive integer')
+  })
+
   it('coalesces processed_messages to zero for parity', () => {
-    const sql = scanCompleteEligibility.selectEligibleUsers('EMAIL_CORE_STAGING', 'DEALSYNC_STG_V1')
+    const sql = sampleSql()
     expect(sql).toContain('COALESCE((')
     expect(sql).toContain('), 0) AS processed_messages')
+  })
+
+  // AC: FORWARD-latest users must not be returned.
+  it('gates eligibility on latest sync_strategy = LOOKBACK', () => {
+    expect(sampleSql()).toMatch(/WHERE ls\.sync_strategy = 'LOOKBACK'/)
+  })
+
+  // AC: users whose processed < total must not be returned; completion predicate mirrors backend.
+  it('requires processed_messages >= total_messages', () => {
+    expect(sampleSql()).toMatch(/processed_messages >= total_messages/)
+  })
+
+  // AC: users with zero ingested emails must not be returned (guards trivially-true 0 >= 0).
+  it('excludes zero-email users', () => {
+    expect(sampleSql()).toMatch(/total_messages > 0/)
+  })
+
+  // AC: users whose earlier LOOKBACK reached terminal success must not be returned.
+  it('excludes users whose earlier LOOKBACK had terminal success', () => {
+    const sql = sampleSql()
+    expect(sql).toMatch(/prior_lookback_success/)
+    expect(sql).toMatch(/pls\.created_at < c\.initiated_at/)
+  })
+
+  // Parity: terminal-success event set must match backend isFirstCompletedSync.
+  it('matches backend sync_events terminal-success semantics', () => {
+    const sql = sampleSql()
+    expect(sql).toContain("'metadata_ingestion_end','content_ingestion_end','completed'")
+    expect(sql).toContain("'metadata_ingestion_failed','content_ingestion_failed'")
+  })
+
+  // Deliver oldest completions first so the batch cap doesn't starve long-waiting users.
+  it('orders by initiated_at ASC', () => {
+    expect(sampleSql()).toMatch(/ORDER BY e\.initiated_at ASC/)
+  })
+
+  it('applies LIMIT using the batchSize input', () => {
+    expect(
+      scanCompleteEligibility.selectEligibleUsers('EMAIL_CORE_STAGING', 'DEALSYNC_STG_V1', 42),
+    ).toMatch(/LIMIT 42\b/)
   })
 })
 
