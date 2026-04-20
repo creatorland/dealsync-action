@@ -26,7 +26,7 @@ import require$$0$7 from 'diagnostics_channel';
 import require$$2$2 from 'child_process';
 import require$$6$1 from 'timers';
 import { createRequire as createRequire$1 } from 'module';
-import { createSign, createPrivateKey } from 'node:crypto';
+import { createSign, createPrivateKey, randomUUID } from 'node:crypto';
 
 var commonjsGlobal = typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : typeof global !== 'undefined' ? global : typeof self !== 'undefined' ? self : {};
 
@@ -27902,11 +27902,17 @@ const scanCompleteEligibility = {
   /**
    * @param {string} emailCoreSchema
    * @param {string} dealsyncSchema
+   * @param {number} [batchSize=500] hard cap on rows returned per run; safety against unbounded
+   *   cross-user scans. Firestore dedupe makes it safe to re-run each tick, so bounding per tick
+   *   is preferable to streaming a full result set and risking the 120s SxT timeout.
    * @returns {string}
    */
-  selectEligibleUsers(emailCoreSchema, dealsyncSchema) {
+  selectEligibleUsers(emailCoreSchema, dealsyncSchema, batchSize = 500) {
     const ec = sanitizeSchema(emailCoreSchema);
     const ds = sanitizeSchema(dealsyncSchema);
+    if (!Number.isInteger(batchSize) || batchSize <= 0) {
+      throw new Error(`batchSize must be a positive integer: ${batchSize}`)
+    }
     return `WITH latest_sync AS (
   SELECT sync_state_id, user_id, created_at, sync_strategy
   FROM (
@@ -27941,6 +27947,7 @@ completed_candidates AS (
   SELECT *
   FROM status_inputs
   WHERE initiated_at IS NOT NULL
+    AND total_messages > 0
     AND processed_messages >= total_messages
 ),
 prior_lookback_success AS (
@@ -28017,7 +28024,8 @@ SELECT
 FROM eligible e
 LEFT JOIN deal_agg da ON da.user_id = e.user_id
 LEFT JOIN contact_agg ca ON ca.user_id = e.user_id
-ORDER BY e.initiated_at DESC`
+ORDER BY e.initiated_at ASC
+LIMIT ${batchSize}`
   },
 };
 
@@ -40116,6 +40124,8 @@ async function runRecoveryPipeline() {
  */
 
 
+const TRANSIENT_MAX_ATTEMPTS = 3;
+
 const OAUTH_TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const FIRESTORE_SCOPE = 'https://www.googleapis.com/auth/datastore';
 
@@ -40176,7 +40186,25 @@ async function getGoogleDatastoreAccessToken(credentials) {
   }
   const token = body.access_token;
   if (!token || typeof token !== 'string') throw new Error('OAuth response missing access_token')
+  coreExports.setSecret(token);
   return token
+}
+
+/**
+ * Memoizing token provider. Refreshes ~5 min before the 1h OAuth expiry so a long cron run
+ * (or a burst of retries) never fails on a stale token.
+ * @param {{ client_email: string, private_key: string }} credentials
+ * @returns {() => Promise<string>}
+ */
+function makeGoogleDatastoreTokenProvider(credentials) {
+  let token = '';
+  let expiresAt = 0;
+  return async () => {
+    if (token && Date.now() < expiresAt - 300_000) return token
+    token = await getGoogleDatastoreAccessToken(credentials);
+    expiresAt = Date.now() + 3600_000;
+    return token
+  }
 }
 
 /**
@@ -40203,26 +40231,98 @@ function firestoreDocumentHasScanCompleteSentAt(doc) {
 }
 
 /**
- * @param {{ projectId: string, userId: string, accessToken: string }} args
+ * @param {{ projectId: string, userId: string, getAccessToken: () => Promise<string> }} args
  */
-async function userHasScanCompleteSentAt({ projectId, userId, accessToken }) {
+async function userHasScanCompleteSentAt({ projectId, userId, getAccessToken }) {
   const path = `projects/${encodeURIComponent(projectId)}/databases/(default)/documents/users/${encodeURIComponent(userId)}`;
   const url = new URL(`https://firestore.googleapis.com/v1/${path}`);
   url.searchParams.set('mask.fieldPaths', 'scanCompleteSentAt');
 
-  const resp = await fetch(url.toString(), {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(30000),
-  });
+  let lastErr;
+  for (let attempt = 0; attempt < TRANSIENT_MAX_ATTEMPTS; attempt++) {
+    try {
+      const accessToken = await getAccessToken();
+      const resp = await fetch(url.toString(), {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(30000),
+      });
 
-  if (resp.status === 404) return false
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Firestore GET ${resp.status}: ${text}`)
+      if (resp.status === 404) return false
+      if (resp.status >= 500 && attempt < TRANSIENT_MAX_ATTEMPTS - 1) {
+        await resp.body?.cancel().catch(() => {});
+        lastErr = new Error(`Firestore GET ${resp.status}`);
+        await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }));
+        continue
+      }
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`Firestore GET ${resp.status}: ${text}`)
+      }
+      const doc = await resp.json();
+      return firestoreDocumentHasScanCompleteSentAt(doc)
+    } catch (err) {
+      lastErr = err;
+      // Final attempt or non-retryable (a thrown Firestore <500) — propagate immediately.
+      if (attempt >= TRANSIENT_MAX_ATTEMPTS - 1 || /Firestore GET [1-4]\d\d:/.test(err.message)) {
+        throw err
+      }
+      await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }));
+    }
   }
-  const doc = await resp.json();
-  return firestoreDocumentHasScanCompleteSentAt(doc)
+  throw lastErr ?? new Error('Firestore GET failed after retries')
+}
+
+/**
+ * Write users/{userId}.scanCompleteSentAt = now (ms) so subsequent cron ticks dedupe.
+ * Uses updateMask so other fields are untouched; PATCH creates the doc if absent.
+ * Requires the service account to hold datastore.user (or a role granting
+ * datastore.entities.update / create) in addition to read access.
+ *
+ * @param {{ projectId: string, userId: string, getAccessToken: () => Promise<string>, nowMs?: number }} args
+ */
+async function writeScanCompleteSentAt({ projectId, userId, getAccessToken, nowMs }) {
+  const path = `projects/${encodeURIComponent(projectId)}/databases/(default)/documents/users/${encodeURIComponent(userId)}`;
+  const url = new URL(`https://firestore.googleapis.com/v1/${path}`);
+  url.searchParams.set('updateMask.fieldPaths', 'scanCompleteSentAt');
+  const ts = String(Math.floor(nowMs ?? Date.now()));
+  const body = JSON.stringify({ fields: { scanCompleteSentAt: { integerValue: ts } } });
+
+  let lastErr;
+  for (let attempt = 0; attempt < TRANSIENT_MAX_ATTEMPTS; attempt++) {
+    try {
+      const accessToken = await getAccessToken();
+      const resp = await fetch(url.toString(), {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body,
+        signal: AbortSignal.timeout(30000),
+      });
+
+      if (resp.ok) {
+        await resp.body?.cancel().catch(() => {});
+        return
+      }
+      if (resp.status >= 500 && attempt < TRANSIENT_MAX_ATTEMPTS - 1) {
+        await resp.body?.cancel().catch(() => {});
+        lastErr = new Error(`Firestore PATCH ${resp.status}`);
+        await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }));
+        continue
+      }
+      const text = await resp.text();
+      throw new Error(`Firestore PATCH ${resp.status}: ${text}`)
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= TRANSIENT_MAX_ATTEMPTS - 1 || /Firestore PATCH [1-4]\d\d:/.test(err.message)) {
+        throw err
+      }
+      await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }));
+    }
+  }
+  throw lastErr ?? new Error('Firestore PATCH failed after retries')
 }
 
 /**
@@ -40282,23 +40382,38 @@ function rowToScanCompleteWebhookBody(row) {
  * @param {string} sharedSecret
  * @param {{ userId: string, eventType: string, eventData: object }} body
  */
-async function postScanCompleteWebhook(baseUrl, sharedSecret, body) {
+async function postScanCompleteWebhook(baseUrl, sharedSecret, body, headers = {}) {
   const root = baseUrl.replace(/\/+$/, '');
   const url = `${root}/dealsync-v2/webhooks`;
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-shared-secret': sharedSecret,
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(120000),
-  });
-  if (!resp.ok) {
-    const text = await resp.text();
-    return { ok: false, status: resp.status, text }
+  const payload = JSON.stringify(body);
+  let last = { ok: false, status: 0, text: '' };
+  for (let attempt = 0; attempt < TRANSIENT_MAX_ATTEMPTS; attempt++) {
+    try {
+      const resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-shared-secret': sharedSecret,
+          ...headers,
+        },
+        body: payload,
+        signal: AbortSignal.timeout(120000),
+      });
+      if (resp.ok) {
+        await resp.body?.cancel().catch(() => {});
+        return { ok: true, status: resp.status, text: '' }
+      }
+      const text = await resp.text();
+      last = { ok: false, status: resp.status, text };
+      // Retry 5xx only; 4xx is a client problem and should not be retried.
+      if (resp.status < 500 || attempt >= TRANSIENT_MAX_ATTEMPTS - 1) return last
+    } catch (err) {
+      last = { ok: false, status: 0, text: String(err?.message ?? err) };
+      if (attempt >= TRANSIENT_MAX_ATTEMPTS - 1) return last
+    }
+    await sleep(backoffMs(attempt, { base: 500, max: 4000, jitter: true }));
   }
-  return { ok: true, status: resp.status, text: '' }
+  return last
 }
 
 /**
@@ -40342,6 +40457,7 @@ function resolveFirestoreServiceAccountJson() {
  * @see docs/plans/2026-04-16-scan-complete-w3-cron-tech-spec.md
  */
 async function runEmitScanCompleteWebhooks() {
+  const cid = randomUUID();
   const authUrl = coreExports.getInput('sxt-auth-url');
   const authSecret = coreExports.getInput('sxt-auth-secret');
   const apiUrl = coreExports.getInput('sxt-api-url');
@@ -40358,6 +40474,10 @@ async function runEmitScanCompleteWebhooks() {
   const concurrency = parsePositiveIntegerInput(
     coreExports.getInput('scan-complete-webhook-concurrency') || '5',
     'scan-complete-webhook-concurrency',
+  );
+  const batchSize = parsePositiveIntegerInput(
+    coreExports.getInput('scan-complete-batch-size') || '500',
+    'scan-complete-batch-size',
   );
 
   if (!authUrl || !authSecret || !apiUrl || !biscuit || !sxtSchemaRaw) {
@@ -40385,18 +40505,22 @@ async function runEmitScanCompleteWebhooks() {
     throw new Error('Firestore service account JSON must include a non-empty project_id')
   }
 
-  const sql = scanCompleteEligibility.selectEligibleUsers(emailCoreSchemaRaw, sxtSchemaRaw);
+  const sql = scanCompleteEligibility.selectEligibleUsers(
+    emailCoreSchemaRaw,
+    sxtSchemaRaw,
+    batchSize,
+  );
   const jwt = await authenticate(authUrl, authSecret);
   const exec = (q) => executeSql(apiUrl, jwt, biscuit, q);
 
-  console.log('[emit-scan-complete-webhooks] executing eligibility query');
+  console.log(`[emit-scan-complete-webhooks] cid=${cid} executing eligibility query`);
   const result = await exec(sql);
   const rows = Array.isArray(result) ? result : [];
-  console.log(`[emit-scan-complete-webhooks] eligibility rows=${rows.length}`);
+  console.log(`[emit-scan-complete-webhooks] cid=${cid} eligibility rows=${rows.length}`);
 
-  let firestoreToken = '';
+  const getFirestoreAccessToken = makeGoogleDatastoreTokenProvider(credentials);
   if (rows.length > 0) {
-    firestoreToken = await getGoogleDatastoreAccessToken(credentials);
+    await getFirestoreAccessToken();
   }
 
   let scanned = rows.length;
@@ -40412,7 +40536,7 @@ async function runEmitScanCompleteWebhooks() {
         try {
           userId = getRowUserId(row);
         } catch (err) {
-          coreExports.error(`[emit-scan-complete-webhooks] skip invalid row: ${err.message}`);
+          coreExports.error(`[emit-scan-complete-webhooks] cid=${cid} skip invalid row: ${err.message}`);
           errors++;
           return
         }
@@ -40421,35 +40545,53 @@ async function runEmitScanCompleteWebhooks() {
           const alreadySent = await userHasScanCompleteSentAt({
             projectId: firestoreProjectId,
             userId,
-            accessToken: firestoreToken,
+            getAccessToken: getFirestoreAccessToken,
           });
           if (alreadySent) {
             skippedDeduped++;
-            console.log(`[emit-scan-complete-webhooks] skip dedupe userId=${userId}`);
+            console.log(`[emit-scan-complete-webhooks] cid=${cid} skip dedupe userId=${userId}`);
             return
           }
 
           const body = rowToScanCompleteWebhookBody(row);
-          const res = await postScanCompleteWebhook(backendBaseUrl, sharedSecret, body);
+          const res = await postScanCompleteWebhook(backendBaseUrl, sharedSecret, body, {
+            'x-correlation-id': cid,
+          });
           if (!res.ok) {
             errors++;
             coreExports.error(
-              `[emit-scan-complete-webhooks] POST failed userId=${userId} status=${res.status} body=${(res.text || '').slice(0, 500)}`,
+              `[emit-scan-complete-webhooks] cid=${cid} POST failed userId=${userId} status=${res.status} body=${(res.text || '').slice(0, 500)}`,
             );
             return
           }
           posted++;
-          console.log(`[emit-scan-complete-webhooks] posted userId=${userId}`);
+          console.log(`[emit-scan-complete-webhooks] cid=${cid} posted userId=${userId}`);
+
+          try {
+            await writeScanCompleteSentAt({
+              projectId: firestoreProjectId,
+              userId,
+              getAccessToken: getFirestoreAccessToken,
+            });
+          } catch (err) {
+            // POST already succeeded; surface the dedupe-write failure but don't count as a retry
+            // signal — next tick will re-POST, and the backend is idempotent by event semantics.
+            coreExports.warning(
+              `[emit-scan-complete-webhooks] cid=${cid} dedupe write failed userId=${userId}: ${err.message}`,
+            );
+          }
         } catch (err) {
           errors++;
-          coreExports.error(`[emit-scan-complete-webhooks] error userId=${userId ?? '?'}: ${err.message}`);
+          coreExports.error(
+            `[emit-scan-complete-webhooks] cid=${cid} error userId=${userId ?? '?'}: ${err.message}`,
+          );
         }
       }),
     );
   }
 
-  const summary = { scanned, skippedDeduped, posted, errors };
-  console.log(`[emit-scan-complete-webhooks] done ${JSON.stringify(summary)}`);
+  const summary = { correlationId: cid, scanned, skippedDeduped, posted, errors };
+  console.log(`[emit-scan-complete-webhooks] cid=${cid} done ${JSON.stringify(summary)}`);
   return summary
 }
 
