@@ -18,13 +18,13 @@ jobs:
       - id: emit
         name: Emit scan_complete webhooks
         timeout-minutes: 30
-        uses: creatorland/dealsync-action@17f78b5b3da4000d6ef38b8e3fa95a704a17489d
+        uses: creatorland/dealsync-action@main
         with:
           command: emit-scan-complete-webhooks
           sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
           sxt-auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
           sxt-api-url: ${{ secrets.SXT_API_URL }}
-          sxt-biscuit: ${{ secrets.SXT_BISCUIT }}
+          sxt-biscuit: ${{ secrets.SXT_DEALSYNC_EMAIL_CORE_BISCUIT }}
           sxt-schema: ${{ secrets.SXT_SCHEMA }}
           email-core-schema: EMAIL_CORE_STAGING
           # NOTE: this should include /api (backend has global prefix 'api'), e.g. https://<host>/api
