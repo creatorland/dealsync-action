@@ -1,0 +1,33 @@
+name: ds-scan-complete-10m-betanet
+authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: scan-complete-betanet
+  cancel-in-progress: false
+
+jobs:
+  scan-complete:
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    environment: '0x12c3f02f05146db270f75d2abda0557e3250598c1d7029bd221ec3d028bbba53'
+    steps:
+      - id: emit
+        name: Emit scan_complete webhooks
+        timeout-minutes: 30
+        uses: creatorland/dealsync-action@main
+        with:
+          command: emit-scan-complete-webhooks
+          sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
+          sxt-auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          sxt-api-url: ${{ secrets.SXT_API_URL }}
+          sxt-biscuit: ${{ secrets.SXT_DEALSYNC_EMAIL_CORE_BISCUIT }}
+          sxt-schema: ${{ secrets.SXT_SCHEMA }}
+          email-core-schema: ${{ secrets.EMAIL_CORE_SCHEMA }}
+          # NOTE: this should include /api (backend has global prefix 'api'), e.g. https://<host>/api
+          dealsync-backend-base-url: ${{ secrets.DEALSYNC_BACKEND_BASE_URL }}
+          dealsync-v2-shared-secret: ${{ secrets.DEALSYNC_V2_SHARED_SECRET }}
+          firestore-service-account-json: ${{ secrets.FIRESTORE_SERVICE_ACCOUNT_JSON }}
