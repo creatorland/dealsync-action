@@ -82,13 +82,13 @@ export function sanitizeEmailBody(body) {
 // Filter rules
 // ---------------------------------------------------------------------------
 
-export function extractEmailAddress(from) {
+function extractEmailAddress(from) {
   if (!from) return ''
   const match = from.match(/<([^>]+)>/)
   return (match ? match[1] : from).trim().toLowerCase()
 }
 
-export function extractDisplayName(from) {
+function extractDisplayName(from) {
   if (!from) return ''
   const match = from.match(/^(.+?)\s*</)
   return match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
