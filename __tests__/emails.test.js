@@ -23,7 +23,8 @@ afterEach(() => {
   jest.restoreAllMocks()
 })
 
-const { fetchEmails } = await import('../src/lib/emails.js')
+const { fetchEmails, isBlockedSenderAddress, deriveFallbackMainContact } =
+  await import('../src/lib/emails.js')
 const sxtClient = await import('../src/lib/db.js')
 
 // ---------------------------------------------------------------------------
@@ -579,5 +580,127 @@ describe('fetchEmails', () => {
 
     // default 3 retries
     expect(mockFetch).toHaveBeenCalledTimes(3)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// isBlockedSenderAddress
+// ---------------------------------------------------------------------------
+
+describe('isBlockedSenderAddress', () => {
+  it('returns true for empty or null input (fail-closed)', () => {
+    expect(isBlockedSenderAddress('')).toBe(true)
+    expect(isBlockedSenderAddress(null)).toBe(true)
+    expect(isBlockedSenderAddress(undefined)).toBe(true)
+    expect(isBlockedSenderAddress('   ')).toBe(true)
+  })
+
+  it('blocks addresses matching a blocked prefix', () => {
+    expect(isBlockedSenderAddress('no-reply@brand.com')).toBe(true)
+    expect(isBlockedSenderAddress('donotreply@brand.com')).toBe(true)
+    expect(isBlockedSenderAddress('billing@brand.com')).toBe(true)
+  })
+
+  it('blocks addresses whose domain contains a blocked-domain token', () => {
+    expect(isBlockedSenderAddress('someone@news.brand.com')).toBe(true)
+    expect(isBlockedSenderAddress('someone@mailer.brand.com')).toBe(true)
+    expect(isBlockedSenderAddress('someone@marketing.co')).toBe(true)
+  })
+
+  it('is case-insensitive on prefix and domain matching', () => {
+    expect(isBlockedSenderAddress('NO-REPLY@BRAND.COM')).toBe(true)
+    expect(isBlockedSenderAddress('  Billing@Brand.com  ')).toBe(true)
+    expect(isBlockedSenderAddress('foo@NEWS.Brand.COM')).toBe(true)
+  })
+
+  it('passes legitimate personal addresses', () => {
+    expect(isBlockedSenderAddress('alice@brand.com')).toBe(false)
+    expect(isBlockedSenderAddress('bob.smith@agency.co')).toBe(false)
+    expect(isBlockedSenderAddress('a.user@example.com')).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// deriveFallbackMainContact
+// ---------------------------------------------------------------------------
+
+describe('deriveFallbackMainContact', () => {
+  const makeEmail = ({ from, date }) => ({
+    topLevelHeaders: [
+      ...(from ? [{ name: 'From', value: from }] : []),
+      ...(date ? [{ name: 'Date', value: date }] : []),
+    ],
+  })
+
+  it('returns null for empty or missing input', () => {
+    expect(deriveFallbackMainContact(null, 'me@creator.com')).toBeNull()
+    expect(deriveFallbackMainContact([], 'me@creator.com')).toBeNull()
+  })
+
+  it('returns the latest non-creator, non-blocked sender', () => {
+    const emails = [
+      makeEmail({ from: 'Old <old@brand.com>', date: '2026-01-01T00:00:00Z' }),
+      makeEmail({ from: 'Latest <latest@brand.com>', date: '2026-01-03T00:00:00Z' }),
+      makeEmail({ from: 'Mid <mid@brand.com>', date: '2026-01-02T00:00:00Z' }),
+    ]
+    expect(deriveFallbackMainContact(emails, 'me@creator.com')).toEqual({
+      email: 'latest@brand.com',
+      name: 'Latest',
+      company: null,
+      title: null,
+      phone_number: null,
+    })
+  })
+
+  it('skips the creator and falls through to the next external sender', () => {
+    const emails = [
+      makeEmail({ from: 'me@creator.com', date: '2026-01-03T00:00:00Z' }),
+      makeEmail({ from: 'Alice <alice@brand.com>', date: '2026-01-02T00:00:00Z' }),
+    ]
+    expect(deriveFallbackMainContact(emails, 'me@creator.com')).toMatchObject({
+      email: 'alice@brand.com',
+      name: 'Alice',
+    })
+  })
+
+  it('skips blocked senders (no-reply, marketing domain)', () => {
+    const emails = [
+      makeEmail({ from: 'no-reply@brand.com', date: '2026-01-03T00:00:00Z' }),
+      makeEmail({ from: 'foo@news.brand.com', date: '2026-01-02T00:00:00Z' }),
+      makeEmail({ from: 'Alice <alice@brand.com>', date: '2026-01-01T00:00:00Z' }),
+    ]
+    expect(deriveFallbackMainContact(emails, 'me@creator.com')).toMatchObject({
+      email: 'alice@brand.com',
+    })
+  })
+
+  it('returns null when every sender is creator or blocked', () => {
+    const emails = [
+      makeEmail({ from: 'me@creator.com', date: '2026-01-03T00:00:00Z' }),
+      makeEmail({ from: 'no-reply@brand.com', date: '2026-01-02T00:00:00Z' }),
+    ]
+    expect(deriveFallbackMainContact(emails, 'me@creator.com')).toBeNull()
+  })
+
+  it('handles bare-email From headers (no angle brackets)', () => {
+    const emails = [makeEmail({ from: 'alice@brand.com', date: '2026-01-01T00:00:00Z' })]
+    expect(deriveFallbackMainContact(emails, 'me@creator.com')).toEqual({
+      email: 'alice@brand.com',
+      name: null,
+      company: null,
+      title: null,
+      phone_number: null,
+    })
+  })
+
+  it('keeps a deterministic result when Date headers are missing or unparseable', () => {
+    const emails = [
+      makeEmail({ from: 'Alice <alice@brand.com>' }),
+      makeEmail({ from: 'Bob <bob@brand.com>', date: 'garbage' }),
+    ]
+    // Both timestamps coerce to 0; sort is stable so the first usable sender wins.
+    const got = deriveFallbackMainContact(emails, 'me@creator.com')
+    expect(got).not.toBeNull()
+    expect(['alice@brand.com', 'bob@brand.com']).toContain(got.email)
   })
 })

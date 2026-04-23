@@ -27891,6 +27891,37 @@ const contacts = {
   },
 };
 
+// src/lib/sql/email-senders.js
+//
+// Cross-schema read of EMAIL_CORE.EMAIL_METADATA + EMAIL_SENDERS, used
+// by the classify pipeline's main_contact fallback when no fetched email
+// payload is available (e.g. cached-audit retries). Classify calls this once
+// per (thread, user) so THREAD_ID need not be globally unique across users.
+//
+// SxT constraints (same as deal-states.js):
+//   - No CTEs
+//   - LEFT/INNER JOIN on single column
+//   - Rows are returned ORDER BY RECEIVED_AT DESC so the caller can pick
+//     the latest usable sender per thread in JS.
+
+
+/** Max rows scanned per thread; caller stops at first usable sender. */
+const PER_THREAD_SENDER_SCAN_LIMIT = 500;
+
+const emailSenders = {
+  /**
+   * @param {string} coreSchema - schema name (validated)
+   * @param {string} threadId - raw thread id, e.g. th-1
+   * @param {string} userId - raw user id from EMAIL_METADATA / batch rows
+   */
+  selectForThreadUser: (coreSchema, threadId, userId) => {
+    const s = sanitizeSchema(coreSchema);
+    const qt = `'${sanitizeId(String(threadId))}'`;
+    const qu = `'${sanitizeId(String(userId))}'`;
+    return `SELECT em.THREAD_ID, em.RECEIVED_AT, es.SENDER_EMAIL, es.SENDER_NAME FROM ${s}.EMAIL_METADATA em INNER JOIN ${s}.EMAIL_SENDERS es ON es.EMAIL_METADATA_ID = em.ID WHERE em.THREAD_ID = ${qt} AND em.USER_ID = ${qu} ORDER BY em.RECEIVED_AT DESC LIMIT ${PER_THREAD_SENDER_SCAN_LIMIT}`
+  },
+};
+
 /**
  * Concurrency pool + batch event helper.
  * Used by both run-filter-pipeline and run-classify-pipeline.
@@ -34865,18 +34896,75 @@ function sanitizeEmailBody(body) {
 // ---------------------------------------------------------------------------
 
 function extractEmailAddress(from) {
+  if (!from) return ''
   const match = from.match(/<([^>]+)>/);
   return (match ? match[1] : from).trim().toLowerCase()
 }
 
 function extractDisplayName(from) {
+  if (!from) return ''
   const match = from.match(/^(.+?)\s*</);
-  return match
-    ? match[1]
-        .trim()
-        .replace(/^["']|["']$/g, '')
-        .toLowerCase()
-    : ''
+  return match ? match[1].trim().replace(/^["']|["']$/g, '') : ''
+}
+
+/**
+ * Check whether a sender address matches blocked prefixes / domains.
+ * Mirrors filter rule 2 so main_contact fallback does not derive from
+ * automated senders, bounce addresses, or marketing-only domains.
+ */
+function isBlockedSenderAddress(addr) {
+  if (!addr) return true
+  const lower = addr.trim().toLowerCase();
+  if (!lower) return true
+  for (const prefix of blockedPrefixes) {
+    if (lower.startsWith(prefix)) return true
+  }
+  const atIndex = lower.indexOf('@');
+  if (atIndex !== -1) {
+    const domain = lower.slice(atIndex + 1);
+    for (const blockedDomain of blockedDomains) {
+      if (domain.includes(blockedDomain)) return true
+    }
+  }
+  return false
+}
+
+/**
+ * Derive a fallback main_contact from a thread's messages when the AI
+ * did not return one. Picks the latest external sender (not the creator,
+ * not blocked) and returns it in the same shape as AI's main_contact.
+ *
+ * @param {object[]} threadEmails - fetched email objects for a single thread
+ * @param {string} creatorEmail - creator's email (excluded from candidates)
+ * @returns {{email: string, name: string|null, company: null, title: null, phone_number: null}|null}
+ */
+function deriveFallbackMainContact(threadEmails, creatorEmail) {
+  if (!threadEmails || threadEmails.length === 0) return null
+  const creatorLower = (creatorEmail || '').trim().toLowerCase();
+
+  const dated = threadEmails.map((email) => ({
+    email,
+    t: new Date(getHeader(email, 'date') || 0).getTime() || 0,
+  }));
+  dated.sort((a, b) => b.t - a.t);
+
+  for (const { email } of dated) {
+    const fromHeader = getHeader(email, 'from');
+    if (!fromHeader) continue
+    const addr = extractEmailAddress(fromHeader);
+    if (!addr) continue
+    if (creatorLower && addr === creatorLower) continue
+    if (isBlockedSenderAddress(addr)) continue
+    const displayName = extractDisplayName(fromHeader);
+    return {
+      email: addr,
+      name: displayName || null,
+      company: null,
+      title: null,
+      phone_number: null,
+    }
+  }
+  return null
 }
 
 function isRejected(email) {
@@ -34889,20 +34977,11 @@ function isRejected(email) {
     if (!hasDkim && !hasSpf && !hasDmarc) return true
   }
 
-  // Rule 2: Blocked sender
+  // Rule 2: Blocked sender (single source of truth with isBlockedSenderAddress)
   const fromValue = getHeader(email, 'from');
   if (fromValue) {
     const emailAddr = extractEmailAddress(fromValue);
-    for (const prefix of blockedPrefixes) {
-      if (emailAddr.startsWith(prefix)) return true
-    }
-    const atIndex = emailAddr.indexOf('@');
-    if (atIndex !== -1) {
-      const domain = emailAddr.slice(atIndex + 1);
-      for (const blockedDomain of blockedDomains) {
-        if (domain.includes(blockedDomain)) return true
-      }
-    }
+    if (emailAddr && isBlockedSenderAddress(emailAddr)) return true
   }
 
   // Rule 3: Bulk headers
@@ -34931,7 +35010,7 @@ function isRejected(email) {
 
   // Rule 5: Non-personalized sender name
   if (fromValue) {
-    const displayName = extractDisplayName(fromValue);
+    const displayName = extractDisplayName(fromValue).toLowerCase();
     if (displayName && nonPersonalizedNames.some((name) => displayName === name.toLowerCase())) {
       return true
     }
@@ -39272,6 +39351,10 @@ async function runClassifyPipeline() {
     // -----------------------------------------------------------------------
 
     let threads = null;
+    // Hoisted so Step 6 can derive a main_contact fallback from the thread's
+    // latest external sender when the AI did not return one. Remains null on
+    // cached-audit retries — Step 6 falls back to a DB lookup in that case.
+    let allEmails = null;
 
     t0 = Date.now();
     const existingAudit = await execNoRL(audits.selectByBatch(schema, batchId));
@@ -39303,7 +39386,6 @@ async function runClassifyPipeline() {
       const syncStateId = rows[0].SYNC_STATE_ID;
       const messageIds = rows.map((r) => r.MESSAGE_ID);
 
-      let allEmails;
       t0 = Date.now();
       try {
         allEmails = await fetchEmails(messageIds, metaByMessageId, {
@@ -39643,17 +39725,103 @@ async function runClassifyPipeline() {
     // -----------------------------------------------------------------------
 
     if (dealThreads.length > 0) {
+      // ---------------------------------------------------------------------
+      // Step 6a: main_contact fallback — derive from the thread's latest
+      // external sender when the AI returned a null/unusable main_contact.
+      // A "usable" contact still must be: non-empty email, not the creator,
+      // and not a blocked/automated sender (mailer-daemon, no-reply, etc.).
+      // ---------------------------------------------------------------------
+
+      const creatorLower = (creatorEmail || '').trim().toLowerCase();
+      const isUsableContact = (mc) => {
+        if (!mc) return false
+        const email = (mc.email || '').trim().toLowerCase();
+        if (!email) return false
+        if (creatorLower && email === creatorLower) return false
+        if (isBlockedSenderAddress(email)) return false
+        return true
+      };
+
+      const fallbackCandidates = dealThreads.filter((t) => !isUsableContact(t.main_contact));
+
+      if (fallbackCandidates.length > 0) {
+        // Pass 1: use fetched email bodies (fresh-classification path).
+        if (Array.isArray(allEmails) && allEmails.length > 0) {
+          const emailsByThread = {};
+          for (const email of allEmails) {
+            if (!email.threadId) continue
+            if (!emailsByThread[email.threadId]) emailsByThread[email.threadId] = [];
+            emailsByThread[email.threadId].push(email);
+          }
+
+          for (const thread of fallbackCandidates) {
+            if (isUsableContact(thread.main_contact)) continue
+            const threadEmails = emailsByThread[thread.thread_id];
+            const derived = deriveFallbackMainContact(threadEmails, creatorEmail);
+            if (derived && isUsableContact(derived)) thread.main_contact = derived;
+          }
+        }
+
+        // Pass 2: DB lookup via EMAIL_SENDERS for threads still missing a
+        // contact — covers the cached-audit retry path where allEmails is null.
+        // One query per thread so a global LIMIT + ORDER BY RECEIVED_AT DESC cannot
+        // starve quieter threads when another thread dominates the newest rows.
+        // Queries run in parallel; per-thread try/catch keeps one failure from aborting the rest.
+        const stillMissing = fallbackCandidates.filter((t) => !isUsableContact(t.main_contact));
+        if (stillMissing.length > 0) {
+          const resolveOne = async (thread) => {
+            const tid = thread.thread_id;
+            try {
+              const threadKey = sanitizeId(String(tid));
+              const batchUserId = userByThread[threadKey];
+              if (!batchUserId) {
+                console.error(
+                  `[run-classify-pipeline] main_contact DB fallback skipped for thread ${tid}: no USER_ID on claimed batch rows`,
+                );
+                return
+              }
+              const senderRows = await execNoRL(
+                emailSenders.selectForThreadUser(coreSchema, threadKey, batchUserId),
+              );
+              for (const row of senderRows || []) {
+                const addr = (row.SENDER_EMAIL || '').trim().toLowerCase();
+                if (!addr) continue
+                if (creatorLower && addr === creatorLower) continue
+                if (isBlockedSenderAddress(addr)) continue
+                const name = (row.SENDER_NAME || '').trim();
+                thread.main_contact = {
+                  email: addr,
+                  name: name || null,
+                  company: null,
+                  title: null,
+                  phone_number: null,
+                };
+                return
+              }
+            } catch (err) {
+              console.error(
+                `[run-classify-pipeline] main_contact DB fallback for thread ${tid} failed (non-fatal): ${err.message}`,
+              );
+            }
+          };
+          await Promise.all(stillMissing.map(resolveOne));
+        }
+
+        const recovered = fallbackCandidates.filter((t) => isUsableContact(t.main_contact)).length;
+        console.log(
+          `[run-classify-pipeline] main_contact fallback: ${recovered}/${fallbackCandidates.length} recovered (${fallbackCandidates.length - recovered} still unresolved)`,
+        );
+      }
+
       const coreContactValues = [];
       const dealContactValues = [];
 
       for (const thread of dealThreads) {
         const mc = thread.main_contact;
-        if (!mc) continue
-        const email = (mc.email || '').trim().toLowerCase();
-        if (!email) continue
+        // Same bar as Step 6a (creator, blocked/automated senders, empty email)
+        if (!isUsableContact(mc)) continue
 
-        // Skip creator's own email — AI sometimes ignores the "external only" rule
-        if (creatorEmail && email === creatorEmail.trim().toLowerCase()) continue
+        const email = (mc.email || '').trim().toLowerCase();
 
         const threadId = sanitizeId(thread.thread_id);
         const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
