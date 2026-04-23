@@ -602,6 +602,8 @@ describe('run-classify-pipeline command', () => {
       )
       expect(senderSqlCalls.length).toBe(1)
       expect(senderSqlCalls[0][3]).toContain("em.THREAD_ID = 'thread-2'")
+      expect(senderSqlCalls[0][3]).toContain("em.USER_ID = 'user-1'")
+      expect(senderSqlCalls[0][3]).not.toContain("'thread-1'")
 
       expect(mockBatcherInstance.pushContacts).toHaveBeenCalled()
       const contactTuples = mockBatcherInstance.pushContacts.mock.calls[0][0]
