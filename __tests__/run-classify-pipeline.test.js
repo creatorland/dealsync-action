@@ -191,6 +191,10 @@ describe('run-classify-pipeline command', () => {
     for (const key of Object.keys(outputs)) delete outputs[key]
     mockAuthenticate.mockResolvedValue('test-jwt')
     mockInsertBatchEvent.mockResolvedValue(undefined)
+    // Reset emails.js mocks so prior-test mockReturnValue cannot leak
+    // into the next test (jest.clearAllMocks only clears call history).
+    mockDeriveFallbackMainContact.mockReset().mockReturnValue(null)
+    mockIsBlockedSenderAddress.mockReset().mockReturnValue(false)
     // Reset batcher mock
     mockBatcherInstance.pushEvals.mockResolvedValue(undefined)
     mockBatcherInstance.pushDealDeletes.mockResolvedValue(undefined)
