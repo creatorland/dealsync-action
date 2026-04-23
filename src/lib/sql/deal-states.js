@@ -3,8 +3,8 @@
 // DEAL_STATES table SQL builders.
 // Pure functions: params in, SQL string out. No DB connection, no side effects.
 //
-// SxT constraints:
-//   - No CTEs (WITH ... AS)
+// SxT constraints for these row-level deal-states builders:
+//   - Avoid CTEs (WITH ... AS) for mutation/query compatibility in this module
 //   - No division operator
 //   - INTERVAL syntax: INTERVAL 'N' MINUTE
 //   - ON CONFLICT (...) DO UPDATE supported

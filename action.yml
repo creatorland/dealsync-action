@@ -1,10 +1,10 @@
 name: 'Dealsync'
-description: 'Dealsync pipeline action — run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, sync-deal-states, eval, eval-compare'
+description: 'Dealsync pipeline action — run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, sync-deal-states, emit-scan-complete-webhooks, eval, eval-compare'
 author: 'creatorland'
 
 inputs:
   command:
-    description: 'Operation: run-filter-pipeline, run-classify-pipeline, sync-deal-states, eval, eval-compare'
+    description: 'Operation: run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, sync-deal-states, emit-scan-complete-webhooks, eval, eval-compare'
     required: true
   sxt-auth-url:
     description: 'SxT auth proxy URL'
@@ -110,6 +110,18 @@ inputs:
   email-max-retries:
     description: 'Max HTTP retries for email service calls'
     default: '3'
+  dealsync-backend-base-url:
+    description: 'Backend API base URL. Trailing slashes are OK and will be trimmed. Required for emit-scan-complete-webhooks.'
+  dealsync-v2-shared-secret:
+    description: 'DEALSYNC_V2_SHARED_SECRET for x-shared-secret on webhook POST. Required for emit-scan-complete-webhooks.'
+  firestore-service-account-json:
+    description: 'GCP service account JSON (full object) for Firestore REST read of users/{id}.scanCompleteSentAt; must include a non-empty project_id. Required for emit-scan-complete-webhooks unless env FIRESTORE_SERVICE_ACCOUNT_JSON is set to the same stringified JSON with a non-empty project_id.'
+  scan-complete-webhook-concurrency:
+    description: 'Max parallel Firestore reads + webhook POSTs per batch (emit-scan-complete-webhooks)'
+    default: '5'
+  scan-complete-batch-size:
+    description: 'Max eligible users returned per cron run (LIMIT on SxT eligibility query). Firestore dedupe makes this safe to cap (emit-scan-complete-webhooks).'
+    default: '500'
 
 outputs:
   success:

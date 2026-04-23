@@ -63,11 +63,16 @@ describe('sync-deal-states command', () => {
     fetchSpy.mockRestore()
   })
 
-  // Helper: mock auth + sync + 2 sweep queries (filter + classify exhausted batches)
-  function mockSyncFlow(syncRows = []) {
+  // Helper: mock auth + N sync iterations + 2 sweep queries (filter + classify exhausted batches)
+  /** @param {unknown[][]} [syncIterations] — one SxT row set per sync while-loop iteration; [] or omit = one iteration with [] */
+  function mockSyncFlow(syncIterations) {
+    const iterations =
+      syncIterations === undefined || syncIterations.length === 0 ? [[]] : syncIterations
+    fetchSpy.mockResolvedValueOnce(authResponse())
+    for (const rows of iterations) {
+      fetchSpy.mockResolvedValueOnce(sxtResponse(rows))
+    }
     fetchSpy
-      .mockResolvedValueOnce(authResponse()) // auth
-      .mockResolvedValueOnce(sxtResponse(syncRows)) // sync INSERT...SELECT
       .mockResolvedValueOnce(sxtResponse([])) // findDeadBatches (filtering)
       .mockResolvedValueOnce(sxtResponse([])) // findDeadBatches (classifying)
   }
@@ -75,21 +80,21 @@ describe('sync-deal-states command', () => {
   it('runs single INSERT...SELECT and returns synced_count from row count', async () => {
     mockInputs()
 
-    const insertedRows = [{}, {}]
-    mockSyncFlow(insertedRows)
+    // Second chunk returns UPDATED 0 so the sync loop exits (see sync-deal-states.js)
+    mockSyncFlow([[{ UPDATED: 2 }], [{ UPDATED: 0 }]])
 
     const result = await runSyncDealStates()
 
     expect(result).toEqual({ synced_count: 2, dead_lettered: 0 })
 
     const sqlCalls = getSqlCalls(fetchSpy)
-    expect(sqlCalls).toHaveLength(3)
+    expect(sqlCalls).toHaveLength(4)
 
     const sql = getSqlText(sqlCalls[0])
     expect(sql).toContain('INSERT INTO dealsync_stg_v1.DEAL_STATES')
     expect(sql).toContain('EMAIL_CORE_STAGING.EMAIL_METADATA')
     expect(sql).toContain('NOT EXISTS')
-    expect(sql).toContain('ON CONFLICT (EMAIL_METADATA_ID)')
+    expect(sql).toContain('LIMIT 50000')
   })
 
   it('returns synced_count=0 when insert returns no rows', async () => {
