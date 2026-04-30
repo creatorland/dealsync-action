@@ -32,6 +32,10 @@ Four GitHub Actions workflows orchestrate the pipeline:
 
 **`dealsync-ab-eval`** — A/B evaluation comparing prompt or model variants against ground truth.
 
+## UEI LOOKBACK window (§A1 / Story [#471](https://github.com/creatorland/dealsync-v2/issues/471))
+
+Unified Email Ingestion uses a **60-day** default Gmail history window with a coordinated **45-day** fallback when quota, rate limits, or batch/operational-window constraints apply. Shared constants, date-range helpers (UTC epoch ms: **N × 86_400_000** from range end — not calendar-local midnights), fallback decision logic (`resolveUeiLookbackFallbackReason`), and structured logging (`emitUeiLookbackFallbackLog` / `{ userId, fellBackTo, reason }`, reasons restricted to `UEI_LOOKBACK_FALLBACK_REASONS`) live in [`src/lib/uei-lookback.js`](src/lib/uei-lookback.js) for `core-email-metadata-ingestion` and tooling to import. The SxT helper [`trigger-sync.js`](.claude/skills/sxt/scripts/trigger-sync.js) defaults to 60 days and validates `userId` / sync state id with `sanitizeId` before building SQL.
+
 ## Pipeline flow
 
 ```
