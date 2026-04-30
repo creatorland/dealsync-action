@@ -60,11 +60,12 @@ export function createLookbackDateRange(nowMs = Date.now(), days = UEI_LOOKBACK_
 }
 
 /**
- * Log line shape for NFR-3 / interim 10% guard-rail dashboards.
+ * Structured payload subset for the NFR-3 / interim 10% guard-rail fallback log.
+ * Excludes the top-level `event` field, which is added by {@link emitUeiLookbackFallbackLog}.
  * @param {string} userId
  * @param {number} fellBackTo - expected 45 per §A1
  * @param {UeiLookbackFallbackReason | string} reason — {@link emitUeiLookbackFallbackLog} rejects values outside {@link UEI_LOOKBACK_FALLBACK_REASONS}
- * @returns {{ userId: string, fellBackTo: number, reason: string }}
+ * @returns {{ userId: string, fellBackTo: number, reason: string }} payload fields only; excludes `event`
  */
 export function buildUeiLookbackFallbackPayload(userId, fellBackTo, reason) {
   return { userId, fellBackTo, reason }
