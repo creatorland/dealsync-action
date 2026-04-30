@@ -97,10 +97,12 @@ export function emitUeiLookbackFallbackLog(userId, fellBackTo, reason, opts = {}
  * @param {object} input
  * @param {number} input.lookbackDaysRequested
  * @param {boolean} input.syncComplete — only `true` skips fallback (truthy non-booleans ignored)
- * @param {number} input.elapsedMs — must be finite when evaluating operational window
- * @param {number} input.operationalBudgetMs — max wall time for the 60-day attempt;
- *   must be finite and **> 0** for `operational_window_exceeded`; `0`, negative, NaN,
- *   or omission skips operational fallback (signals only; caller provides budget when applicable)
+ * @param {number} [input.elapsedMs] — wall time already spent on the 60-day attempt; omit (or leave
+ *   non-finite) to skip `operational_window_exceeded`. Used only when evaluating that branch.
+ * @param {number} [input.operationalBudgetMs] — max wall time for the 60-day attempt; omit (or use
+ *   non-finite / **≤ 0**) to skip `operational_window_exceeded`. When both `elapsedMs` and
+ *   `operationalBudgetMs` are finite and budget **> 0**, `elapsedMs >= operationalBudgetMs` yields
+ *   `operational_window_exceeded` after other signals are ruled out.
  * @param {boolean} [input.gmailQuotaExceeded] — only literal `true` counts
  * @param {boolean} [input.sustainedGmailRateLimit] — only literal `true` counts
  * @param {boolean} [input.batchProcessingBlocked] — only literal `true` counts
