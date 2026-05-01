@@ -101,6 +101,18 @@ describe('uei-lookback', () => {
     })
   })
 
+  it('emits the exact AC log shape end-to-end (NFR-3 contract)', () => {
+    const lines = []
+    emitUeiLookbackFallbackLog('user-99', 'gmail_quota', { log: (s) => lines.push(s) })
+    expect(lines).toHaveLength(1)
+    // Snapshot the literal serialized line to catch any drift in field order or shape.
+    expect(lines[0]).toBe(
+      '{"event":"uei_lookback_fallback","userId":"user-99","fellBackTo":45,"reason":"gmail_quota"}',
+    )
+    // Belt-and-suspenders: parse and assert the exact key set so future fields fail the test.
+    expect(Object.keys(JSON.parse(lines[0]))).toEqual(['event', 'userId', 'fellBackTo', 'reason'])
+  })
+
   it('resolveUeiLookbackFallbackReason returns null when not on 60-day attempt', () => {
     expect(
       resolveUeiLookbackFallbackReason({
