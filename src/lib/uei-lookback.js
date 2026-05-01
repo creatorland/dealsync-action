@@ -73,19 +73,23 @@ export function buildUeiLookbackFallbackPayload(userId, fellBackTo, reason) {
 
 /**
  * Emit a single structured JSON log line (Cloud Logging–friendly).
+ *
+ * `fellBackTo` is fixed to {@link UEI_LOOKBACK_DAYS_FALLBACK} (45) so the AC log shape
+ * stays uniform across callers — emission is the AC enforcement point, not the caller.
+ * Use {@link buildUeiLookbackFallbackPayload} directly if you need a non-canonical shape.
+ *
  * @param {string} userId
- * @param {number} fellBackTo
  * @param {UeiLookbackFallbackReason} reason
  * @param {{ log?: (s: string) => void }} [opts]
  */
-export function emitUeiLookbackFallbackLog(userId, fellBackTo, reason, opts = {}) {
+export function emitUeiLookbackFallbackLog(userId, reason, opts = {}) {
   if (!UEI_LOOKBACK_FALLBACK_REASONS.includes(reason)) {
     throw new Error(`Invalid UEI lookback fallback reason: ${String(reason)}`)
   }
   const log = opts.log ?? console.log
   const payload = {
     event: 'uei_lookback_fallback',
-    ...buildUeiLookbackFallbackPayload(userId, fellBackTo, reason),
+    ...buildUeiLookbackFallbackPayload(userId, UEI_LOOKBACK_DAYS_FALLBACK, reason),
   }
   log(JSON.stringify(payload))
 }

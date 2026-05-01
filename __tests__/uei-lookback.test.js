@@ -81,14 +81,14 @@ describe('uei-lookback', () => {
   })
 
   it('emitUeiLookbackFallbackLog rejects unknown reason values', () => {
-    expect(() => emitUeiLookbackFallbackLog('u', 45, 'typo_quota', { log: () => {} })).toThrow(
+    expect(() => emitUeiLookbackFallbackLog('u', 'typo_quota', { log: () => {} })).toThrow(
       /Invalid UEI lookback fallback reason/,
     )
   })
 
   it('emitUeiLookbackFallbackLog writes JSON with event + AC fields', () => {
     const lines = []
-    emitUeiLookbackFallbackLog('user-2', 45, 'operational_window_exceeded', {
+    emitUeiLookbackFallbackLog('user-2', 'operational_window_exceeded', {
       log: (s) => lines.push(s),
     })
     expect(lines).toHaveLength(1)
@@ -96,7 +96,7 @@ describe('uei-lookback', () => {
     expect(row).toMatchObject({
       event: 'uei_lookback_fallback',
       userId: 'user-2',
-      fellBackTo: 45,
+      fellBackTo: UEI_LOOKBACK_DAYS_FALLBACK,
       reason: 'operational_window_exceeded',
     })
   })
