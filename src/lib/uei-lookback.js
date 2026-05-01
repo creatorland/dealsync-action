@@ -45,6 +45,15 @@ export function parseUeiLookbackDaysArg(raw) {
 }
 
 /**
+ * Compute a UTC-anchored lookback window.
+ *
+ * **Gmail TZ caveat:** the returned `Date`s are exact `N × 86_400_000 ms` apart, but the
+ * downstream Gmail query uses `after:`/`before:` which Gmail interprets in the *user's*
+ * account timezone and truncates to a calendar day. After formatting (e.g.
+ * `formatDateForGmailQuery` in core-email-metadata-ingestion) the effective server-side
+ * window can differ from the precise UTC delta by up to ~24h on either side. Treat these
+ * timestamps as the intended UTC range, not the exact Gmail-side filter.
+ *
  * @param {number} [nowMs=Date.now()] — UTC epoch ms for range end when finite
  * @param {number} [days=UEI_LOOKBACK_DAYS_DEFAULT] — whole-day count only (finite positive integers); each day is 24h wall in UTC ms
  * @returns {{ rangeStart: Date; rangeEnd: Date }}
