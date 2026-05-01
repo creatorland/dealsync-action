@@ -98,6 +98,13 @@ export function emitUeiLookbackFallbackLog(userId, reason, opts = {}) {
  * Recommend fallback when a 60-day LOOKBACK cannot complete within policy.
  * Call from metadata ingestion (or equivalent) when aborting the wider window.
  *
+ * **Scope is intentionally narrow:** returns non-null only when
+ * `lookbackDaysRequested === UEI_LOOKBACK_DAYS_DEFAULT` (60). Sync attempts at any
+ * other window — including a retry already at 45 — are out of scope by design,
+ * because §A1 / NFR-3 measures the 60→45 graceful-fallback rate specifically.
+ * If you need to log a non-60 failure, emit a different event; do not extend
+ * this resolver.
+ *
  * @param {object} input
  * @param {number} input.lookbackDaysRequested
  * @param {boolean} input.syncComplete — only `true` skips fallback (truthy non-booleans ignored)
