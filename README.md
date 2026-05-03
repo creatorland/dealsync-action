@@ -32,6 +32,25 @@ Four GitHub Actions workflows orchestrate the pipeline:
 
 **`dealsync-ab-eval`** — A/B evaluation comparing prompt or model variants against ground truth.
 
+## UEI LOOKBACK window (§A1 / Story [#471](https://github.com/creatorland/dealsync-v2/issues/471))
+
+Unified Email Ingestion targets a **60-day** default Gmail history window with a coordinated **45-day** fallback when quota, rate limits, or batch/operational-window constraints apply.
+
+**What lives here ([`src/lib/uei-lookback.js`](src/lib/uei-lookback.js)):**
+
+- Constants: `UEI_LOOKBACK_DAYS_DEFAULT` (60), `UEI_LOOKBACK_DAYS_FALLBACK` (45), `UEI_LOOKBACK_DAYS_MAX` (3650).
+- Date-range helper `createLookbackDateRange` — UTC epoch ms, exact `N × 86_400_000` from range end, not calendar-local midnights. (Gmail `after:`/`before:` is TZ-bound, so the server-side window can drift up to ~24h either way; see the JSDoc.)
+- Fallback resolver `resolveUeiLookbackFallbackReason` — narrow by design: only fires when `lookbackDaysRequested === 60`, since §A1 / NFR-3 measures the 60→45 graceful-fallback rate specifically.
+- Structured logger `emitUeiLookbackFallbackLog` — emits `{ event: "uei_lookback_fallback", userId, fellBackTo: 45, reason }` with `reason` constrained to `UEI_LOOKBACK_FALLBACK_REASONS` and `fellBackTo` pinned to the constant (callers cannot drift the shape).
+
+**In-repo consumer:** [`trigger-sync.js`](.claude/skills/sxt/scripts/trigger-sync.js) parses lookback days and computes the date range via this lib, so its default lookback now follows the §A1 contract.
+
+**Out of scope for this repo, tracked as Story 2.1 follow-ups:**
+
+- The production lookback default in `dealsync-v2/scheduler-service` (`INGESTION_SYNC_DAYS_THRESHOLD`, currently `45`).
+- Wiring `resolveUeiLookbackFallbackReason` + `emitUeiLookbackFallbackLog` into `dealsync-v2/core-email-metadata-ingestion` so AC3's NFR-3 log line actually fires.
+- A shared-package distribution path (e.g. moving these constants into `dealsync-v2/packages/shared-schema/`) so the W3-owned ingest service can import the contract instead of vendoring a copy.
+
 ## Pipeline flow
 
 ```

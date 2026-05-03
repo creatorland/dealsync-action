@@ -6,14 +6,19 @@
  * Usage:
  *   node --experimental-wasm-modules trigger-sync.js <userId> [lookbackDays]
  *
- * Env vars: see sxt-client.js + INGESTION_URL (defaults to staging)
+ * Default lookback is UEI_LOOKBACK_DAYS_DEFAULT (60) per §A1 / dealsync-v2#471.
+ * Env vars: see sxt-client.js + INGESTION_URL (defaults to staging).
  */
 
 import { authenticate, generateMasterBiscuit, executeSql } from './sxt-client.js'
 import { randomUUID } from 'crypto'
+import {
+  createLookbackDateRange,
+  parseUeiLookbackDaysArg,
+} from '../../../../src/lib/uei-lookback.js'
 
 const userId = process.argv[2]
-const lookbackDays = parseInt(process.argv[3] || '45')
+const lookbackDays = parseUeiLookbackDaysArg(process.argv[3])
 
 if (!userId) {
   console.error('Usage: trigger-sync.js <userId> [lookbackDays]')
@@ -29,8 +34,7 @@ const pk = process.env.SXT_PRIVATE_KEY
 
 // 1. Create sync_state
 const syncStateId = randomUUID()
-const now = new Date()
-const start = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000)
+const { rangeStart: start, rangeEnd: now } = createLookbackDateRange(Date.now(), lookbackDays)
 
 const b = generateMasterBiscuit('email_core_staging.sync_states', pk)
 const insertSql = `INSERT INTO EMAIL_CORE_STAGING.SYNC_STATES (ID, USER_ID, SYNC_STRATEGY, STATUS, TOTAL_MESSAGES, DATE_RANGE_START, DATE_RANGE_END, RETRY_COUNT, MAX_RETRIES, CREATED_AT, UPDATED_AT) VALUES ('${syncStateId}', '${userId}', 'LOOKBACK', 'pending', 0, TIMESTAMP '${start.toISOString()}', TIMESTAMP '${now.toISOString()}', 0, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
