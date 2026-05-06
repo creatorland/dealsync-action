@@ -42,6 +42,12 @@ jest.unstable_mockModule('../src/commands/emit-scan-complete-webhooks.js', () =>
     .mockResolvedValue({ scanned: 0, skippedDeduped: 0, posted: 0, errors: 0 }),
 }))
 
+jest.unstable_mockModule('../src/commands/run-fallback-reattempt-pipeline.js', () => ({
+  runFallbackReattemptPipeline: jest
+    .fn()
+    .mockResolvedValue({ scanned: 0, posted: 0, alreadyInProgress: 0, errors: 0 }),
+}))
+
 const core = await import('@actions/core')
 const { run } = await import('../src/main.js')
 
@@ -77,6 +83,22 @@ describe('dealsync main (command router)', () => {
       scanned: 0,
       skippedDeduped: 0,
       posted: 0,
+      errors: 0,
+    })
+  })
+
+  it('routes run-fallback-reattempt-pipeline (Phase 3 / dealsync-v2#522)', async () => {
+    core.getInput.mockImplementation((name) =>
+      name === 'command' ? 'run-fallback-reattempt-pipeline' : '',
+    )
+
+    await run()
+
+    expect(outputs['success']).toBe('true')
+    expect(JSON.parse(outputs['result'])).toEqual({
+      scanned: 0,
+      posted: 0,
+      alreadyInProgress: 0,
       errors: 0,
     })
   })

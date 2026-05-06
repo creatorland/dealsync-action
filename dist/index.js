@@ -28060,6 +28060,59 @@ LIMIT ${batchSize}`
   },
 };
 
+// Read-only eligibility query for the §A1 / NFR-3 fallback re-attempt sweep
+// (creatorland/dealsync-v2#522, Phase 3). Identifies failed 60-day LOOKBACK
+// sync_states whose `fallback_reason` was persisted by core-email-metadata-ingestion
+// but which haven't yet had a 45-day successor row created (either because the
+// inline trigger from metadataFetcher → backend failed, or the inline trigger
+// is disabled in this environment).
+//
+// One-shot guarantee: the query excludes rows that already appear as
+// `originating_sync_state_id` on a successor row, so a failed 45-day attempt
+// never triggers a second re-attempt at a narrower window.
+//
+// Bounded history: rows older than 7 days are excluded so the sweep doesn't
+// keep re-attempting ancient failures whose users may have re-granted by now
+// (or whose context has otherwise gone stale).
+
+
+const fallbackReattemptEligibility = {
+  /**
+   * @param {string} emailCoreSchema
+   * @param {number} [batchSize=200]
+   * @returns {string}
+   */
+  selectUnreattemptedFallbacks(emailCoreSchema, batchSize = 200) {
+    const ec = sanitizeSchema(emailCoreSchema);
+    if (!Number.isInteger(batchSize) || batchSize <= 0) {
+      throw new Error(`batchSize must be a positive integer: ${batchSize}`)
+    }
+    // 7 days = 10080 minutes. Using MINUTE here because that's the unit
+    // proven against SxT in dealsync-action's deal-states.js (which executes
+    // INTERVAL 'N' MINUTE in production); the DAY unit is standard SQL but
+    // not exercised against this SxT instance, so picking the safer form.
+    const sevenDaysInMinutes = 7 * 24 * 60;
+    return `SELECT
+  ss.id AS sync_state_id,
+  ss.user_id,
+  ss.fallback_reason,
+  ss.created_at AS originating_created_at
+FROM ${ec}.sync_states ss
+WHERE ss.sync_strategy = 'LOOKBACK'
+  AND ss.status = 'failed'
+  AND ss.fallback_reason IS NOT NULL
+  AND ss.originating_sync_state_id IS NULL
+  AND ss.created_at >= CURRENT_TIMESTAMP - INTERVAL '${sevenDaysInMinutes}' MINUTE
+  AND NOT EXISTS (
+    SELECT 1
+    FROM ${ec}.sync_states succ
+    WHERE succ.originating_sync_state_id = ss.id
+  )
+ORDER BY ss.created_at ASC
+LIMIT ${batchSize}`
+  },
+};
+
 /**
  * Concurrency pool + batch event helper.
  * Used by both run-filter-pipeline and run-classify-pipeline.
@@ -40287,6 +40340,23 @@ async function runRecoveryPipeline() {
 }
 
 /**
+ * Shared parsing helpers for GitHub Action inputs.
+ */
+
+/**
+ * @param {string} raw
+ * @param {string} inputName
+ * @returns {number}
+ */
+function parsePositiveIntegerInput(raw, inputName) {
+  const normalized = String(raw ?? '').trim();
+  if (!/^[1-9][0-9]*$/.test(normalized)) {
+    throw new Error(`${inputName} must be a positive integer`)
+  }
+  return Number(normalized)
+}
+
+/**
  * scan_complete cron helpers: Firestore dedupe (read-only), backend webhook POST, SxT row → DTO.
  * @see backend/src/dtos/dealsync-v2.webhooks.dto.ts
  */
@@ -40574,19 +40644,6 @@ async function postScanCompleteWebhook(baseUrl, sharedSecret, body, headers = {}
 
 /**
  * @param {string} raw
- * @param {string} inputName
- * @returns {number}
- */
-function parsePositiveIntegerInput(raw, inputName) {
-  const normalized = String(raw ?? '').trim();
-  if (!/^[1-9][0-9]*$/.test(normalized)) {
-    throw new Error(`${inputName} must be a positive integer`)
-  }
-  return Number(normalized)
-}
-
-/**
- * @param {string} raw
  * @returns {string}
  */
 function normalizeOptionalProjectId(raw) {
@@ -40737,6 +40794,218 @@ async function runEmitScanCompleteWebhooks() {
   return summary
 }
 
+/**
+ * UEI LOOKBACK window (FR1 / Story dealsync-v2#471).
+ * Default 60 days of Gmail history with graceful fallback to 45 days when
+ * quota, rate limits, or batch/operational-window constraints apply.
+ *
+ * **Day semantics:** “N days” means N × 86_400_000 ms anchored at `rangeEnd` (UTC instant).
+ * Not calendar-local midnight boundaries; aligns with ISO timestamps passed to SQL `TIMESTAMP`.
+ */
+
+const UEI_LOOKBACK_DAYS_FALLBACK = 45;
+
+/**
+ * @param {string} backendBaseUrl
+ * @returns {string} normalized base URL with trailing slash trimmed
+ */
+function normalizeBaseUrl(backendBaseUrl) {
+  return String(backendBaseUrl ?? '').replace(/\/+$/, '')
+}
+
+/**
+ * POST one row to backend's ingestion-trigger route with the §A1 fallback
+ * re-attempt override params. Returns `{ ok, status, text? }` (where `text`
+ * is the raw response body on non-2xx, non-409 responses). Treats 409
+ * (already-in-progress) as success — backend has decided the row already has
+ * a successor in flight, which is what we wanted to ensure anyway.
+ *
+ * @param {string} backendBaseUrl
+ * @param {string} sharedSecret
+ * @param {{userId: string, originatingSyncStateId: string}} payload
+ * @param {{[key: string]: string}} [extraHeaders]
+ * @returns {Promise<{ok: boolean, status: number, text?: string}>}
+ */
+async function postFallbackReattempt(
+  backendBaseUrl,
+  sharedSecret,
+  payload,
+  extraHeaders = {},
+) {
+  const url = `${normalizeBaseUrl(backendBaseUrl)}/v1/dealsync-v2/sync/ingestion-trigger`;
+  const body = {
+    userId: payload.userId,
+    syncStrategy: 'LOOKBACK',
+    lookbackDaysOverride: UEI_LOOKBACK_DAYS_FALLBACK,
+    originatingSyncStateId: payload.originatingSyncStateId,
+  };
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-shared-secret': sharedSecret,
+      ...extraHeaders,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (resp.status === 409) {
+    await resp.body?.cancel().catch(() => {});
+    return { ok: true, status: 409 }
+  }
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '<unreadable>');
+    return { ok: false, status: resp.status, text }
+  }
+  await resp.body?.cancel().catch(() => {});
+  return { ok: true, status: resp.status }
+}
+
+/**
+ * Extract `userId` and `syncStateId` from an SxT row.
+ * SxT returns column names UPPERCASE; tolerate snake/camel/upper/lower.
+ *
+ * @param {Record<string, unknown>} row
+ */
+function extractRowFields(row) {
+  if (!row || typeof row !== 'object') {
+    throw new Error('row is not an object')
+  }
+  const get = (...keys) => {
+    for (const k of keys) {
+      if (k in row && row[k] != null && row[k] !== '') return row[k]
+    }
+    return null
+  };
+  const userId = get('USER_ID', 'user_id', 'userId');
+  const syncStateId = get('SYNC_STATE_ID', 'sync_state_id', 'syncStateId');
+  if (!userId || typeof userId !== 'string') {
+    throw new Error('row missing user_id')
+  }
+  if (!syncStateId || typeof syncStateId !== 'string') {
+    throw new Error('row missing sync_state_id')
+  }
+  return { userId, syncStateId }
+}
+
+/**
+ * §A1 / NFR-3 (creatorland/dealsync-v2#522, Phase 3) — periodic safety-net
+ * sweep. Polls SxT for failed 60-day LOOKBACK sync_states whose fallback
+ * reason was persisted but which don't yet have a 45-day successor row, then
+ * posts to backend's ingestion-trigger route per row to create the
+ * re-attempt. Handles inline-trigger failures (network, backend brief
+ * outage) and any environment where the inline trigger is disabled.
+ *
+ * @see docs/plans/2026-05-01-uei-fallback-emission-plan.md (Phase 3)
+ */
+async function runFallbackReattemptPipeline() {
+  const cid = randomUUID();
+  const authUrl = coreExports.getInput('sxt-auth-url');
+  const authSecret = coreExports.getInput('sxt-auth-secret');
+  const apiUrl = coreExports.getInput('sxt-api-url');
+  const biscuit = coreExports.getInput('sxt-biscuit');
+  const emailCoreSchemaRaw = coreExports.getInput('email-core-schema') || 'EMAIL_CORE_STAGING';
+
+  const backendBaseUrl = coreExports.getInput('dealsync-backend-base-url');
+  const sharedSecret = coreExports.getInput('dealsync-v2-shared-secret');
+  const concurrency = parsePositiveIntegerInput(
+    coreExports.getInput('fallback-reattempt-concurrency') || '5',
+    'fallback-reattempt-concurrency',
+  );
+  const batchSize = parsePositiveIntegerInput(
+    coreExports.getInput('fallback-reattempt-batch-size') || '200',
+    'fallback-reattempt-batch-size',
+  );
+
+  if (!authUrl || !authSecret || !apiUrl || !biscuit || !emailCoreSchemaRaw) {
+    throw new Error(
+      'sxt-auth-url, sxt-auth-secret, sxt-api-url, sxt-biscuit, and email-core-schema are required',
+    )
+  }
+  if (!backendBaseUrl || !sharedSecret) {
+    throw new Error(
+      'dealsync-backend-base-url and dealsync-v2-shared-secret are required',
+    )
+  }
+
+  const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks(
+    emailCoreSchemaRaw,
+    batchSize,
+  );
+  const jwt = await authenticate(authUrl, authSecret);
+  const exec = (q) => executeSql(apiUrl, jwt, biscuit, q);
+
+  console.log(`[fallback-reattempt] cid=${cid} executing eligibility query`);
+  const result = await exec(sql);
+  const rows = Array.isArray(result) ? result : [];
+  console.log(`[fallback-reattempt] cid=${cid} eligibility rows=${rows.length}`);
+
+  let scanned = rows.length;
+  let posted = 0;
+  let alreadyInProgress = 0;
+  let errors = 0;
+
+  for (let i = 0; i < rows.length; i += concurrency) {
+    const chunk = rows.slice(i, i + concurrency);
+    await Promise.all(
+      chunk.map(async (row) => {
+        let userId, syncStateId;
+        try {
+          ;({ userId, syncStateId } = extractRowFields(row));
+        } catch (err) {
+          coreExports.error(
+            `[fallback-reattempt] cid=${cid} skip invalid row: ${err.message}`,
+          );
+          errors++;
+          return
+        }
+
+        try {
+          const res = await postFallbackReattempt(
+            backendBaseUrl,
+            sharedSecret,
+            { userId, originatingSyncStateId: syncStateId },
+            { 'x-correlation-id': cid },
+          );
+          if (!res.ok) {
+            errors++;
+            coreExports.error(
+              `[fallback-reattempt] cid=${cid} POST failed userId=${userId} status=${res.status} body=${(res.text || '').slice(0, 500)}`,
+            );
+            return
+          }
+          if (res.status === 409) {
+            alreadyInProgress++;
+            console.log(
+              `[fallback-reattempt] cid=${cid} already in progress userId=${userId} originating=${syncStateId}`,
+            );
+            return
+          }
+          posted++;
+          console.log(
+            `[fallback-reattempt] cid=${cid} posted userId=${userId} originating=${syncStateId}`,
+          );
+        } catch (err) {
+          errors++;
+          coreExports.error(
+            `[fallback-reattempt] cid=${cid} error userId=${userId ?? '?'} originating=${syncStateId ?? '?'}: ${err.message}`,
+          );
+        }
+      }),
+    );
+  }
+
+  const summary = {
+    correlationId: cid,
+    scanned,
+    posted,
+    alreadyInProgress,
+    errors,
+  };
+  console.log(`[fallback-reattempt] cid=${cid} done ${JSON.stringify(summary)}`);
+  return summary
+}
+
 const COMMANDS = {
   'sync-deal-states': runSyncDealStates,
   eval: runEval,
@@ -40745,6 +41014,7 @@ const COMMANDS = {
   'run-classify-pipeline': runClassifyPipeline,
   'run-recovery-pipeline': runRecoveryPipeline,
   'emit-scan-complete-webhooks': runEmitScanCompleteWebhooks,
+  'run-fallback-reattempt-pipeline': runFallbackReattemptPipeline,
 };
 
 async function run() {

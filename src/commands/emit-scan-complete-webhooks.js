@@ -1,6 +1,7 @@
 import * as core from '@actions/core'
 import { randomUUID } from 'node:crypto'
 import { authenticate, executeSql } from '../lib/db.js'
+import { parsePositiveIntegerInput } from '../lib/inputs.js'
 import { scanCompleteEligibility } from '../lib/sql/index.js'
 import {
   makeGoogleDatastoreTokenProvider,
@@ -10,18 +11,7 @@ import {
   postScanCompleteWebhook,
 } from '../lib/scan-complete.js'
 
-/**
- * @param {string} raw
- * @param {string} inputName
- * @returns {number}
- */
-export function parsePositiveIntegerInput(raw, inputName) {
-  const normalized = String(raw ?? '').trim()
-  if (!/^[1-9][0-9]*$/.test(normalized)) {
-    throw new Error(`${inputName} must be a positive integer`)
-  }
-  return Number(normalized)
-}
+export { parsePositiveIntegerInput }
 
 /**
  * @param {string} raw

@@ -1,10 +1,10 @@
 name: 'Dealsync'
-description: 'Dealsync pipeline action — run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, sync-deal-states, emit-scan-complete-webhooks, eval, eval-compare'
+description: 'Dealsync pipeline action — run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, sync-deal-states, emit-scan-complete-webhooks, run-fallback-reattempt-pipeline, eval, eval-compare'
 author: 'creatorland'
 
 inputs:
   command:
-    description: 'Operation: run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, sync-deal-states, emit-scan-complete-webhooks, eval, eval-compare'
+    description: 'Operation: run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, sync-deal-states, emit-scan-complete-webhooks, run-fallback-reattempt-pipeline, eval, eval-compare'
     required: true
   sxt-auth-url:
     description: 'SxT auth proxy URL'
@@ -122,6 +122,12 @@ inputs:
   scan-complete-batch-size:
     description: 'Max eligible users returned per cron run (LIMIT on SxT eligibility query). Firestore dedupe makes this safe to cap (emit-scan-complete-webhooks).'
     default: '500'
+  fallback-reattempt-concurrency:
+    description: 'Max parallel POSTs to backend ingestion-trigger per batch (run-fallback-reattempt-pipeline).'
+    default: '5'
+  fallback-reattempt-batch-size:
+    description: 'Max unreattempted-fallback rows returned per cron run (LIMIT on SxT eligibility query). One-shot guarantee + 7-day history bound make this safe to cap (run-fallback-reattempt-pipeline).'
+    default: '200'
 
 outputs:
   success:

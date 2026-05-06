@@ -6,6 +6,7 @@ import { runFilterPipeline } from './commands/run-filter-pipeline.js'
 import { runClassifyPipeline } from './commands/run-classify-pipeline.js'
 import { runRecoveryPipeline } from './commands/run-recovery-pipeline.js'
 import { runEmitScanCompleteWebhooks } from './commands/emit-scan-complete-webhooks.js'
+import { runFallbackReattemptPipeline } from './commands/run-fallback-reattempt-pipeline.js'
 
 const COMMANDS = {
   'sync-deal-states': runSyncDealStates,
@@ -15,6 +16,7 @@ const COMMANDS = {
   'run-classify-pipeline': runClassifyPipeline,
   'run-recovery-pipeline': runRecoveryPipeline,
   'emit-scan-complete-webhooks': runEmitScanCompleteWebhooks,
+  'run-fallback-reattempt-pipeline': runFallbackReattemptPipeline,
 }
 
 export async function run() {

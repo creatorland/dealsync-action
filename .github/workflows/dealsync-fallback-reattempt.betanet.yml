@@ -1,0 +1,33 @@
+name: ds-fallback-reattempt-5m-betanet
+authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: fallback-reattempt-betanet
+  cancel-in-progress: false
+
+jobs:
+  fallback-reattempt:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    environment: '0x12c3f02f05146db270f75d2abda0557e3250598c1d7029bd221ec3d028bbba53'
+    steps:
+      - id: sweep
+        name: Run §A1 fallback re-attempt safety-net sweep
+        timeout-minutes: 15
+        uses: creatorland/dealsync-action@main
+        with:
+          command: run-fallback-reattempt-pipeline
+          sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
+          sxt-auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
+          sxt-api-url: ${{ secrets.SXT_API_URL }}
+          sxt-biscuit: ${{ secrets.SXT_DEALSYNC_EMAIL_CORE_BISCUIT }}
+          email-core-schema: ${{ secrets.EMAIL_CORE_SCHEMA }}
+          # NOTE: this should include /api (backend has global prefix 'api'), e.g. https://<host>/api
+          dealsync-backend-base-url: ${{ secrets.DEALSYNC_BACKEND_BASE_URL }}
+          dealsync-v2-shared-secret: ${{ secrets.DEALSYNC_V2_SHARED_SECRET }}
+          fallback-reattempt-batch-size: '200'
+          fallback-reattempt-concurrency: '5'
