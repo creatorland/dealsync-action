@@ -19,10 +19,12 @@ The pipeline is orchestrated by GitHub Actions workflows triggered by W3.
 | `eval`                        | Multi-run AI classification against ground truth, compute recall/precision/F2 metrics                                                                                                                                                  |
 | `eval-compare`                | Compare two eval results with pass/fail criteria (recall >= 95%, precision >= 40%, etc.)                                                                                                                                               |
 | `emit-scan-complete-webhooks` | Cron-oriented: SxT eligibility query (first completed LOOKBACK) → Firestore dedupe (`users/{id}.scanCompleteSentAt`) → `POST /dealsync-v2/webhooks` (`scan_complete`). See `docs/plans/2026-04-16-scan-complete-w3-cron-tech-spec.md`. |
+| `run-fallback-reattempt-pipeline` | Cron-oriented: polls SxT for failed 60-day LOOKBACKs with fallback reason but no 45-day successor, dispatches re-attempts to backend `/sync/ingestion-trigger`. |
+| `run-brand-contacts-backfill` | Cron-oriented: paginates Firestore `users` for tier-eligible Brand Contacts users (`permissionTier.tier === 'readonly'`), verifies legacy OAuth token presence, dispatches to backend `/sync/ingestion-trigger` with `origin: 'backfill'`. Daily at 13:00 UTC. |
 
 ## Workflows
 
-Four GitHub Actions workflows orchestrate the pipeline:
+Six GitHub Actions workflows orchestrate the pipeline:
 
 **`dealsync-filter`** — Claims batches of pending emails, fetches headers from content fetcher, applies static rejection rules, updates deal states.
 

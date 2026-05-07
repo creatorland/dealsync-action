@@ -27,7 +27,7 @@ This is a **GitHub Action** (Node 24, ESM) that implements a multi-stage email d
 
 ### Command Dispatch Pattern
 
-Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command` GitHub Action input selects which handler runs. Available commands: `run-filter-pipeline`, `run-classify-pipeline`, `run-recovery-pipeline`, `sync-deal-states`, `emit-scan-complete-webhooks`, `eval`, `eval-compare`. All commands are async, return a JSON result, and set `success`/`result`/`error` outputs via `@actions/core`.
+Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command` GitHub Action input selects which handler runs. Available commands: `run-filter-pipeline`, `run-classify-pipeline`, `run-recovery-pipeline`, `run-brand-contacts-backfill`, `sync-deal-states`, `emit-scan-complete-webhooks`, `run-fallback-reattempt-pipeline`, `eval`, `eval-compare`. All commands are async, return a JSON result, and set `success`/`result`/`error` outputs via `@actions/core`.
 
 ### Pipeline Commands
 
@@ -38,6 +38,10 @@ Entry: `src/index.js` → `src/main.js` → `COMMANDS[command]()`. The `command`
 **`sync-deal-states`** — Paginated sync of deal states.
 
 **`emit-scan-complete-webhooks`** — Read-only SxT query (`src/lib/sql/scan-complete-eligibility.js`), Firestore dedupe + `POST /dealsync-v2/webhooks` (`src/lib/scan-complete.js`). Service account token via `node:crypto` JWT, not `google-auth-library`.
+
+**`run-fallback-reattempt-pipeline`** — Cron: polls SxT for failed 60-day LOOKBACKs with fallback reason but no 45-day successor, dispatches re-attempts via backend `/sync/ingestion-trigger` with `lookbackDaysOverride: 45`. Treats 409 as success.
+
+**`run-brand-contacts-backfill`** — Cron (daily 13:00 UTC): paginates Firestore `users` collection for tier-eligible Brand Contacts users (`permissionTier.tier === 'readonly'`, not revoked, not circuit-broken), checks legacy OAuth token presence at `users-sensitive-data/{uid}/oauth-token/youtube`, dispatches to backend `/sync/ingestion-trigger` with `origin: 'backfill'` + `attributionTag: 'brand-contacts-backfill'`. Helpers: `src/lib/firestore-users.js` (Firestore REST pagination + token check), `src/lib/backfill-dispatch.js` (POST helper). Reuses `makeGoogleDatastoreTokenProvider` from `src/lib/scan-complete.js`.
 
 **`eval` / `eval-compare`** — Evaluation system (see below).
 
