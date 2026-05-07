@@ -82,6 +82,15 @@ export async function runBrandContactsBackfill() {
   let dispatchSkippedAlreadyInProgress = 0
   let dispatchFailed = 0
 
+  // Cap per-user skip logs at first N per cohort to bound action-log size.
+  // Without this, a high-skip-rate run (e.g., bulk of remaining users are revoked
+  // or circuit-broken) would emit one info line per ineligible user across multiple
+  // raw-page iterations. Counters + the final structured backfill_run_complete log
+  // remain authoritative; spot-check sample is preserved for ops.
+  const SKIP_LOG_CAP = 5
+  let revokedLogged = 0
+  let circuitBrokenLogged = 0
+
   console.log(
     `[brand-contacts-backfill] cid=${correlationId} starting batchSize=${batchSize} concurrency=${concurrency} dryRun=${dryRun}`,
   )
@@ -104,15 +113,21 @@ export async function runBrandContactsBackfill() {
 
       if (permissionTier.tierRevokedAt != null) {
         usersSkippedRevoked++
-        core.info(`[brand-contacts-backfill] cid=${correlationId} skip revoked userId=${userId}`)
+        if (revokedLogged < SKIP_LOG_CAP) {
+          core.info(`[brand-contacts-backfill] cid=${correlationId} skip revoked userId=${userId}`)
+          revokedLogged++
+        }
         continue
       }
 
       if (permissionTier.backfillCircuitBrokenAt != null) {
         usersSkippedAlreadyInFlight++
-        core.info(
-          `[brand-contacts-backfill] cid=${correlationId} skip circuit-broken userId=${userId}`,
-        )
+        if (circuitBrokenLogged < SKIP_LOG_CAP) {
+          core.info(
+            `[brand-contacts-backfill] cid=${correlationId} skip circuit-broken userId=${userId}`,
+          )
+          circuitBrokenLogged++
+        }
         continue
       }
 
