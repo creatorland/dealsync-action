@@ -194,11 +194,7 @@ export async function runBrandContactsBackfill() {
   }
 
   if (candidates.length > 0) {
-    await runPool(claimFn, workerFn, {
-      maxConcurrent: concurrency,
-      maxRetries: 1,
-      onDeadLetter: undefined,
-    })
+    await runPool(claimFn, workerFn, { maxConcurrent: concurrency })
   }
 
   const durationMs = Date.now() - startMs
@@ -223,12 +219,12 @@ export async function runBrandContactsBackfill() {
 
 /**
  * Inline concurrency pool — mirrors runPool from pipeline.js but simplified for
- * the backfill use case where each "batch" is a single userId and retries are
- * handled at the dispatch level (token check + POST), not the pool level.
+ * the backfill use case where each "batch" is a single userId and per-user
+ * errors are caught inside workerFn (no retry / dead-letter at the pool level).
  *
  * @param {() => Promise<object|null>} claimFn
  * @param {(batch: object) => Promise<void>} workerFn
- * @param {{ maxConcurrent: number, maxRetries: number }} opts
+ * @param {{ maxConcurrent: number }} opts
  */
 async function runPool(claimFn, workerFn, { maxConcurrent }) {
   const active = new Set()
