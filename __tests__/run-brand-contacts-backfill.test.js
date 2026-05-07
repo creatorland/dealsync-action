@@ -152,9 +152,23 @@ describe('runBrandContactsBackfill orchestration', () => {
     expect(summary.correlationId).toBeDefined()
     expect(summary.attributionTag).toBe('brand-contacts-backfill')
     expect(dispatchedUsers).toEqual(['user-eligible'])
+    // Cohort C (full-tier) is silently filtered: contributes to usersConsidered
+    // but NOT to any skip counter. Sum of explicit cohort tallies must be 3 (A+B+F),
+    // not 4 — proves user-full was not miscounted into a skip bucket.
+    expect(
+      summary.usersEligible + summary.usersSkippedRevoked + summary.usersSkippedAlreadyInFlight,
+    ).toBe(3)
+    expect(summary.usersSkippedNoToken).toBe(0)
   })
 
-  it('Cohort D: throws on user missing permissionTier field group', async () => {
+  it('Cohort D: throws AND emits structured error log on user missing permissionTier field group', async () => {
+    const stdoutWrites = []
+    const origWrite = process.stdout.write.bind(process.stdout)
+    process.stdout.write = (chunk, ...rest) => {
+      stdoutWrites.push(String(chunk))
+      return origWrite(chunk, ...rest)
+    }
+
     global.fetch = jest.fn(async (url) => {
       const u = String(url)
       if (u.startsWith('https://oauth2.googleapis.com/token')) {
@@ -170,7 +184,17 @@ describe('runBrandContactsBackfill orchestration', () => {
       throw new Error(`unexpected fetch: ${u}`)
     })
 
-    await expect(runBrandContactsBackfill()).rejects.toThrow(/permissionTier field group/)
+    try {
+      await expect(runBrandContactsBackfill()).rejects.toThrow(/permissionTier field group/)
+    } finally {
+      process.stdout.write = origWrite
+    }
+
+    const all = stdoutWrites.join('')
+    expect(all).toContain('::error')
+    expect(all).toContain('user-no-tier')
+    expect(all).toMatch(/permissionTier/)
+    expect(all).toMatch(/migration gap/)
   })
 
   it('Cohort E: skips user with no legacy token, counted in usersSkippedNoToken', async () => {

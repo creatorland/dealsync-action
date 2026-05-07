@@ -38,7 +38,11 @@ export async function runBrandContactsBackfill() {
     'backfill-concurrency',
   )
   const attributionTag = core.getInput('backfill-attribution-tag') || 'brand-contacts-backfill'
-  const dryRun = core.getInput('backfill-dry-run') === 'true'
+  const dryRun = ['true', '1', 'yes'].includes(
+    String(core.getInput('backfill-dry-run') ?? '')
+      .trim()
+      .toLowerCase(),
+  )
 
   if (!backendBaseUrl || !sharedSecret || !saJsonRaw) {
     throw new Error(
@@ -60,6 +64,11 @@ export async function runBrandContactsBackfill() {
       : '')
   if (!gcpProjectId) {
     throw new Error('gcp-project-id input or Firestore service account JSON project_id is required')
+  }
+  if (!/^[a-z][-a-z0-9]{4,28}[a-z0-9]$/.test(gcpProjectId)) {
+    throw new Error(
+      `gcp-project-id must match GCP project ID format (lowercase letter start, 6-30 chars, ends with letter/digit): got "${gcpProjectId}"`,
+    )
   }
 
   const tokenProvider = makeGoogleDatastoreTokenProvider(credentials)
@@ -87,6 +96,8 @@ export async function runBrandContactsBackfill() {
     for (const { userId, permissionTier } of page) {
       usersConsidered++
 
+      // Belt-and-suspenders: Firestore composite filter already excludes non-readonly,
+      // but this guard catches any drift in paginateTierEligibleUsers' query shape.
       if (permissionTier.tier !== 'readonly') {
         continue
       }
@@ -230,9 +241,13 @@ async function runPool(claimFn, workerFn, { maxConcurrent }) {
         await Promise.race(active)
         continue
       }
+      // Defensive .catch(): workerFn catches its own errors today, but if a future
+      // change lets one leak, swallow at the pool boundary so siblings finish.
       const worker = (async () => {
         await workerFn(batch)
-      })()
+      })().catch((err) => {
+        console.log(`[brand-contacts-backfill] worker exception: ${err?.message ?? err}`)
+      })
       active.add(worker)
       worker.finally(() => active.delete(worker))
     } else {
