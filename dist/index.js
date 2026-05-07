@@ -27762,26 +27762,29 @@ const dealStates = {
     return `UPDATE ${s}.DEAL_STATES SET STATUS = 'failed', UPDATED_AT = CURRENT_TIMESTAMP WHERE STATUS IN (${literals}) AND BATCH_ID IS NULL AND UPDATED_AT < CURRENT_TIMESTAMP - INTERVAL '${Number(staleMinutes)}' MINUTE`
   },
 
-
   restampFilterSubBatches: (schema, megaBatchId, groups) => {
     const s = sanitizeSchema(schema);
     const megaBid = sanitizeId(megaBatchId);
-    const cases = groups.map(({ subBatchId, emailMetadataIds }) => {
-      const sid = sanitizeId(subBatchId);
-      const ids = emailMetadataIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-      return `WHEN EMAIL_METADATA_ID IN (${ids}) THEN '${sid}'`
-    }).join(' ');
+    const cases = groups
+      .map(({ subBatchId, emailMetadataIds }) => {
+        const sid = sanitizeId(subBatchId);
+        const ids = emailMetadataIds.map((id) => `'${sanitizeId(id)}'`).join(',');
+        return `WHEN EMAIL_METADATA_ID IN (${ids}) THEN '${sid}'`
+      })
+      .join(' ');
     return `UPDATE ${s}.DEAL_STATES SET BATCH_ID = CASE ${cases} END, UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${megaBid}'`
   },
 
   restampSubBatches: (schema, megaBatchId, groups) => {
     const s = sanitizeSchema(schema);
     const megaBid = sanitizeId(megaBatchId);
-    const cases = groups.map(({ subBatchId, threadIds }) => {
-      const sid = sanitizeId(subBatchId);
-      const ids = threadIds.map((id) => `'${sanitizeId(id)}'`).join(',');
-      return `WHEN THREAD_ID IN (${ids}) THEN '${sid}'`
-    }).join(' ');
+    const cases = groups
+      .map(({ subBatchId, threadIds }) => {
+        const sid = sanitizeId(subBatchId);
+        const ids = threadIds.map((id) => `'${sanitizeId(id)}'`).join(',');
+        return `WHEN THREAD_ID IN (${ids}) THEN '${sid}'`
+      })
+      .join(' ');
     return `UPDATE ${s}.DEAL_STATES SET BATCH_ID = CASE ${cases} END, UPDATED_AT = CURRENT_TIMESTAMP WHERE BATCH_ID = '${megaBid}'`
   },
 
@@ -28127,7 +28130,7 @@ LIMIT ${batchSize}`
  * @param {{ maxConcurrent: number, maxRetries: number, onDeadLetter?: (batch: object) => Promise<void> }} opts
  * @returns {Promise<{ processed: number, failed: number }>}
  */
-async function runPool(claimFn, workerFn, { maxConcurrent, maxRetries, onDeadLetter }) {
+async function runPool$1(claimFn, workerFn, { maxConcurrent, maxRetries, onDeadLetter }) {
   const active = new Set();
   const results = { processed: 0, failed: 0 };
 
@@ -28369,9 +28372,7 @@ async function deadLetterExhausted(exec, schema, activeStatus, batchType) {
     const bid = row.BATCH_ID;
     const safeBid = sanitizeId(bid);
 
-    const countRows = await exec(
-      dealStates.countByBatchAndStatus(schema, safeBid, activeStatus),
-    );
+    const countRows = await exec(dealStates.countByBatchAndStatus(schema, safeBid, activeStatus));
     const n = Number(countRows?.[0]?.C ?? 0) || 0;
     if (n === 0) continue
 
@@ -35252,7 +35253,14 @@ function enrichAndCollect(emails, allEmails, metaByMessageId) {
  * email-service now returns matching HTTP status codes (200/207/502).
  */
 async function fetchEmailsFromService(messageIds, metaByMessageId, opts) {
-  const { emailServiceUrl, userId, fetchTimeoutMs, chunkSize, maxRetries = DEFAULT_MAX_RETRIES, format } = opts;
+  const {
+    emailServiceUrl,
+    userId,
+    fetchTimeoutMs,
+    chunkSize,
+    maxRetries = DEFAULT_MAX_RETRIES,
+    format,
+  } = opts;
 
   if (!messageIds || messageIds.length === 0) return []
 
@@ -38743,7 +38751,12 @@ async function runFilterPipeline() {
   const contentFetcherUrl = coreExports.getInput('email-content-fetcher-url');
   const emailProvider = coreExports.getInput('email-provider') || '';
   const emailServiceUrl = coreExports.getInput('email-service-url');
-  const maxConcurrent = parseInt(coreExports.getInput('pipeline-filter-max-concurrent') || coreExports.getInput('pipeline-max-concurrent') || '30', 10);
+  const maxConcurrent = parseInt(
+    coreExports.getInput('pipeline-filter-max-concurrent') ||
+      coreExports.getInput('pipeline-max-concurrent') ||
+      '30',
+    10,
+  );
   const batchSize = parseInt(coreExports.getInput('pipeline-filter-batch-size') || '200', 10);
   const maxRetries = parseInt(coreExports.getInput('pipeline-max-retries') || '6', 10);
   const fetchChunkSize = parseInt(coreExports.getInput('pipeline-fetch-chunk-size') || '10', 10);
@@ -38831,13 +38844,17 @@ async function runFilterPipeline() {
       batchCount++;
       totalClaimed += count;
       const elapsed = ((Date.now() - runStart) / 1000).toFixed(1);
-      console.log(`[run-filter-pipeline] mega-claimed ${count} rows in ${claimMs}ms (claim #${batchCount}, total claimed: ${totalClaimed}, elapsed: ${elapsed}s)`);
+      console.log(
+        `[run-filter-pipeline] mega-claimed ${count} rows in ${claimMs}ms (claim #${batchCount}, total claimed: ${totalClaimed}, elapsed: ${elapsed}s)`,
+      );
 
       if (count > 0) {
         const splitStart = Date.now();
         const subBatches = await megaSplit(megaBatchId, rows, 0);
         const splitMs = Date.now() - splitStart;
-        console.log(`[run-filter-pipeline] mega-claim #${batchCount}: ${count} rows → ${subBatches.length} sub-batches of ${batchSize} (splitMs=${splitMs})`);
+        console.log(
+          `[run-filter-pipeline] mega-claim #${batchCount}: ${count} rows → ${subBatches.length} sub-batches of ${batchSize} (splitMs=${splitMs})`,
+        );
         return subBatches
       }
     } else {
@@ -38853,7 +38870,9 @@ async function runFilterPipeline() {
       batchCount++;
       totalClaimed += count;
       const elapsed = ((Date.now() - runStart) / 1000).toFixed(1);
-      console.log(`[run-filter-pipeline] claimed ${count} rows in ${claimMs}ms (claim #${batchCount}, total claimed: ${totalClaimed}, elapsed: ${elapsed}s)`);
+      console.log(
+        `[run-filter-pipeline] claimed ${count} rows in ${claimMs}ms (claim #${batchCount}, total claimed: ${totalClaimed}, elapsed: ${elapsed}s)`,
+      );
 
       if (count > 0) {
         await insertBatchEvent(exec, schema, {
@@ -38926,7 +38945,9 @@ async function runFilterPipeline() {
     const batchStart = Date.now();
 
     const elapsed = ((Date.now() - runStart) / 1000).toFixed(1);
-    console.log(`[run-filter-pipeline] processing batch ${batch_id} (${rows.length} rows, elapsed: ${elapsed}s)`);
+    console.log(
+      `[run-filter-pipeline] processing batch ${batch_id} (${rows.length} rows, elapsed: ${elapsed}s)`,
+    );
 
     // Acquire rate limit tokens in bulk (2 UPDATEs + 1 batch event)
     let t0 = Date.now();
@@ -39025,7 +39046,7 @@ async function runFilterPipeline() {
     console.log(`[run-filter-pipeline] dead-lettered batch ${bid} → status=failed`);
   }
 
-  const poolResults = await runPool(claimBatch, processFilterBatch, {
+  const poolResults = await runPool$1(claimBatch, processFilterBatch, {
     maxConcurrent,
     maxRetries,
     onDeadLetter,
@@ -39338,7 +39359,12 @@ async function runClassifyPipeline() {
   const primaryModel = coreExports.getInput('ai-primary-model') || '';
   const fallbackModel = coreExports.getInput('ai-fallback-model') || '';
   const aiApiUrl = coreExports.getInput('ai-api-url') || '';
-  const maxConcurrent = parseInt(coreExports.getInput('pipeline-classify-max-concurrent') || coreExports.getInput('pipeline-max-concurrent') || '70', 10);
+  const maxConcurrent = parseInt(
+    coreExports.getInput('pipeline-classify-max-concurrent') ||
+      coreExports.getInput('pipeline-max-concurrent') ||
+      '70',
+    10,
+  );
   const classifyBatchSize = parseInt(coreExports.getInput('pipeline-classify-batch-size') || '5', 10);
   const claimSize = parseInt(coreExports.getInput('pipeline-claim-size') || '5', 10);
   const maxRetries = parseInt(coreExports.getInput('pipeline-max-retries') || '6', 10);
@@ -39435,7 +39461,9 @@ async function runClassifyPipeline() {
       const rows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, megaBatchId));
 
       const count = rows ? rows.length : 0;
-      console.log(`[run-classify-pipeline] mega-claimed ${count} pending rows in ${Date.now() - claimStart}ms`);
+      console.log(
+        `[run-classify-pipeline] mega-claimed ${count} pending rows in ${Date.now() - claimStart}ms`,
+      );
 
       if (count > 0) {
         return await megaSplit(megaBatchId, rows, 0)
@@ -39449,7 +39477,9 @@ async function runClassifyPipeline() {
       const rows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, batchId));
 
       const count = rows ? rows.length : 0;
-      console.log(`[run-classify-pipeline] claimed ${count} pending rows in ${Date.now() - claimStart}ms`);
+      console.log(
+        `[run-classify-pipeline] claimed ${count} pending rows in ${Date.now() - claimStart}ms`,
+      );
 
       if (count > 0) {
         await insertBatchEvent(exec, schema, {
@@ -39486,7 +39516,9 @@ async function runClassifyPipeline() {
     // Check if this is a stuck mega-batch
     if (stuckBatchId.startsWith('mega:')) {
       // SELECT all rows for the mega batch
-      const stuckRows = await exec(dealStates.selectEmailsWithEvalAndCreator(schema, stuckBatchId));
+      const stuckRows = await exec(
+        dealStates.selectEmailsWithEvalAndCreator(schema, stuckBatchId),
+      );
 
       // UPDATE UPDATED_AT to prevent other instances from grabbing it
       await exec(dealStates.refreshBatchTimestamp(schema, stuckBatchId));
@@ -39719,7 +39751,10 @@ async function runClassifyPipeline() {
 
       // b. Build prompt via buildPrompt(emails)
       t0 = Date.now();
-      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails, { creatorEmail, model: primaryModel });
+      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails, {
+        creatorEmail,
+        model: primaryModel,
+      });
 
       // c. 4-layer AI resilience pipeline
       const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey };
@@ -39739,10 +39774,14 @@ async function runClassifyPipeline() {
         });
         primaryRaw = result.content;
         timings.primaryModel = Date.now() - aiStart;
-        console.log(`[run-classify-pipeline] batch ${batchId}: primary model responded in ${timings.primaryModel}ms`);
+        console.log(
+          `[run-classify-pipeline] batch ${batchId}: primary model responded in ${timings.primaryModel}ms`,
+        );
       } catch (primaryApiError) {
         timings.primaryModel = Date.now() - aiStart;
-        console.log(`[run-classify-pipeline] Primary model API failed after ${timings.primaryModel}ms: ${primaryApiError.message}`);
+        console.log(
+          `[run-classify-pipeline] Primary model API failed after ${timings.primaryModel}ms: ${primaryApiError.message}`,
+        );
         primaryRaw = null;
       }
 
@@ -39798,7 +39837,9 @@ async function runClassifyPipeline() {
           const fallbackRaw = fallbackResult.content;
           threads = parseAndValidate(fallbackRaw, threadOrder);
           timings.fallbackModel = Date.now() - fallbackStart;
-          console.log(`[run-classify-pipeline] Fallback model succeeded in ${timings.fallbackModel}ms: ${threads.length} threads`);
+          console.log(
+            `[run-classify-pipeline] Fallback model succeeded in ${timings.fallbackModel}ms: ${threads.length} threads`,
+          );
         } catch (fallbackError) {
           console.error(
             `[run-classify-pipeline] All layers exhausted. Primary and fallback both failed.`,
@@ -39831,7 +39872,9 @@ async function runClassifyPipeline() {
           }),
         );
         timings.auditSave = Date.now() - t0;
-        console.log(`[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`);
+        console.log(
+          `[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`,
+        );
       } catch (err) {
         if (
           err.message.includes('integrity constraint') ||
@@ -40158,7 +40201,7 @@ async function runClassifyPipeline() {
     console.log(`[run-classify-pipeline] dead-lettered batch ${bid} → status=failed`);
   }
 
-  const poolResults = await runPool(claimBatch, processClassifyBatch, {
+  const poolResults = await runPool$1(claimBatch, processClassifyBatch, {
     maxConcurrent,
     maxRetries,
     onDeadLetter,
@@ -40273,9 +40316,7 @@ async function runRecoveryPipeline() {
         format: 'metadata',
       });
     } catch (err) {
-      console.log(
-        `[run-recovery-pipeline] fetch failed for user ${userId}: ${err.message}`,
-      );
+      console.log(`[run-recovery-pipeline] fetch failed for user ${userId}: ${err.message}`);
       // All unfetchable on total failure
       emails = [];
     }
@@ -40317,11 +40358,13 @@ async function runRecoveryPipeline() {
     );
   }
 
-  const poolResults = await runPool(claimBatch, processRecoveryBatch, {
+  const poolResults = await runPool$1(claimBatch, processRecoveryBatch, {
     maxConcurrent,
     maxRetries,
     onDeadLetter: async (batch) => {
-      console.log(`[run-recovery-pipeline] dead-lettered batch ${batch.batch_id} (${batch.count} rows)`);
+      console.log(
+        `[run-recovery-pipeline] dead-lettered batch ${batch.batch_id} (${batch.count} rows)`,
+      );
     },
   });
 
@@ -40809,7 +40852,7 @@ const UEI_LOOKBACK_DAYS_FALLBACK = 45;
  * @param {string} backendBaseUrl
  * @returns {string} normalized base URL with trailing slash trimmed
  */
-function normalizeBaseUrl(backendBaseUrl) {
+function normalizeBaseUrl$1(backendBaseUrl) {
   return String(backendBaseUrl ?? '').replace(/\/+$/, '')
 }
 
@@ -40832,7 +40875,7 @@ async function postFallbackReattempt(
   payload,
   extraHeaders = {},
 ) {
-  const url = `${normalizeBaseUrl(backendBaseUrl)}/v1/dealsync-v2/sync/ingestion-trigger`;
+  const url = `${normalizeBaseUrl$1(backendBaseUrl)}/v1/dealsync-v2/sync/ingestion-trigger`;
   const body = {
     userId: payload.userId,
     syncStrategy: 'LOOKBACK',
@@ -40923,9 +40966,7 @@ async function runFallbackReattemptPipeline() {
     )
   }
   if (!backendBaseUrl || !sharedSecret) {
-    throw new Error(
-      'dealsync-backend-base-url and dealsync-v2-shared-secret are required',
-    )
+    throw new Error('dealsync-backend-base-url and dealsync-v2-shared-secret are required')
   }
 
   const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks(
@@ -40953,9 +40994,7 @@ async function runFallbackReattemptPipeline() {
         try {
           ;({ userId, syncStateId } = extractRowFields(row));
         } catch (err) {
-          coreExports.error(
-            `[fallback-reattempt] cid=${cid} skip invalid row: ${err.message}`,
-          );
+          coreExports.error(`[fallback-reattempt] cid=${cid} skip invalid row: ${err.message}`);
           errors++;
           return
         }
@@ -41006,10 +41045,455 @@ async function runFallbackReattemptPipeline() {
   return summary
 }
 
+/**
+ * Firestore REST helpers for Brand Contacts backfill: tier-eligibility pagination + legacy token presence check.
+ * Uses the same service-account JWT from makeGoogleDatastoreTokenProvider (scan-complete.js).
+ */
+
+
+const FIRESTORE_BASE = 'https://firestore.googleapis.com/v1';
+
+/**
+ * Async generator yielding pages of tier-eligible users from Firestore REST runQuery.
+ * Filter: permissionTier.tier == 'readonly' AND permissionTier.tierRevokedAt == null.
+ * Orders by __name__ for stable cursor pagination.
+ * Fetches in chunks of max(batchSize * 4, 200) and applies in-memory filter for backfillCircuitBrokenAt.
+ *
+ * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, batchSize: number }} opts
+ * @yields {{ userId: string, permissionTier: object }[]}
+ */
+async function* paginateTierEligibleUsers({ tokenProvider, gcpProjectId, batchSize }) {
+  const fetchChunk = Math.max(batchSize * 4, 200);
+  let startAfter = null;
+  let totalYielded = 0;
+
+  while (totalYielded < batchSize) {
+    const accessToken = await tokenProvider();
+    const url = `${FIRESTORE_BASE}/projects/${encodeURIComponent(gcpProjectId)}/databases/(default)/documents:runQuery`;
+
+    const structuredQuery = {
+      from: [{ collectionId: 'users' }],
+      where: {
+        compositeFilter: {
+          op: 'AND',
+          filters: [
+            {
+              fieldFilter: {
+                field: { fieldPath: 'permissionTier.tier' },
+                op: 'EQUAL',
+                value: { stringValue: 'readonly' },
+              },
+            },
+            {
+              unaryFilter: {
+                field: { fieldPath: 'permissionTier.tierRevokedAt' },
+                op: 'IS_NULL',
+              },
+            },
+          ],
+        },
+      },
+      orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+      limit: fetchChunk,
+    };
+
+    if (startAfter) {
+      structuredQuery.startAt = {
+        values: [{ referenceValue: startAfter }],
+        before: false,
+      };
+    }
+
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ structuredQuery }),
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '<unreadable>');
+      throw new Error(`Firestore runQuery ${resp.status}: ${text}`)
+    }
+
+    const results = await resp.json();
+    if (!Array.isArray(results) || results.length === 0) break
+
+    const docs = results.filter((r) => r.document).map((r) => r.document);
+
+    if (docs.length === 0) break
+
+    const page = [];
+    for (const doc of docs) {
+      const userId = doc.name.split('/').pop();
+      const permissionTier = extractPermissionTier(doc);
+      if (!permissionTier) {
+        coreExports.error(
+          `[brand-contacts-backfill] user=${userId} missing permissionTier field group — migration gap`,
+        );
+        throw new Error(
+          `User ${userId} lacks permissionTier field group; Story 1.5 migration must land first`,
+        )
+      }
+      page.push({ userId, permissionTier });
+    }
+
+    yield page;
+
+    totalYielded += page.length;
+    const lastDoc = docs[docs.length - 1];
+    startAfter = lastDoc.name;
+
+    if (docs.length < fetchChunk) break
+  }
+}
+
+/**
+ * Extract permissionTier fields from a Firestore document.
+ * @param {object} doc
+ * @returns {{ tier: string, tierRevokedAt: string|null, backfillCircuitBrokenAt: string|null } | null}
+ */
+function extractPermissionTier(doc) {
+  const fields = doc?.fields?.permissionTier?.mapValue?.fields;
+  if (!fields) return null
+
+  const tier = fields.tier?.stringValue;
+  if (!tier) return null
+
+  const tierRevokedAt = fields.tierRevokedAt?.stringValue ?? null;
+  const backfillCircuitBrokenAt = fields.backfillCircuitBrokenAt?.stringValue ?? null;
+
+  return { tier, tierRevokedAt, backfillCircuitBrokenAt }
+}
+
+/**
+ * Check whether the legacy plaintext OAuth token document exists at
+ * users-sensitive-data/{userId}/oauth-token/youtube.
+ * Treats 404 as absent (not an error). Read-only.
+ *
+ * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, userId: string }} opts
+ * @returns {Promise<{ present: boolean }>}
+ */
+async function checkLegacyTokenPresence({ tokenProvider, gcpProjectId, userId }) {
+  const accessToken = await tokenProvider();
+  const path = `projects/${encodeURIComponent(gcpProjectId)}/databases/(default)/documents/users-sensitive-data/${encodeURIComponent(userId)}/oauth-token/youtube`;
+  const url = `${FIRESTORE_BASE}/${path}`;
+
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (resp.status === 404) {
+    await resp.body?.cancel().catch(() => {});
+    return { present: false }
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '<unreadable>');
+    throw new Error(`Firestore token check ${resp.status} for userId=${userId}: ${text}`)
+  }
+
+  await resp.body?.cancel().catch(() => {});
+  return { present: true }
+}
+
+/**
+ * POST helper for Brand Contacts backfill → backend /sync/ingestion-trigger.
+ * Mirrors postFallbackReattempt (run-fallback-reattempt-pipeline.js) shape but with
+ * the backfill body: { userId, syncStrategy, origin, attributionTag, dryRun }.
+ * Does NOT send lookbackDaysOverride — backend defaults to 60 days via INITIAL_LOOKBACK_DATE_RANGE_DAYS.
+ */
+
+function normalizeBaseUrl(url) {
+  return String(url ?? '').replace(/\/+$/, '')
+}
+
+/**
+ * @param {{ backendBaseUrl: string, sharedSecret: string, userId: string, attributionTag: string, dryRun: boolean, extraHeaders?: Record<string, string> }} opts
+ * @returns {Promise<{ ok: boolean, status: number, alreadyInProgress: boolean, text?: string }>}
+ */
+async function postBackfillIngestionTrigger({
+  backendBaseUrl,
+  sharedSecret,
+  userId,
+  attributionTag,
+  dryRun,
+  extraHeaders = {},
+}) {
+  const url = `${normalizeBaseUrl(backendBaseUrl)}/v1/dealsync-v2/sync/ingestion-trigger`;
+  const body = {
+    userId,
+    syncStrategy: 'LOOKBACK',
+    origin: 'backfill',
+    attributionTag,
+    dryRun,
+  };
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-shared-secret': sharedSecret,
+      ...extraHeaders,
+    },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (resp.status === 409) {
+    await resp.body?.cancel().catch(() => {});
+    return { ok: true, status: 409, alreadyInProgress: true }
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '<unreadable>');
+    return { ok: false, status: resp.status, alreadyInProgress: false, text }
+  }
+
+  await resp.body?.cancel().catch(() => {});
+  return { ok: true, status: resp.status, alreadyInProgress: false }
+}
+
+/**
+ * Brand Contacts backfill command — paginates Firestore for tier-eligible users,
+ * checks legacy OAuth token presence, dispatches to backend /sync/ingestion-trigger.
+ * @see _bmad-output/implementation-artifacts/2-4-implement-dealsync-action-backfill-workflow.md
+ */
+
+
+/**
+ * @returns {Promise<object>} summary with dispatch tallies
+ */
+async function runBrandContactsBackfill() {
+  const correlationId = randomUUID();
+  const startMs = Date.now();
+
+  const backendBaseUrl = coreExports.getInput('dealsync-backend-base-url');
+  const sharedSecret = coreExports.getInput('dealsync-v2-shared-secret');
+  const saJsonRaw = resolveFirestoreServiceAccountJson();
+  if (saJsonRaw) coreExports.setSecret(saJsonRaw);
+
+  const gcpProjectIdInput = normalizeOptionalProjectId(coreExports.getInput('gcp-project-id'));
+
+  const batchSize = parsePositiveIntegerInput(
+    coreExports.getInput('backfill-batch-size') || '75',
+    'backfill-batch-size',
+  );
+  const concurrency = parsePositiveIntegerInput(
+    coreExports.getInput('backfill-concurrency') || '5',
+    'backfill-concurrency',
+  );
+  const attributionTag = coreExports.getInput('backfill-attribution-tag') || 'brand-contacts-backfill';
+  const dryRun = coreExports.getInput('backfill-dry-run') === 'true';
+
+  if (!backendBaseUrl || !sharedSecret || !saJsonRaw) {
+    throw new Error(
+      'dealsync-backend-base-url, dealsync-v2-shared-secret, and Firestore service account JSON are required',
+    )
+  }
+
+  let credentials;
+  try {
+    credentials = JSON.parse(saJsonRaw);
+  } catch {
+    throw new Error('Firestore service account JSON must be valid JSON')
+  }
+
+  const gcpProjectId =
+    gcpProjectIdInput ||
+    (typeof credentials.project_id === 'string'
+      ? normalizeOptionalProjectId(credentials.project_id)
+      : '');
+  if (!gcpProjectId) {
+    throw new Error('gcp-project-id input or Firestore service account JSON project_id is required')
+  }
+
+  const tokenProvider = makeGoogleDatastoreTokenProvider(credentials);
+
+  let usersConsidered = 0;
+  let usersEligible = 0;
+  let usersSkippedRevoked = 0;
+  let usersSkippedNoToken = 0;
+  let usersSkippedAlreadyInFlight = 0;
+  let dispatched = 0;
+  let dispatchSkippedAlreadyInProgress = 0;
+  let dispatchFailed = 0;
+
+  console.log(
+    `[brand-contacts-backfill] cid=${correlationId} starting batchSize=${batchSize} concurrency=${concurrency} dryRun=${dryRun}`,
+  );
+
+  const candidates = [];
+
+  for await (const page of paginateTierEligibleUsers({
+    tokenProvider,
+    gcpProjectId,
+    batchSize,
+  })) {
+    for (const { userId, permissionTier } of page) {
+      usersConsidered++;
+
+      if (permissionTier.tier !== 'readonly') {
+        continue
+      }
+
+      if (permissionTier.tierRevokedAt != null) {
+        usersSkippedRevoked++;
+        coreExports.info(`[brand-contacts-backfill] cid=${correlationId} skip revoked userId=${userId}`);
+        continue
+      }
+
+      if (permissionTier.backfillCircuitBrokenAt != null) {
+        usersSkippedAlreadyInFlight++;
+        coreExports.info(
+          `[brand-contacts-backfill] cid=${correlationId} skip circuit-broken userId=${userId}`,
+        );
+        continue
+      }
+
+      usersEligible++;
+      candidates.push(userId);
+
+      if (candidates.length >= batchSize) break
+    }
+    if (candidates.length >= batchSize) break
+  }
+
+  console.log(
+    `[brand-contacts-backfill] cid=${correlationId} considered=${usersConsidered} eligible=${usersEligible} candidates=${candidates.length}`,
+  );
+
+  let candidateIdx = 0;
+
+  const claimFn = async () => {
+    if (candidateIdx >= candidates.length) return null
+    const userId = candidates[candidateIdx++];
+    return { batch_id: userId, userId }
+  };
+
+  const workerFn = async (batch) => {
+    const { userId } = batch;
+
+    let tokenPresent;
+    try {
+      const result = await checkLegacyTokenPresence({ tokenProvider, gcpProjectId, userId });
+      tokenPresent = result.present;
+    } catch (err) {
+      coreExports.error(
+        `[brand-contacts-backfill] cid=${correlationId} token check failed userId=${userId}: ${err.message}`,
+      );
+      dispatchFailed++;
+      return
+    }
+
+    if (!tokenPresent) {
+      usersSkippedNoToken++;
+      coreExports.warning(`[brand-contacts-backfill] cid=${correlationId} skip no-token userId=${userId}`);
+      return
+    }
+
+    try {
+      const res = await postBackfillIngestionTrigger({
+        backendBaseUrl,
+        sharedSecret,
+        userId,
+        attributionTag,
+        dryRun,
+        extraHeaders: { 'x-correlation-id': correlationId },
+      });
+
+      if (res.alreadyInProgress) {
+        dispatchSkippedAlreadyInProgress++;
+        console.log(
+          `[brand-contacts-backfill] cid=${correlationId} already in progress userId=${userId}`,
+        );
+        return
+      }
+
+      if (!res.ok) {
+        dispatchFailed++;
+        coreExports.error(
+          `[brand-contacts-backfill] cid=${correlationId} POST failed userId=${userId} status=${res.status} body=${(res.text || '').slice(0, 500)}`,
+        );
+        return
+      }
+
+      dispatched++;
+      console.log(`[brand-contacts-backfill] cid=${correlationId} dispatched userId=${userId}`);
+    } catch (err) {
+      dispatchFailed++;
+      coreExports.error(
+        `[brand-contacts-backfill] cid=${correlationId} dispatch error userId=${userId}: ${err.message}`,
+      );
+    }
+  };
+
+  if (candidates.length > 0) {
+    await runPool(claimFn, workerFn, {
+      maxConcurrent: concurrency});
+  }
+
+  const durationMs = Date.now() - startMs;
+  const summary = {
+    correlationId,
+    usersConsidered,
+    usersEligible,
+    usersSkippedRevoked,
+    usersSkippedNoToken,
+    usersSkippedAlreadyInFlight,
+    dispatched,
+    dispatchSkippedAlreadyInProgress,
+    dispatchFailed,
+    durationMs,
+    attributionTag,
+  };
+
+  console.log(JSON.stringify({ event: 'backfill_run_complete', ...summary }));
+
+  return summary
+}
+
+/**
+ * Inline concurrency pool — mirrors runPool from pipeline.js but simplified for
+ * the backfill use case where each "batch" is a single userId and retries are
+ * handled at the dispatch level (token check + POST), not the pool level.
+ *
+ * @param {() => Promise<object|null>} claimFn
+ * @param {(batch: object) => Promise<void>} workerFn
+ * @param {{ maxConcurrent: number, maxRetries: number }} opts
+ */
+async function runPool(claimFn, workerFn, { maxConcurrent }) {
+  const active = new Set();
+
+  while (true) {
+    if (active.size < maxConcurrent) {
+      const batch = await claimFn();
+      if (batch === null) {
+        if (active.size === 0) break
+        await Promise.race(active);
+        continue
+      }
+      const worker = (async () => {
+        await workerFn(batch);
+      })();
+      active.add(worker);
+      worker.finally(() => active.delete(worker));
+    } else {
+      await Promise.race(active);
+    }
+  }
+}
+
 const COMMANDS = {
   'sync-deal-states': runSyncDealStates,
   eval: runEval,
   'eval-compare': runEvalCompare,
+  'run-brand-contacts-backfill': runBrandContactsBackfill,
   'run-filter-pipeline': runFilterPipeline,
   'run-classify-pipeline': runClassifyPipeline,
   'run-recovery-pipeline': runRecoveryPipeline,
