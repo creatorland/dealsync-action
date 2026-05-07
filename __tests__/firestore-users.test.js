@@ -133,7 +133,47 @@ describe('paginateTierEligibleUsers', () => {
     await expect(gen.next()).rejects.toThrow(/Firestore runQuery 500/)
   })
 
-  it('respects batchSize cap across pages', async () => {
+  it('caller can break early after collecting batchSize candidates — only one fetch happens', async () => {
+    // batchSize=3 → fetchChunk = max(3*4, 200) = 200. Mock returns a full 200-doc chunk
+    // every call so the natural-end break (docs.length < fetchChunk) does NOT fire —
+    // only the caller's break should stop pagination.
+    const FETCH_CHUNK = 200
+    let callCount = 0
+    global.fetch = jest.fn().mockImplementation(async () => {
+      callCount++
+      return {
+        ok: true,
+        status: 200,
+        json: async () =>
+          Array.from({ length: FETCH_CHUNK }, (_, i) =>
+            makeDoc(`user-${callCount}-${i}`, { tier: 'readonly', tierRevokedAt: null }),
+          ),
+      }
+    })
+
+    const collected = []
+    for await (const page of paginateTierEligibleUsers({
+      tokenProvider: async () => 'tok',
+      gcpProjectId: 'test-project',
+      batchSize: 3,
+    })) {
+      for (const c of page) {
+        collected.push(c)
+        if (collected.length >= 3) break
+      }
+      if (collected.length >= 3) break
+    }
+
+    expect(collected.length).toBe(3)
+    // One fetch only — the caller's break propagates to the generator's iterator return.
+    expect(callCount).toBe(1)
+  })
+
+  it('paginates beyond a single page when caller keeps consuming (no premature page cap)', async () => {
+    // batchSize=75 → fetchChunk = max(75*4, 200) = 300. Page 1 returns a full chunk
+    // (300 docs) so the natural-end break does NOT fire after page 1; the prior cap-on-
+    // raw-page-size would have stopped here. Page 2 returns a short page (1 doc) → break.
+    const FETCH_CHUNK = 300
     let callCount = 0
     global.fetch = jest.fn().mockImplementation(async () => {
       callCount++
@@ -142,9 +182,16 @@ describe('paginateTierEligibleUsers', () => {
           ok: true,
           status: 200,
           json: async () =>
-            Array.from({ length: 200 }, (_, i) =>
-              makeDoc(`user-${i}`, { tier: 'readonly', tierRevokedAt: null }),
+            Array.from({ length: FETCH_CHUNK }, (_, i) =>
+              makeDoc(`page1-user-${i}`, { tier: 'readonly', tierRevokedAt: null }),
             ),
+        }
+      }
+      if (callCount === 2) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [makeDoc('page2-user-0', { tier: 'readonly', tierRevokedAt: null })],
         }
       }
       return { ok: true, status: 200, json: async () => [] }
@@ -154,12 +201,14 @@ describe('paginateTierEligibleUsers', () => {
     for await (const page of paginateTierEligibleUsers({
       tokenProvider: async () => 'tok',
       gcpProjectId: 'test-project',
-      batchSize: 3,
+      batchSize: 75,
     })) {
       all.push(...page)
     }
 
-    expect(all.length).toBeLessThanOrEqual(200)
+    expect(callCount).toBe(2)
+    expect(all.length).toBe(FETCH_CHUNK + 1)
+    expect(all.at(-1).userId).toBe('page2-user-0')
   })
 })
 

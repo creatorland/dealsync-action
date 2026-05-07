@@ -11,7 +11,13 @@ const FIRESTORE_BASE = 'https://firestore.googleapis.com/v1'
  * Async generator yielding pages of tier-eligible users from Firestore REST runQuery.
  * Filter: permissionTier.tier == 'readonly' AND permissionTier.tierRevokedAt == null.
  * Orders by __name__ for stable cursor pagination.
- * Fetches in chunks of max(batchSize * 4, 200) and applies in-memory filter for backfillCircuitBrokenAt.
+ *
+ * Pages are fetched in chunks of `max(batchSize * 4, 200)` raw documents; the caller
+ * applies the in-memory `backfillCircuitBrokenAt` filter and is responsible for
+ * `break`ing once it has accumulated enough eligible candidates. The generator paginates
+ * until Firestore returns a short page (natural end). This avoids the prior cap on raw
+ * page size that could starve the caller of eligible candidates when revoked /
+ * circuit-broken users dominate a single page.
  *
  * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, batchSize: number }} opts
  * @yields {{ userId: string, permissionTier: object }[]}
@@ -19,9 +25,8 @@ const FIRESTORE_BASE = 'https://firestore.googleapis.com/v1'
 export async function* paginateTierEligibleUsers({ tokenProvider, gcpProjectId, batchSize }) {
   const fetchChunk = Math.max(batchSize * 4, 200)
   let startAfter = null
-  let totalYielded = 0
 
-  while (totalYielded < batchSize) {
+  while (true) {
     const accessToken = await tokenProvider()
     const url = `${FIRESTORE_BASE}/projects/${encodeURIComponent(gcpProjectId)}/databases/(default)/documents:runQuery`
 
@@ -97,7 +102,6 @@ export async function* paginateTierEligibleUsers({ tokenProvider, gcpProjectId, 
 
     yield page
 
-    totalYielded += page.length
     const lastDoc = docs[docs.length - 1]
     startAfter = lastDoc.name
 
