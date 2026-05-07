@@ -53,6 +53,10 @@ export async function* paginateTierEligibleUsers({ tokenProvider, gcpProjectId, 
         },
       },
       orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
+      // Project only the field we actually read so Firestore stops shipping the
+      // entire user document (email, settings, OAuth metadata, etc.) over the wire
+      // to the runner. Document name (__name__) is always returned regardless.
+      select: { fields: [{ fieldPath: 'permissionTier' }] },
       limit: fetchChunk,
     }
 
@@ -132,15 +136,21 @@ function extractPermissionTier(doc) {
  * users-sensitive-data/{userId}/oauth-token/youtube.
  * Treats 404 as absent (not an error). Read-only.
  *
+ * Uses `mask.fieldPaths=__name__` so Firestore returns only the document name —
+ * NEVER the plaintext OAuth token contents (`refreshToken`, `scope`). BC11.1's
+ * legacy plaintext path must stay server-side; the W3 caller only needs to know
+ * the document exists so `core-email-metadata-ingestion` can fetch it itself.
+ *
  * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, userId: string }} opts
  * @returns {Promise<{ present: boolean }>}
  */
 export async function checkLegacyTokenPresence({ tokenProvider, gcpProjectId, userId }) {
   const accessToken = await tokenProvider()
   const path = `projects/${encodeURIComponent(gcpProjectId)}/databases/(default)/documents/users-sensitive-data/${encodeURIComponent(userId)}/oauth-token/youtube`
-  const url = `${FIRESTORE_BASE}/${path}`
+  const url = new URL(`${FIRESTORE_BASE}/${path}`)
+  url.searchParams.set('mask.fieldPaths', '__name__')
 
-  const resp = await fetch(url, {
+  const resp = await fetch(url.toString(), {
     method: 'GET',
     headers: { Authorization: `Bearer ${accessToken}` },
     signal: AbortSignal.timeout(30_000),

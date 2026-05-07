@@ -73,6 +73,14 @@ describe('paginateTierEligibleUsers', () => {
     expect(pages[0]).toHaveLength(2)
     expect(pages[0][0].userId).toBe('user-a')
     expect(pages[0][1].userId).toBe('user-b')
+
+    // Pin the field projection — runQuery must only fetch permissionTier so Firestore
+    // doesn't ship the whole user document (email, settings, etc.) to the runner.
+    const [, init] = global.fetch.mock.calls[0]
+    const reqBody = JSON.parse(init.body)
+    expect(reqBody.structuredQuery.select).toEqual({
+      fields: [{ fieldPath: 'permissionTier' }],
+    })
   })
 
   it('returns empty for empty collection', async () => {
@@ -238,6 +246,9 @@ describe('checkLegacyTokenPresence', () => {
     expect(result).toEqual({ present: true })
     const [url] = global.fetch.mock.calls[0]
     expect(url).toContain('users-sensitive-data/user-1/oauth-token/youtube')
+    // Security guarantee — must NOT fetch full doc body. Pin the field-mask query
+    // param so a future refactor can't silently start pulling plaintext OAuth fields.
+    expect(url).toContain('mask.fieldPaths=__name__')
   })
 
   it('returns present:false on 404', async () => {
