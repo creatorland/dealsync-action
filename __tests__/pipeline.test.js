@@ -235,18 +235,15 @@ describe('runPool', () => {
 
     expect(results).toEqual({ processed: 3, failed: 0 })
     expect(workerFn).toHaveBeenCalledTimes(3)
-    expect(workerFn).toHaveBeenCalledWith(
-      expect.objectContaining({ batch_id: 'sub-1' }),
-      { attempt: 0 },
-    )
-    expect(workerFn).toHaveBeenCalledWith(
-      expect.objectContaining({ batch_id: 'sub-2' }),
-      { attempt: 0 },
-    )
-    expect(workerFn).toHaveBeenCalledWith(
-      expect.objectContaining({ batch_id: 'sub-3' }),
-      { attempt: 0 },
-    )
+    expect(workerFn).toHaveBeenCalledWith(expect.objectContaining({ batch_id: 'sub-1' }), {
+      attempt: 0,
+    })
+    expect(workerFn).toHaveBeenCalledWith(expect.objectContaining({ batch_id: 'sub-2' }), {
+      attempt: 0,
+    })
+    expect(workerFn).toHaveBeenCalledWith(expect.objectContaining({ batch_id: 'sub-3' }), {
+      attempt: 0,
+    })
   })
 
   it('handles mix of array and single batch returns from claimFn', async () => {

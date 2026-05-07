@@ -10,9 +10,8 @@ jest.unstable_mockModule('@actions/core', () => ({
   error: jest.fn(),
 }))
 
-const { resolveFirestoreServiceAccountJson } = await import(
-  '../src/commands/emit-scan-complete-webhooks.js'
-)
+const { resolveFirestoreServiceAccountJson } =
+  await import('../src/commands/emit-scan-complete-webhooks.js')
 
 describe('resolveFirestoreServiceAccountJson', () => {
   const saved = process.env.FIRESTORE_SERVICE_ACCOUNT_JSON

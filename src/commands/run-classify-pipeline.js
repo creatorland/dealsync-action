@@ -37,7 +37,12 @@ export async function runClassifyPipeline() {
   const primaryModel = core.getInput('ai-primary-model') || ''
   const fallbackModel = core.getInput('ai-fallback-model') || ''
   const aiApiUrl = core.getInput('ai-api-url') || ''
-  const maxConcurrent = parseInt(core.getInput('pipeline-classify-max-concurrent') || core.getInput('pipeline-max-concurrent') || '70', 10)
+  const maxConcurrent = parseInt(
+    core.getInput('pipeline-classify-max-concurrent') ||
+      core.getInput('pipeline-max-concurrent') ||
+      '70',
+    10,
+  )
   const classifyBatchSize = parseInt(core.getInput('pipeline-classify-batch-size') || '5', 10)
   const claimSize = parseInt(core.getInput('pipeline-claim-size') || '5', 10)
   const maxRetries = parseInt(core.getInput('pipeline-max-retries') || '6', 10)
@@ -134,7 +139,9 @@ export async function runClassifyPipeline() {
       const rows = await exec(dealStatesSql.selectEmailsWithEvalAndCreator(schema, megaBatchId))
 
       const count = rows ? rows.length : 0
-      console.log(`[run-classify-pipeline] mega-claimed ${count} pending rows in ${Date.now() - claimStart}ms`)
+      console.log(
+        `[run-classify-pipeline] mega-claimed ${count} pending rows in ${Date.now() - claimStart}ms`,
+      )
 
       if (count > 0) {
         return await megaSplit(megaBatchId, rows, 0)
@@ -148,7 +155,9 @@ export async function runClassifyPipeline() {
       const rows = await exec(dealStatesSql.selectEmailsWithEvalAndCreator(schema, batchId))
 
       const count = rows ? rows.length : 0
-      console.log(`[run-classify-pipeline] claimed ${count} pending rows in ${Date.now() - claimStart}ms`)
+      console.log(
+        `[run-classify-pipeline] claimed ${count} pending rows in ${Date.now() - claimStart}ms`,
+      )
 
       if (count > 0) {
         await insertBatchEvent(exec, schema, {
@@ -185,7 +194,9 @@ export async function runClassifyPipeline() {
     // Check if this is a stuck mega-batch
     if (stuckBatchId.startsWith('mega:')) {
       // SELECT all rows for the mega batch
-      const stuckRows = await exec(dealStatesSql.selectEmailsWithEvalAndCreator(schema, stuckBatchId))
+      const stuckRows = await exec(
+        dealStatesSql.selectEmailsWithEvalAndCreator(schema, stuckBatchId),
+      )
 
       // UPDATE UPDATED_AT to prevent other instances from grabbing it
       await exec(dealStatesSql.refreshBatchTimestamp(schema, stuckBatchId))
@@ -418,7 +429,10 @@ export async function runClassifyPipeline() {
 
       // b. Build prompt via buildPrompt(emails)
       t0 = Date.now()
-      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails, { creatorEmail, model: primaryModel })
+      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails, {
+        creatorEmail,
+        model: primaryModel,
+      })
 
       // c. 4-layer AI resilience pipeline
       const aiOpts = { apiUrl: aiApiUrl, apiKey: hyperbolicKey }
@@ -438,10 +452,14 @@ export async function runClassifyPipeline() {
         })
         primaryRaw = result.content
         timings.primaryModel = Date.now() - aiStart
-        console.log(`[run-classify-pipeline] batch ${batchId}: primary model responded in ${timings.primaryModel}ms`)
+        console.log(
+          `[run-classify-pipeline] batch ${batchId}: primary model responded in ${timings.primaryModel}ms`,
+        )
       } catch (primaryApiError) {
         timings.primaryModel = Date.now() - aiStart
-        console.log(`[run-classify-pipeline] Primary model API failed after ${timings.primaryModel}ms: ${primaryApiError.message}`)
+        console.log(
+          `[run-classify-pipeline] Primary model API failed after ${timings.primaryModel}ms: ${primaryApiError.message}`,
+        )
         primaryRaw = null
       }
 
@@ -497,7 +515,9 @@ export async function runClassifyPipeline() {
           const fallbackRaw = fallbackResult.content
           threads = parseAndValidate(fallbackRaw, threadOrder)
           timings.fallbackModel = Date.now() - fallbackStart
-          console.log(`[run-classify-pipeline] Fallback model succeeded in ${timings.fallbackModel}ms: ${threads.length} threads`)
+          console.log(
+            `[run-classify-pipeline] Fallback model succeeded in ${timings.fallbackModel}ms: ${threads.length} threads`,
+          )
         } catch (fallbackError) {
           console.error(
             `[run-classify-pipeline] All layers exhausted. Primary and fallback both failed.`,
@@ -530,7 +550,9 @@ export async function runClassifyPipeline() {
           }),
         )
         timings.auditSave = Date.now() - t0
-        console.log(`[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`)
+        console.log(
+          `[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`,
+        )
       } catch (err) {
         if (
           err.message.includes('integrity constraint') ||

@@ -92,9 +92,7 @@ export async function runRecoveryPipeline() {
         format: 'metadata',
       })
     } catch (err) {
-      console.log(
-        `[run-recovery-pipeline] fetch failed for user ${userId}: ${err.message}`,
-      )
+      console.log(`[run-recovery-pipeline] fetch failed for user ${userId}: ${err.message}`)
       // All unfetchable on total failure
       emails = []
     }
@@ -140,7 +138,9 @@ export async function runRecoveryPipeline() {
     maxConcurrent,
     maxRetries,
     onDeadLetter: async (batch) => {
-      console.log(`[run-recovery-pipeline] dead-lettered batch ${batch.batch_id} (${batch.count} rows)`)
+      console.log(
+        `[run-recovery-pipeline] dead-lettered batch ${batch.batch_id} (${batch.count} rows)`,
+      )
     },
   })
 

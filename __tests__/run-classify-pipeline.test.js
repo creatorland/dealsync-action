@@ -2152,12 +2152,54 @@ describe('run-classify-pipeline command', () => {
 
     // 6 rows across 3 threads (2 rows per thread) → 2 sub-batches (2 threads + 1 thread)
     const rows = [
-      { EMAIL_METADATA_ID: 'em-1', MESSAGE_ID: 'msg-1', USER_ID: 'user-1', THREAD_ID: 'thread-A', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
-      { EMAIL_METADATA_ID: 'em-2', MESSAGE_ID: 'msg-2', USER_ID: 'user-1', THREAD_ID: 'thread-A', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
-      { EMAIL_METADATA_ID: 'em-3', MESSAGE_ID: 'msg-3', USER_ID: 'user-1', THREAD_ID: 'thread-B', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
-      { EMAIL_METADATA_ID: 'em-4', MESSAGE_ID: 'msg-4', USER_ID: 'user-1', THREAD_ID: 'thread-B', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
-      { EMAIL_METADATA_ID: 'em-5', MESSAGE_ID: 'msg-5', USER_ID: 'user-1', THREAD_ID: 'thread-C', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
-      { EMAIL_METADATA_ID: 'em-6', MESSAGE_ID: 'msg-6', USER_ID: 'user-1', THREAD_ID: 'thread-C', CREATOR_EMAIL: 'c@t.com', SYNC_STATE_ID: 'ss-1' },
+      {
+        EMAIL_METADATA_ID: 'em-1',
+        MESSAGE_ID: 'msg-1',
+        USER_ID: 'user-1',
+        THREAD_ID: 'thread-A',
+        CREATOR_EMAIL: 'c@t.com',
+        SYNC_STATE_ID: 'ss-1',
+      },
+      {
+        EMAIL_METADATA_ID: 'em-2',
+        MESSAGE_ID: 'msg-2',
+        USER_ID: 'user-1',
+        THREAD_ID: 'thread-A',
+        CREATOR_EMAIL: 'c@t.com',
+        SYNC_STATE_ID: 'ss-1',
+      },
+      {
+        EMAIL_METADATA_ID: 'em-3',
+        MESSAGE_ID: 'msg-3',
+        USER_ID: 'user-1',
+        THREAD_ID: 'thread-B',
+        CREATOR_EMAIL: 'c@t.com',
+        SYNC_STATE_ID: 'ss-1',
+      },
+      {
+        EMAIL_METADATA_ID: 'em-4',
+        MESSAGE_ID: 'msg-4',
+        USER_ID: 'user-1',
+        THREAD_ID: 'thread-B',
+        CREATOR_EMAIL: 'c@t.com',
+        SYNC_STATE_ID: 'ss-1',
+      },
+      {
+        EMAIL_METADATA_ID: 'em-5',
+        MESSAGE_ID: 'msg-5',
+        USER_ID: 'user-1',
+        THREAD_ID: 'thread-C',
+        CREATOR_EMAIL: 'c@t.com',
+        SYNC_STATE_ID: 'ss-1',
+      },
+      {
+        EMAIL_METADATA_ID: 'em-6',
+        MESSAGE_ID: 'msg-6',
+        USER_ID: 'user-1',
+        THREAD_ID: 'thread-C',
+        CREATOR_EMAIL: 'c@t.com',
+        SYNC_STATE_ID: 'ss-1',
+      },
     ]
 
     mockRunPool.mockImplementation(async (claimFn) => {

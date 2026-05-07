@@ -26,7 +26,12 @@ export async function runFilterPipeline() {
   const contentFetcherUrl = core.getInput('email-content-fetcher-url')
   const emailProvider = core.getInput('email-provider') || ''
   const emailServiceUrl = core.getInput('email-service-url')
-  const maxConcurrent = parseInt(core.getInput('pipeline-filter-max-concurrent') || core.getInput('pipeline-max-concurrent') || '30', 10)
+  const maxConcurrent = parseInt(
+    core.getInput('pipeline-filter-max-concurrent') ||
+      core.getInput('pipeline-max-concurrent') ||
+      '30',
+    10,
+  )
   const batchSize = parseInt(core.getInput('pipeline-filter-batch-size') || '200', 10)
   const maxRetries = parseInt(core.getInput('pipeline-max-retries') || '6', 10)
   const fetchChunkSize = parseInt(core.getInput('pipeline-fetch-chunk-size') || '10', 10)
@@ -114,13 +119,17 @@ export async function runFilterPipeline() {
       batchCount++
       totalClaimed += count
       const elapsed = ((Date.now() - runStart) / 1000).toFixed(1)
-      console.log(`[run-filter-pipeline] mega-claimed ${count} rows in ${claimMs}ms (claim #${batchCount}, total claimed: ${totalClaimed}, elapsed: ${elapsed}s)`)
+      console.log(
+        `[run-filter-pipeline] mega-claimed ${count} rows in ${claimMs}ms (claim #${batchCount}, total claimed: ${totalClaimed}, elapsed: ${elapsed}s)`,
+      )
 
       if (count > 0) {
         const splitStart = Date.now()
         const subBatches = await megaSplit(megaBatchId, rows, 0)
         const splitMs = Date.now() - splitStart
-        console.log(`[run-filter-pipeline] mega-claim #${batchCount}: ${count} rows → ${subBatches.length} sub-batches of ${batchSize} (splitMs=${splitMs})`)
+        console.log(
+          `[run-filter-pipeline] mega-claim #${batchCount}: ${count} rows → ${subBatches.length} sub-batches of ${batchSize} (splitMs=${splitMs})`,
+        )
         return subBatches
       }
     } else {
@@ -136,7 +145,9 @@ export async function runFilterPipeline() {
       batchCount++
       totalClaimed += count
       const elapsed = ((Date.now() - runStart) / 1000).toFixed(1)
-      console.log(`[run-filter-pipeline] claimed ${count} rows in ${claimMs}ms (claim #${batchCount}, total claimed: ${totalClaimed}, elapsed: ${elapsed}s)`)
+      console.log(
+        `[run-filter-pipeline] claimed ${count} rows in ${claimMs}ms (claim #${batchCount}, total claimed: ${totalClaimed}, elapsed: ${elapsed}s)`,
+      )
 
       if (count > 0) {
         await insertBatchEvent(exec, schema, {
@@ -209,7 +220,9 @@ export async function runFilterPipeline() {
     const batchStart = Date.now()
 
     const elapsed = ((Date.now() - runStart) / 1000).toFixed(1)
-    console.log(`[run-filter-pipeline] processing batch ${batch_id} (${rows.length} rows, elapsed: ${elapsed}s)`)
+    console.log(
+      `[run-filter-pipeline] processing batch ${batch_id} (${rows.length} rows, elapsed: ${elapsed}s)`,
+    )
 
     // Acquire rate limit tokens in bulk (2 UPDATEs + 1 batch event)
     let t0 = Date.now()
