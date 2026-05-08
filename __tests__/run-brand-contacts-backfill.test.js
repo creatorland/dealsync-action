@@ -136,7 +136,7 @@ describe('runBrandContactsBackfill orchestration', () => {
         return { ok: true, status: 200, json: async () => responses }
       }
 
-      if (u.includes('/v1/dealsync-v2/sync/ingestion-trigger') && method === 'POST') {
+      if (u.includes('/api/v1/ingestion/trigger') && method === 'POST') {
         const body = JSON.parse(init.body)
         dispatchedUsers.push(body.userId)
         return {
@@ -290,7 +290,7 @@ describe('runBrandContactsBackfill orchestration', () => {
         }))
         return { ok: true, status: 200, json: async () => responses }
       }
-      if (u.includes('/v1/dealsync-v2/sync/ingestion-trigger') && method === 'POST') {
+      if (u.includes('/api/v1/ingestion/trigger') && method === 'POST') {
         return {
           ok: false,
           status: 409,
@@ -339,7 +339,7 @@ describe('runBrandContactsBackfill orchestration', () => {
         }))
         return { ok: true, status: 200, json: async () => responses }
       }
-      if (u.includes('/v1/dealsync-v2/sync/ingestion-trigger') && method === 'POST') {
+      if (u.includes('/api/v1/ingestion/trigger') && method === 'POST') {
         const body = JSON.parse(init.body)
         if (body.userId === 'user-fail') {
           return {
@@ -446,7 +446,7 @@ describe('runBrandContactsBackfill orchestration', () => {
         }))
         return { ok: true, status: 200, json: async () => responses }
       }
-      if (u.includes('/v1/dealsync-v2/sync/ingestion-trigger') && method === 'POST') {
+      if (u.includes('/api/v1/ingestion/trigger') && method === 'POST') {
         return { ok: false, status: 500, text: jest.fn().mockResolvedValue('internal error') }
       }
       if (u.includes(':commit') && method === 'POST') {
@@ -526,7 +526,7 @@ describe('runBrandContactsBackfill orchestration', () => {
         }))
         return { ok: true, status: 200, json: async () => responses }
       }
-      if (u.includes('/v1/dealsync-v2/sync/ingestion-trigger') && method === 'POST') {
+      if (u.includes('/api/v1/ingestion/trigger') && method === 'POST') {
         capturedBody = JSON.parse(init.body)
         return {
           ok: true,

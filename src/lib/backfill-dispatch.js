@@ -1,5 +1,5 @@
 /**
- * POST helper for Brand Contacts backfill → backend /sync/ingestion-trigger.
+ * POST helper for Brand Contacts backfill → backend /api/v1/ingestion/trigger.
  * Mirrors postFallbackReattempt (run-fallback-reattempt-pipeline.js) shape but with
  * the backfill body: { userId, syncStrategy, origin, attributionTag, dryRun }.
  * Does NOT send lookbackDaysOverride — backend defaults to 60 days via INITIAL_LOOKBACK_DATE_RANGE_DAYS.
@@ -21,7 +21,7 @@ export async function postBackfillIngestionTrigger({
   dryRun,
   extraHeaders = {},
 }) {
-  const url = `${normalizeBaseUrl(backendBaseUrl)}/v1/dealsync-v2/sync/ingestion-trigger`
+  const url = `${normalizeBaseUrl(backendBaseUrl)}/api/v1/ingestion/trigger`
   const body = {
     userId,
     syncStrategy: 'LOOKBACK',

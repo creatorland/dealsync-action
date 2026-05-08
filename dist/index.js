@@ -40688,7 +40688,7 @@ function rowToScanCompleteWebhookBody(row) {
  */
 async function postScanCompleteWebhook(baseUrl, sharedSecret, body, headers = {}) {
   const root = baseUrl.replace(/\/+$/, '');
-  const url = `${root}/dealsync-v2/webhooks`;
+  const url = `${root}/api/v1/dealsync-v2/webhooks`;
   const payload = JSON.stringify(body);
   let last = { ok: false, status: 0, text: '' };
   for (let attempt = 0; attempt < TRANSIENT_MAX_ATTEMPTS; attempt++) {
@@ -40746,7 +40746,7 @@ function resolveFirestoreServiceAccountJson() {
 }
 
 /**
- * Cron: eligible first LOOKBACK completions → Firestore dedupe → POST /dealsync-v2/webhooks (scan_complete).
+ * Cron: eligible first LOOKBACK completions → Firestore dedupe → POST /api/v1/dealsync-v2/webhooks (scan_complete).
  * @see docs/plans/2026-04-16-scan-complete-w3-cron-tech-spec.md
  */
 async function runEmitScanCompleteWebhooks() {
@@ -40912,7 +40912,7 @@ async function postFallbackReattempt(
   payload,
   extraHeaders = {},
 ) {
-  const url = `${normalizeBaseUrl$1(backendBaseUrl)}/v1/dealsync-v2/sync/ingestion-trigger`;
+  const url = `${normalizeBaseUrl$1(backendBaseUrl)}/api/v1/ingestion/trigger`;
   const body = {
     userId: payload.userId,
     syncStrategy: 'LOOKBACK',
@@ -41378,7 +41378,7 @@ async function markBackfillDispatched({ tokenProvider, gcpProjectId, userId }) {
 }
 
 /**
- * POST helper for Brand Contacts backfill → backend /sync/ingestion-trigger.
+ * POST helper for Brand Contacts backfill → backend /api/v1/ingestion/trigger.
  * Mirrors postFallbackReattempt (run-fallback-reattempt-pipeline.js) shape but with
  * the backfill body: { userId, syncStrategy, origin, attributionTag, dryRun }.
  * Does NOT send lookbackDaysOverride — backend defaults to 60 days via INITIAL_LOOKBACK_DATE_RANGE_DAYS.
@@ -41400,7 +41400,7 @@ async function postBackfillIngestionTrigger({
   dryRun,
   extraHeaders = {},
 }) {
-  const url = `${normalizeBaseUrl(backendBaseUrl)}/v1/dealsync-v2/sync/ingestion-trigger`;
+  const url = `${normalizeBaseUrl(backendBaseUrl)}/api/v1/ingestion/trigger`;
   const body = {
     userId,
     syncStrategy: 'LOOKBACK',
@@ -41436,7 +41436,7 @@ async function postBackfillIngestionTrigger({
 
 /**
  * Brand Contacts backfill command — paginates Firestore for tier-eligible users,
- * checks legacy OAuth token presence, dispatches to backend /sync/ingestion-trigger.
+ * checks legacy OAuth token presence, dispatches to backend /api/v1/ingestion/trigger.
  * @see _bmad-output/implementation-artifacts/2-4-implement-dealsync-action-backfill-workflow.md
  */
 
