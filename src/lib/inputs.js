@@ -7,12 +7,24 @@
  * @param {string} inputName
  * @returns {number}
  */
-export function parsePositiveIntegerInput(raw, inputName) {
+/**
+ * @param {string} raw
+ * @param {string} inputName
+ * @param {{ max?: number }} [opts]
+ * @returns {number}
+ */
+export function parsePositiveIntegerInput(raw, inputName, opts = {}) {
   const normalized = String(raw ?? '').trim()
   if (!/^[1-9][0-9]*$/.test(normalized)) {
     throw new Error(`${inputName} must be a positive integer`)
   }
-  return Number(normalized)
+  const value = Number(normalized)
+  if (opts.max != null && value > opts.max) {
+    throw new Error(
+      `${inputName} must be ≤ ${opts.max} (got ${value}); higher values risk OOM / time-out on the GitHub Actions runner`,
+    )
+  }
+  return value
 }
 
 /**

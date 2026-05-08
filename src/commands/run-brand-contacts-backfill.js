@@ -33,13 +33,19 @@ export async function runBrandContactsBackfill() {
 
   const gcpProjectIdInput = normalizeOptionalProjectId(core.getInput('gcp-project-id'))
 
+  // Upper bounds aligned with Firestore :batchGet hard cap (500 docs/request)
+  // and Gmail-quota / NFR-1 sustained-rate budgets respectively. Higher values
+  // risk OOM / job-timeout on the GitHub Actions runner; safer to fail fast at
+  // config parse than to stack-trace mid-run.
   const batchSize = parsePositiveIntegerInput(
     core.getInput('backfill-batch-size') || '75',
     'backfill-batch-size',
+    { max: 500 },
   )
   const concurrency = parsePositiveIntegerInput(
     core.getInput('backfill-concurrency') || '5',
     'backfill-concurrency',
+    { max: 50 },
   )
   const attributionTag = core.getInput('backfill-attribution-tag') || 'brand-contacts-backfill'
   const dryRun = parseStrictBoolean(core.getInput('backfill-dry-run'), 'backfill-dry-run', false)
