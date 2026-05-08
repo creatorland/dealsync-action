@@ -9,15 +9,25 @@ const FIRESTORE_BASE = 'https://firestore.googleapis.com/v1'
 
 /**
  * Async generator yielding pages of tier-eligible users from Firestore REST runQuery.
- * Filter: permissionTier.tier == 'readonly' AND permissionTier.tierRevokedAt == null.
+ * Filter: permissionTier.tier == 'readonly' (single equality — does NOT require a
+ * composite index). The caller applies in-memory filters for `tierRevokedAt`,
+ * `backfillCircuitBrokenAt`, and `backfillDispatchedAt`.
+ *
+ * Why single-equality only on the wire: a composite filter combining
+ * `tier == 'readonly'` AND `tierRevokedAt IS_NULL` requires a Firestore composite
+ * index `(permissionTier.tier, permissionTier.tierRevokedAt, __name__)`, which is
+ * a deploy-time gate (must be provisioned via Firestore Console / Terraform before
+ * the first run, otherwise the API returns FAILED_PRECONDITION). Filtering
+ * `tierRevokedAt` in-memory eliminates the index dependency at the cost of a
+ * larger raw fetch — `revokedRate` of the readonly cohort scales the over-fetch.
+ * For the BC backlog of ~4,116 users with very-low revoke rate this is trivial.
+ *
  * Orders by __name__ for stable cursor pagination.
  *
- * Pages are fetched in chunks of `max(batchSize * 4, 200)` raw documents; the caller
- * applies the in-memory `backfillCircuitBrokenAt` filter and is responsible for
- * `break`ing once it has accumulated enough eligible candidates. The generator paginates
- * until Firestore returns a short page (natural end). This avoids the prior cap on raw
- * page size that could starve the caller of eligible candidates when revoked /
- * circuit-broken users dominate a single page.
+ * Pages are fetched in chunks of `max(batchSize * 4, 200)` raw documents; the
+ * caller is responsible for `break`ing once it has accumulated enough eligible
+ * candidates. The generator paginates until Firestore returns a short page
+ * (natural end).
  *
  * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, batchSize: number }} opts
  * @yields {{ userId: string, permissionTier: object }[]}
@@ -33,23 +43,10 @@ export async function* paginateTierEligibleUsers({ tokenProvider, gcpProjectId, 
     const structuredQuery = {
       from: [{ collectionId: 'users' }],
       where: {
-        compositeFilter: {
-          op: 'AND',
-          filters: [
-            {
-              fieldFilter: {
-                field: { fieldPath: 'permissionTier.tier' },
-                op: 'EQUAL',
-                value: { stringValue: 'readonly' },
-              },
-            },
-            {
-              unaryFilter: {
-                field: { fieldPath: 'permissionTier.tierRevokedAt' },
-                op: 'IS_NULL',
-              },
-            },
-          ],
+        fieldFilter: {
+          field: { fieldPath: 'permissionTier.tier' },
+          op: 'EQUAL',
+          value: { stringValue: 'readonly' },
         },
       },
       orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
