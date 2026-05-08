@@ -85,7 +85,12 @@ export async function runBrandContactsBackfill() {
   let usersSkippedAlreadyDispatched = 0
   let dispatched = 0
   let dispatchSkippedAlreadyInProgress = 0
-  let dispatchFailed = 0
+  // Split failure counters so Story 2.10's canary can distinguish "Firestore is
+  // broken (us)" from "backend is broken (them)" without grepping logs. The
+  // legacy single `dispatchFailed` is preserved as a sum of the two for
+  // backwards-compatible alerting (= dispatchFailedTokenCheck + dispatchFailedBackend).
+  let dispatchFailedTokenCheck = 0
+  let dispatchFailedBackend = 0
 
   // Cap per-user skip logs at first N per cohort to bound action-log size.
   // Without this, a high-skip-rate run (e.g., bulk of remaining users are revoked
@@ -185,7 +190,7 @@ export async function runBrandContactsBackfill() {
       core.error(
         `[brand-contacts-backfill] cid=${correlationId} token check failed userId=${userId}: ${err.message}`,
       )
-      dispatchFailed++
+      dispatchFailedTokenCheck++
       return
     }
 
@@ -214,7 +219,7 @@ export async function runBrandContactsBackfill() {
       }
 
       if (!res.ok) {
-        dispatchFailed++
+        dispatchFailedBackend++
         core.error(
           `[brand-contacts-backfill] cid=${correlationId} POST failed userId=${userId} status=${res.status} body=${(res.text || '').slice(0, 500)}`,
         )
@@ -236,7 +241,10 @@ export async function runBrandContactsBackfill() {
         )
       }
     } catch (err) {
-      dispatchFailed++
+      // Network-level throw on the backend POST (DNS / connection refused / timeout).
+      // Counted under dispatchFailedBackend — symptom is "backend POST didn't
+      // complete," same triage bucket as 4xx/5xx responses.
+      dispatchFailedBackend++
       core.error(
         `[brand-contacts-backfill] cid=${correlationId} dispatch error userId=${userId}: ${err.message}`,
       )
@@ -258,7 +266,11 @@ export async function runBrandContactsBackfill() {
     usersSkippedAlreadyDispatched,
     dispatched,
     dispatchSkippedAlreadyInProgress,
-    dispatchFailed,
+    dispatchFailedTokenCheck,
+    dispatchFailedBackend,
+    // Legacy aggregate counter retained for backwards-compatible alerting on
+    // Story 2.10's canary. New filters should prefer the split fields.
+    dispatchFailed: dispatchFailedTokenCheck + dispatchFailedBackend,
     durationMs,
     attributionTag,
   }

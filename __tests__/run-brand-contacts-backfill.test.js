@@ -367,7 +367,76 @@ describe('runBrandContactsBackfill orchestration', () => {
 
     const summary = await runBrandContactsBackfill()
     expect(summary.dispatchFailed).toBe(1)
+    expect(summary.dispatchFailedBackend).toBe(1)
+    expect(summary.dispatchFailedTokenCheck).toBe(0)
     expect(summary.dispatched).toBe(1)
+  })
+
+  it('Fix #4: token-check failures are tallied separately from backend failures', async () => {
+    // user-firestore-flake: Firestore token-check returns 503 (after exhausted
+    // retries) → dispatchFailedTokenCheck.
+    // user-backend-fail: Firestore says token present, backend POST returns 500 →
+    // dispatchFailedBackend. Aggregate `dispatchFailed` = 2 (preserves
+    // backwards-compat alerting); the split fields surface which dependency
+    // is broken without grepping logs.
+    global.fetch = jest.fn(async (url, init) => {
+      const u = String(url)
+      const method = (init && init.method) || 'GET'
+      if (u.startsWith('https://oauth2.googleapis.com/token')) {
+        return { ok: true, status: 200, json: async () => ({ access_token: 'tok' }) }
+      }
+      if (u.includes(':runQuery')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            makeFirestoreDoc('user-firestore-flake', {
+              tier: 'readonly',
+              tierRevokedAt: null,
+            }),
+            makeFirestoreDoc('user-backend-fail', { tier: 'readonly', tierRevokedAt: null }),
+          ],
+        }
+      }
+      if (u.includes('users-sensitive-data/user-firestore-flake') && method === 'GET') {
+        // 503 across all retry attempts.
+        return {
+          ok: false,
+          status: 503,
+          text: async () => 'service unavailable',
+        }
+      }
+      if (u.includes('users-sensitive-data') && method === 'GET') {
+        return {
+          ok: true,
+          status: 200,
+          body: { cancel: jest.fn().mockResolvedValue(undefined) },
+        }
+      }
+      if (u.includes('/v1/dealsync-v2/sync/ingestion-trigger') && method === 'POST') {
+        return {
+          ok: false,
+          status: 500,
+          text: jest.fn().mockResolvedValue('internal error'),
+        }
+      }
+      if (u.includes(':commit') && method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          body: { cancel: jest.fn().mockResolvedValue(undefined) },
+        }
+      }
+
+      throw new Error(`unexpected fetch: ${method} ${u}`)
+    })
+
+    const summary = await runBrandContactsBackfill()
+    expect(summary.dispatched).toBe(0)
+    expect(summary.dispatchFailedTokenCheck).toBe(1)
+    expect(summary.dispatchFailedBackend).toBe(1)
+    // Legacy aggregate stays accurate for backwards-compat alerts.
+    expect(summary.dispatchFailed).toBe(2)
   })
 
   it('body-shape locked: POST carries exactly userId, syncStrategy, origin, attributionTag, dryRun', async () => {
