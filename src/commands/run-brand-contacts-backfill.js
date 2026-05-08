@@ -12,7 +12,11 @@ import {
   normalizeOptionalProjectId,
 } from './emit-scan-complete-webhooks.js'
 import { makeGoogleDatastoreTokenProvider } from '../lib/scan-complete.js'
-import { paginateTierEligibleUsers, checkLegacyTokenPresence } from '../lib/firestore-users.js'
+import {
+  paginateTierEligibleUsers,
+  checkLegacyTokenPresence,
+  markBackfillDispatched,
+} from '../lib/firestore-users.js'
 import { postBackfillIngestionTrigger } from '../lib/backfill-dispatch.js'
 
 /**
@@ -78,6 +82,7 @@ export async function runBrandContactsBackfill() {
   let usersSkippedRevoked = 0
   let usersSkippedNoToken = 0
   let usersSkippedAlreadyInFlight = 0
+  let usersSkippedAlreadyDispatched = 0
   let dispatched = 0
   let dispatchSkippedAlreadyInProgress = 0
   let dispatchFailed = 0
@@ -90,6 +95,7 @@ export async function runBrandContactsBackfill() {
   const SKIP_LOG_CAP = 5
   let revokedLogged = 0
   let circuitBrokenLogged = 0
+  let alreadyDispatchedLogged = 0
 
   console.log(
     `[brand-contacts-backfill] cid=${correlationId} starting batchSize=${batchSize} concurrency=${concurrency} dryRun=${dryRun}`,
@@ -127,6 +133,23 @@ export async function runBrandContactsBackfill() {
             `[brand-contacts-backfill] cid=${correlationId} skip circuit-broken userId=${userId}`,
           )
           circuitBrokenLogged++
+        }
+        continue
+      }
+
+      // Persistent dispatch marker: skip users already dispatched in a prior cron
+      // firing. Without this, the read-side query keeps re-yielding the same
+      // already-dispatched users every day (the dispatch doesn't mutate `tier`
+      // or `tierRevokedAt` — those are owned by Epic 1's tier-change webhook),
+      // starving NFR-1's 8-week / 4,116-user budget. Marker is written by
+      // `markBackfillDispatched` after a successful 200/201 dispatch.
+      if (permissionTier.backfillDispatchedAt != null) {
+        usersSkippedAlreadyDispatched++
+        if (alreadyDispatchedLogged < SKIP_LOG_CAP) {
+          core.info(
+            `[brand-contacts-backfill] cid=${correlationId} skip already-dispatched userId=${userId}`,
+          )
+          alreadyDispatchedLogged++
         }
         continue
       }
@@ -200,6 +223,18 @@ export async function runBrandContactsBackfill() {
 
       dispatched++
       console.log(`[brand-contacts-backfill] cid=${correlationId} dispatched userId=${userId}`)
+
+      // Persist `permissionTier.backfillDispatchedAt = serverTimestamp` AFTER the
+      // 2xx ack so the same userId doesn't re-enqueue tomorrow. Mark-failure is
+      // recoverable (backend's idempotency catches the re-dispatch tomorrow), so
+      // the failure is logged but does NOT roll back `dispatched` or the metric.
+      try {
+        await markBackfillDispatched({ tokenProvider, gcpProjectId, userId })
+      } catch (markErr) {
+        core.warning(
+          `[brand-contacts-backfill] cid=${correlationId} mark-dispatched failed userId=${userId}: ${markErr.message} (user will be re-considered next cron firing)`,
+        )
+      }
     } catch (err) {
       dispatchFailed++
       core.error(
@@ -220,6 +255,7 @@ export async function runBrandContactsBackfill() {
     usersSkippedRevoked,
     usersSkippedNoToken,
     usersSkippedAlreadyInFlight,
+    usersSkippedAlreadyDispatched,
     dispatched,
     dispatchSkippedAlreadyInProgress,
     dispatchFailed,

@@ -58,13 +58,18 @@ describe('runBrandContactsBackfill orchestration', () => {
         ptFields.tier = { stringValue: permissionTier.tier }
       }
       if (permissionTier.tierRevokedAt != null) {
-        ptFields.tierRevokedAt = { stringValue: permissionTier.tierRevokedAt }
+        ptFields.tierRevokedAt = { timestampValue: permissionTier.tierRevokedAt }
       } else {
         ptFields.tierRevokedAt = { nullValue: null }
       }
       if (permissionTier.backfillCircuitBrokenAt != null) {
         ptFields.backfillCircuitBrokenAt = {
-          stringValue: permissionTier.backfillCircuitBrokenAt,
+          timestampValue: permissionTier.backfillCircuitBrokenAt,
+        }
+      }
+      if (permissionTier.backfillDispatchedAt != null) {
+        ptFields.backfillDispatchedAt = {
+          timestampValue: permissionTier.backfillDispatchedAt,
         }
       }
       fields.permissionTier = { mapValue: { fields: ptFields } }
@@ -77,7 +82,7 @@ describe('runBrandContactsBackfill orchestration', () => {
     }
   }
 
-  it('6-cohort matrix: eligible, revoked, full-tier, no-tier, no-token, circuit-broken', async () => {
+  it('7-cohort matrix: eligible, revoked, full-tier, no-tier, no-token, circuit-broken, already-dispatched', async () => {
     const dispatchedUsers = []
     const skippedInProgress = []
 
@@ -109,6 +114,13 @@ describe('runBrandContactsBackfill orchestration', () => {
               tierRevokedAt: null,
               backfillCircuitBrokenAt: '2026-05-01T00:00:00Z',
             }),
+            // Cohort G — already-dispatched (NFR-1: persistent dispatch marker
+            // prevents re-dispatching the same users every cron firing).
+            makeFirestoreDoc('user-already-dispatched', {
+              tier: 'readonly',
+              tierRevokedAt: null,
+              backfillDispatchedAt: '2026-05-07T13:00:00Z',
+            }),
           ],
         }
       }
@@ -138,26 +150,38 @@ describe('runBrandContactsBackfill orchestration', () => {
         }
       }
 
+      if (u.includes(':commit') && method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          body: { cancel: jest.fn().mockResolvedValue(undefined) },
+        }
+      }
+
       throw new Error(`unexpected fetch: ${method} ${u}`)
     })
 
     const summary = await runBrandContactsBackfill()
 
-    expect(summary.usersConsidered).toBe(4)
+    expect(summary.usersConsidered).toBe(5)
     expect(summary.usersEligible).toBe(1)
     expect(summary.usersSkippedRevoked).toBe(1)
     expect(summary.usersSkippedAlreadyInFlight).toBe(1)
+    expect(summary.usersSkippedAlreadyDispatched).toBe(1)
     expect(summary.dispatched).toBe(1)
     expect(summary.dispatchFailed).toBe(0)
     expect(summary.correlationId).toBeDefined()
     expect(summary.attributionTag).toBe('brand-contacts-backfill')
     expect(dispatchedUsers).toEqual(['user-eligible'])
     // Cohort C (full-tier) is silently filtered: contributes to usersConsidered
-    // but NOT to any skip counter. Sum of explicit cohort tallies must be 3 (A+B+F),
-    // not 4 — proves user-full was not miscounted into a skip bucket.
+    // but NOT to any skip counter. Sum of explicit cohort tallies must be 4 (A+B+F+G),
+    // not 5 — proves user-full was not miscounted into a skip bucket.
     expect(
-      summary.usersEligible + summary.usersSkippedRevoked + summary.usersSkippedAlreadyInFlight,
-    ).toBe(3)
+      summary.usersEligible +
+        summary.usersSkippedRevoked +
+        summary.usersSkippedAlreadyInFlight +
+        summary.usersSkippedAlreadyDispatched,
+    ).toBe(4)
     expect(summary.usersSkippedNoToken).toBe(0)
   })
 
@@ -181,6 +205,14 @@ describe('runBrandContactsBackfill orchestration', () => {
           json: async () => [makeFirestoreDoc('user-no-tier', null)],
         }
       }
+      if (u.includes(':commit') && method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          body: { cancel: jest.fn().mockResolvedValue(undefined) },
+        }
+      }
+
       throw new Error(`unexpected fetch: ${u}`)
     })
 
@@ -220,6 +252,14 @@ describe('runBrandContactsBackfill orchestration', () => {
           body: { cancel: jest.fn().mockResolvedValue(undefined) },
         }
       }
+      if (u.includes(':commit') && method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          body: { cancel: jest.fn().mockResolvedValue(undefined) },
+        }
+      }
+
       throw new Error(`unexpected fetch: ${method} ${u}`)
     })
 
@@ -258,6 +298,14 @@ describe('runBrandContactsBackfill orchestration', () => {
           body: { cancel: jest.fn().mockResolvedValue(undefined) },
         }
       }
+      if (u.includes(':commit') && method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          body: { cancel: jest.fn().mockResolvedValue(undefined) },
+        }
+      }
+
       throw new Error(`unexpected fetch: ${method} ${u}`)
     })
 
@@ -306,6 +354,14 @@ describe('runBrandContactsBackfill orchestration', () => {
           body: { cancel: jest.fn().mockResolvedValue(undefined) },
         }
       }
+      if (u.includes(':commit') && method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          body: { cancel: jest.fn().mockResolvedValue(undefined) },
+        }
+      }
+
       throw new Error(`unexpected fetch: ${method} ${u}`)
     })
 
@@ -347,6 +403,14 @@ describe('runBrandContactsBackfill orchestration', () => {
           body: { cancel: jest.fn().mockResolvedValue(undefined) },
         }
       }
+      if (u.includes(':commit') && method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          body: { cancel: jest.fn().mockResolvedValue(undefined) },
+        }
+      }
+
       throw new Error(`unexpected fetch: ${method} ${u}`)
     })
 
@@ -377,6 +441,14 @@ describe('runBrandContactsBackfill orchestration', () => {
       if (u.includes(':runQuery')) {
         return { ok: true, status: 200, json: async () => [] }
       }
+      if (u.includes(':commit') && method === 'POST') {
+        return {
+          ok: true,
+          status: 200,
+          body: { cancel: jest.fn().mockResolvedValue(undefined) },
+        }
+      }
+
       throw new Error(`unexpected fetch: ${u}`)
     })
 

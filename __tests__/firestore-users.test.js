@@ -31,13 +31,18 @@ describe('paginateTierEligibleUsers', () => {
         ptFields.tier = { stringValue: permissionTier.tier }
       }
       if (permissionTier.tierRevokedAt != null) {
-        ptFields.tierRevokedAt = { stringValue: permissionTier.tierRevokedAt }
+        ptFields.tierRevokedAt = { timestampValue: permissionTier.tierRevokedAt }
       } else {
         ptFields.tierRevokedAt = { nullValue: null }
       }
       if (permissionTier.backfillCircuitBrokenAt != null) {
         ptFields.backfillCircuitBrokenAt = {
-          stringValue: permissionTier.backfillCircuitBrokenAt,
+          timestampValue: permissionTier.backfillCircuitBrokenAt,
+        }
+      }
+      if (permissionTier.backfillDispatchedAt != null) {
+        ptFields.backfillDispatchedAt = {
+          timestampValue: permissionTier.backfillDispatchedAt,
         }
       }
       fields.permissionTier = { mapValue: { fields: ptFields } }

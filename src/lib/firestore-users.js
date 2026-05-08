@@ -116,7 +116,7 @@ export async function* paginateTierEligibleUsers({ tokenProvider, gcpProjectId, 
 /**
  * Extract permissionTier fields from a Firestore document.
  * @param {object} doc
- * @returns {{ tier: string, tierRevokedAt: string|null, backfillCircuitBrokenAt: string|null } | null}
+ * @returns {{ tier: string, tierRevokedAt: string|null, backfillCircuitBrokenAt: string|null, backfillDispatchedAt: string|null } | null}
  */
 function extractPermissionTier(doc) {
   const fields = doc?.fields?.permissionTier?.mapValue?.fields
@@ -125,10 +125,11 @@ function extractPermissionTier(doc) {
   const tier = fields.tier?.stringValue
   if (!tier) return null
 
-  const tierRevokedAt = fields.tierRevokedAt?.stringValue ?? null
-  const backfillCircuitBrokenAt = fields.backfillCircuitBrokenAt?.stringValue ?? null
+  const tierRevokedAt = fields.tierRevokedAt?.timestampValue ?? null
+  const backfillCircuitBrokenAt = fields.backfillCircuitBrokenAt?.timestampValue ?? null
+  const backfillDispatchedAt = fields.backfillDispatchedAt?.timestampValue ?? null
 
-  return { tier, tierRevokedAt, backfillCircuitBrokenAt }
+  return { tier, tierRevokedAt, backfillCircuitBrokenAt, backfillDispatchedAt }
 }
 
 /**
@@ -168,4 +169,62 @@ export async function checkLegacyTokenPresence({ tokenProvider, gcpProjectId, us
 
   await resp.body?.cancel().catch(() => {})
   return { present: true }
+}
+
+/**
+ * Persist `permissionTier.backfillDispatchedAt = <REQUEST_TIME>` on the user doc
+ * via Firestore REST `:commit` with a `setToServerValue: REQUEST_TIME` transform.
+ * Server-time avoids per-runner clock-skew drift across the 4,116-user campaign.
+ *
+ * Required for backfill correctness (NFR-1): without this marker, the read-side
+ * tier-eligibility query (`tier === 'readonly' AND tierRevokedAt IS NULL`)
+ * keeps returning already-dispatched users every cron firing, starving the
+ * orchestrator's daily candidate pool and re-dispatching the same first-N users
+ * every day forever. The orchestrator's read-side filter excludes users with
+ * `backfillDispatchedAt != null`.
+ *
+ * Idempotent at the application layer — caller only invokes after a successful
+ * dispatch (HTTP 200/201). 409 (already-in-progress) does NOT mark; the prior
+ * dispatcher's caller owns the eventual mark on its 200 response.
+ *
+ * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, userId: string }} opts
+ * @returns {Promise<void>}
+ */
+export async function markBackfillDispatched({ tokenProvider, gcpProjectId, userId }) {
+  const accessToken = await tokenProvider()
+  const docName = `projects/${encodeURIComponent(gcpProjectId)}/databases/(default)/documents/users/${encodeURIComponent(userId)}`
+  const url = `${FIRESTORE_BASE}/projects/${encodeURIComponent(gcpProjectId)}/databases/(default)/documents:commit`
+
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      writes: [
+        {
+          transform: {
+            document: docName,
+            fieldTransforms: [
+              {
+                fieldPath: 'permissionTier.backfillDispatchedAt',
+                setToServerValue: 'REQUEST_TIME',
+              },
+            ],
+          },
+        },
+      ],
+    }),
+    signal: AbortSignal.timeout(30_000),
+  })
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '<unreadable>')
+    throw new Error(
+      `Firestore mark-dispatched ${resp.status} for userId=${userId}: ${text.slice(0, 500)}`,
+    )
+  }
+
+  await resp.body?.cancel().catch(() => {})
 }
