@@ -6,7 +6,7 @@
 
 import * as core from '@actions/core'
 import { randomUUID } from 'node:crypto'
-import { parsePositiveIntegerInput } from '../lib/inputs.js'
+import { parsePositiveIntegerInput, parseStrictBoolean } from '../lib/inputs.js'
 import {
   resolveFirestoreServiceAccountJson,
   normalizeOptionalProjectId,
@@ -42,11 +42,7 @@ export async function runBrandContactsBackfill() {
     'backfill-concurrency',
   )
   const attributionTag = core.getInput('backfill-attribution-tag') || 'brand-contacts-backfill'
-  const dryRun = ['true', '1', 'yes'].includes(
-    String(core.getInput('backfill-dry-run') ?? '')
-      .trim()
-      .toLowerCase(),
-  )
+  const dryRun = parseStrictBoolean(core.getInput('backfill-dry-run'), 'backfill-dry-run', false)
 
   if (!backendBaseUrl || !sharedSecret || !saJsonRaw) {
     throw new Error(
