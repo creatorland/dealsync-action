@@ -26,7 +26,6 @@ jobs:
           sxt-api-url: ${{ secrets.SXT_API_URL }}
           sxt-biscuit: ${{ secrets.SXT_DEALSYNC_EMAIL_CORE_BISCUIT }}
           email-core-schema: ${{ secrets.EMAIL_CORE_SCHEMA }}
-          # NOTE: this should include /api (backend has global prefix 'api'), e.g. https://<host>/api
           dealsync-backend-base-url: ${{ secrets.DEALSYNC_BACKEND_BASE_URL }}
           dealsync-v2-shared-secret: ${{ secrets.DEALSYNC_V2_SHARED_SECRET }}
           fallback-reattempt-batch-size: '200'

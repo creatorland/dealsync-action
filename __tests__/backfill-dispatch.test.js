@@ -12,7 +12,7 @@ describe('postBackfillIngestionTrigger', () => {
   })
 
   const baseOpts = {
-    backendBaseUrl: 'https://backend.example/api',
+    backendBaseUrl: 'https://backend.example',
     sharedSecret: 's3cret',
     userId: 'user-1',
     attributionTag: 'brand-contacts-backfill',
@@ -32,7 +32,7 @@ describe('postBackfillIngestionTrigger', () => {
     expect(res).toEqual({ ok: true, status: 201, alreadyInProgress: false })
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('https://backend.example/api/v1/dealsync-v2/sync/ingestion-trigger')
+    expect(url).toBe('https://backend.example/api/v1/ingestion/trigger')
     expect(init.method).toBe('POST')
     expect(init.headers['Content-Type']).toBe('application/json')
     expect(init.headers['x-shared-secret']).toBe('s3cret')
@@ -112,11 +112,11 @@ describe('postBackfillIngestionTrigger', () => {
 
     await postBackfillIngestionTrigger({
       ...baseOpts,
-      backendBaseUrl: 'https://backend.example/api///',
+      backendBaseUrl: 'https://backend.example///',
     })
 
     const [url] = fetchMock.mock.calls[0]
-    expect(url).toBe('https://backend.example/api/v1/dealsync-v2/sync/ingestion-trigger')
+    expect(url).toBe('https://backend.example/api/v1/ingestion/trigger')
   })
 
   it('forwards extra headers (e.g. x-correlation-id)', async () => {

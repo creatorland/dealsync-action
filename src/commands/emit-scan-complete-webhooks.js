@@ -37,7 +37,7 @@ export function resolveFirestoreServiceAccountJson() {
 }
 
 /**
- * Cron: eligible first LOOKBACK completions → Firestore dedupe → POST /dealsync-v2/webhooks (scan_complete).
+ * Cron: eligible first LOOKBACK completions → Firestore dedupe → POST /api/v1/dealsync-v2/webhooks (scan_complete).
  * @see docs/plans/2026-04-16-scan-complete-w3-cron-tech-spec.md
  */
 export async function runEmitScanCompleteWebhooks() {

@@ -282,7 +282,7 @@ describe('postScanCompleteWebhook', () => {
     const r = await postScanCompleteWebhook('https://api.example.com/', 'sec', body)
     expect(r.ok).toBe(true)
     expect(global.fetch).toHaveBeenCalledWith(
-      'https://api.example.com/dealsync-v2/webhooks',
+      'https://api.example.com/api/v1/dealsync-v2/webhooks',
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({

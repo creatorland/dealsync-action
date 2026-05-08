@@ -121,7 +121,7 @@ describe('postFallbackReattempt', () => {
     })
     global.fetch = fetchMock
 
-    const res = await postFallbackReattempt('https://backend.example/api', 's3cret', {
+    const res = await postFallbackReattempt('https://backend.example', 's3cret', {
       userId: 'user-1',
       originatingSyncStateId: 'sync-60d',
     })
@@ -129,7 +129,7 @@ describe('postFallbackReattempt', () => {
     expect(res).toEqual({ ok: true, status: 200 })
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('https://backend.example/api/v1/dealsync-v2/sync/ingestion-trigger')
+    expect(url).toBe('https://backend.example/api/v1/ingestion/trigger')
     expect(init.method).toBe('POST')
     expect(init.headers['Content-Type']).toBe('application/json')
     expect(init.headers['x-shared-secret']).toBe('s3cret')
@@ -144,7 +144,7 @@ describe('postFallbackReattempt', () => {
   it('treats 409 as success (already in progress)', async () => {
     global.fetch = jest.fn().mockResolvedValue({ status: 409, ok: false })
 
-    const res = await postFallbackReattempt('https://backend.example/api', 's', {
+    const res = await postFallbackReattempt('https://backend.example', 's', {
       userId: 'u',
       originatingSyncStateId: 'orig',
     })
@@ -159,7 +159,7 @@ describe('postFallbackReattempt', () => {
       text: jest.fn().mockResolvedValue('boom'),
     })
 
-    const res = await postFallbackReattempt('https://backend.example/api', 's', {
+    const res = await postFallbackReattempt('https://backend.example', 's', {
       userId: 'u',
       originatingSyncStateId: 'orig',
     })
@@ -173,13 +173,13 @@ describe('postFallbackReattempt', () => {
     const fetchMock = jest.fn().mockResolvedValue({ status: 200, ok: true })
     global.fetch = fetchMock
 
-    await postFallbackReattempt('https://backend.example/api///', 's', {
+    await postFallbackReattempt('https://backend.example///', 's', {
       userId: 'u',
       originatingSyncStateId: 'orig',
     })
 
     const [url] = fetchMock.mock.calls[0]
-    expect(url).toBe('https://backend.example/api/v1/dealsync-v2/sync/ingestion-trigger')
+    expect(url).toBe('https://backend.example/api/v1/ingestion/trigger')
   })
 
   it('forwards extra headers (e.g. x-correlation-id)', async () => {
@@ -187,7 +187,7 @@ describe('postFallbackReattempt', () => {
     global.fetch = fetchMock
 
     await postFallbackReattempt(
-      'https://backend.example/api',
+      'https://backend.example',
       's',
       { userId: 'u', originatingSyncStateId: 'orig' },
       { 'x-correlation-id': 'cid-123' },

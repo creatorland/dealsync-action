@@ -1,6 +1,6 @@
 /**
  * Brand Contacts backfill command — paginates Firestore for tier-eligible users,
- * checks legacy OAuth token presence, dispatches to backend /sync/ingestion-trigger.
+ * checks legacy OAuth token presence, dispatches to backend /api/v1/ingestion/trigger.
  * @see _bmad-output/implementation-artifacts/2-4-implement-dealsync-action-backfill-workflow.md
  */
 

@@ -253,7 +253,7 @@ export function rowToScanCompleteWebhookBody(row) {
  */
 export async function postScanCompleteWebhook(baseUrl, sharedSecret, body, headers = {}) {
   const root = baseUrl.replace(/\/+$/, '')
-  const url = `${root}/dealsync-v2/webhooks`
+  const url = `${root}/api/v1/dealsync-v2/webhooks`
   const payload = JSON.stringify(body)
   let last = { ok: false, status: 0, text: '' }
   for (let attempt = 0; attempt < TRANSIENT_MAX_ATTEMPTS; attempt++) {

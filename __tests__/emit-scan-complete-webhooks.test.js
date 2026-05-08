@@ -131,7 +131,7 @@ describe('runEmitScanCompleteWebhooks orchestration', () => {
         firestoreWrites.push({ method, url: u })
         return { ok: true, status: 200, body: null }
       }
-      if (u === 'https://api.example/dealsync-v2/webhooks' && method === 'POST') {
+      if (u === 'https://api.example/api/v1/dealsync-v2/webhooks' && method === 'POST') {
         const body = JSON.parse(init.body)
         postedUsers.push(body.userId)
         if (body.userId === 'u-c') {

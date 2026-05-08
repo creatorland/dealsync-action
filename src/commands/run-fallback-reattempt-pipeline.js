@@ -34,7 +34,7 @@ export async function postFallbackReattempt(
   payload,
   extraHeaders = {},
 ) {
-  const url = `${normalizeBaseUrl(backendBaseUrl)}/v1/dealsync-v2/sync/ingestion-trigger`
+  const url = `${normalizeBaseUrl(backendBaseUrl)}/api/v1/ingestion/trigger`
   const body = {
     userId: payload.userId,
     syncStrategy: 'LOOKBACK',
