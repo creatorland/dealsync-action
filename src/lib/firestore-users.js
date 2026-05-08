@@ -4,8 +4,18 @@
  */
 
 import * as core from '@actions/core'
+import { backoffMs, sleep } from './retry.js'
 
 const FIRESTORE_BASE = 'https://firestore.googleapis.com/v1'
+
+// Retry policy for transient network failures on Firestore REST GETs:
+// 3 attempts (initial + 2 retries), exponential backoff 500ms → 2s.
+// Sized for sub-5s p99 wall-clock per user under typical Firestore latency,
+// keeping the per-batch fan-out within the action's 30-min job timeout
+// even at concurrency=5 with worst-case retries on every user.
+const TOKEN_CHECK_MAX_ATTEMPTS = 3
+const TOKEN_CHECK_BACKOFF_BASE_MS = 500
+const TOKEN_CHECK_BACKOFF_MAX_MS = 2000
 
 /**
  * Async generator yielding pages of tier-eligible users from Firestore REST runQuery.
@@ -139,33 +149,69 @@ function extractPermissionTier(doc) {
  * legacy plaintext path must stay server-side; the W3 caller only needs to know
  * the document exists so `core-email-metadata-ingestion` can fetch it itself.
  *
+ * Retries on transient network failures + Firestore 5xx (3 attempts total,
+ * exponential backoff 500ms → 2s). 4xx (other than 404) and the 404-as-absent
+ * fast-path do NOT retry — they are deterministic outcomes. Without retry, a
+ * single dropped TCP connection drops the user from this run and (combined with
+ * the persistent dispatch marker) means the user has to wait for the NEXT
+ * cron firing's natural retry — slower than necessary for transient blips.
+ *
  * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, userId: string }} opts
  * @returns {Promise<{ present: boolean }>}
  */
 export async function checkLegacyTokenPresence({ tokenProvider, gcpProjectId, userId }) {
-  const accessToken = await tokenProvider()
   const path = `projects/${encodeURIComponent(gcpProjectId)}/databases/(default)/documents/users-sensitive-data/${encodeURIComponent(userId)}/oauth-token/youtube`
   const url = new URL(`${FIRESTORE_BASE}/${path}`)
   url.searchParams.set('mask.fieldPaths', '__name__')
 
-  const resp = await fetch(url.toString(), {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${accessToken}` },
-    signal: AbortSignal.timeout(30_000),
-  })
+  let lastErr
+  for (let attempt = 0; attempt < TOKEN_CHECK_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      await sleep(
+        backoffMs(attempt - 1, {
+          base: TOKEN_CHECK_BACKOFF_BASE_MS,
+          max: TOKEN_CHECK_BACKOFF_MAX_MS,
+          jitter: true,
+        }),
+      )
+    }
 
-  if (resp.status === 404) {
-    await resp.body?.cancel().catch(() => {})
-    return { present: false }
-  }
+    let resp
+    try {
+      const accessToken = await tokenProvider()
+      resp = await fetch(url.toString(), {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(30_000),
+      })
+    } catch (err) {
+      // Network-level failure (DNS, connection refused, AbortSignal timeout).
+      // These are exactly the transient cases retry exists for.
+      lastErr = new Error(`Firestore token check network failure for userId=${userId}: ${err.message}`)
+      continue
+    }
 
-  if (!resp.ok) {
+    if (resp.status === 404) {
+      await resp.body?.cancel().catch(() => {})
+      return { present: false }
+    }
+
+    if (resp.ok) {
+      await resp.body?.cancel().catch(() => {})
+      return { present: true }
+    }
+
+    // Non-2xx, non-404 response. Retry only on 5xx (transient); 4xx is the
+    // caller's fault (auth, permissions, malformed request) — don't burn retries.
     const text = await resp.text().catch(() => '<unreadable>')
-    throw new Error(`Firestore token check ${resp.status} for userId=${userId}: ${text}`)
+    const truncated = text.slice(0, 500)
+    lastErr = new Error(
+      `Firestore token check ${resp.status} for userId=${userId}: ${truncated}`,
+    )
+    if (resp.status < 500) break
   }
 
-  await resp.body?.cancel().catch(() => {})
-  return { present: true }
+  throw lastErr
 }
 
 /**

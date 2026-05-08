@@ -287,4 +287,67 @@ describe('checkLegacyTokenPresence', () => {
       }),
     ).rejects.toThrow(/Firestore token check 500/)
   })
+
+  it('retries on 5xx and succeeds on a later attempt (transient)', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        text: async () => 'service unavailable',
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        body: { cancel: jest.fn().mockResolvedValue(undefined) },
+      })
+
+    const result = await checkLegacyTokenPresence({
+      tokenProvider: async () => 'tok',
+      gcpProjectId: 'test-project',
+      userId: 'user-flaky',
+    })
+
+    expect(result).toEqual({ present: true })
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries on network throw (DNS / connection refused / timeout)', async () => {
+    global.fetch = jest
+      .fn()
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        body: { cancel: jest.fn().mockResolvedValue(undefined) },
+      })
+
+    const result = await checkLegacyTokenPresence({
+      tokenProvider: async () => 'tok',
+      gcpProjectId: 'test-project',
+      userId: 'user-net-blip',
+    })
+
+    expect(result).toEqual({ present: false })
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('does NOT retry on 4xx (other than 404) — fail fast on auth/permission errors', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => 'unauthorized',
+    })
+
+    await expect(
+      checkLegacyTokenPresence({
+        tokenProvider: async () => 'tok',
+        gcpProjectId: 'test-project',
+        userId: 'user-auth-fail',
+      }),
+    ).rejects.toThrow(/Firestore token check 401/)
+
+    // 4xx must short-circuit retry — first attempt only.
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+  })
 })
