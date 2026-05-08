@@ -64,6 +64,10 @@ inputs:
     default: '0'
   prompt-hash:
     description: 'Git commit hash to fetch prompts from (eval). Empty = use bundled prompts'
+  system-prompt:
+    description: 'Inline system prompt override (eval). Takes priority over prompt-hash'
+  user-prompt:
+    description: 'Inline user prompt override (eval). Takes priority over prompt-hash'
   result-a:
     description: 'JSON result from eval variant A (eval-compare)'
   result-b:

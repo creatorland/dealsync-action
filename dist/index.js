@@ -35031,8 +35031,6 @@ function getHeader(email, name) {
   return header?.value || ''
 }
 
-const MAX_BODY_CHARS = 3000; // Per email — keeps token usage reasonable for batches of 5
-
 /**
  * Sanitize an email body for AI classification.
  * @param {string} body - Raw email body (may be HTML or plaintext)
@@ -35074,11 +35072,6 @@ function sanitizeEmailBody(body) {
     .replace(/[ \t]{2,}/g, ' ') // Collapse horizontal whitespace
     .replace(/^\s+$/gm, '') // Remove whitespace-only lines
     .trim();
-
-  // Step 4: Truncate
-  if (text.length > MAX_BODY_CHARS) {
-    text = text.substring(0, MAX_BODY_CHARS) + '\n[... truncated]';
-  }
 
   return text
 }
@@ -35559,9 +35552,9 @@ var systemTemplateLlama = "You are an email classifier for a content creator's i
 
 var classificationInstructions = "Classify the email threads below. Return one JSON object per thread in a JSON array.\n\n# Threads to Classify\n\n{{THREAD_DATA}}\n";
 
-// --- Prompt building ---
+// --- Prompt building (unchanged from ai.js) ---
 
-function groupByThread(emails) {
+function groupByThread$1(emails) {
   const threads = {};
   for (const email of emails) {
     const threadId = email.threadId || email.id;
@@ -35571,8 +35564,8 @@ function groupByThread(emails) {
   return threads
 }
 
-function buildThreadData(emails) {
-  const threads = groupByThread(emails);
+function buildThreadData$1(emails) {
+  const threads = groupByThread$1(emails);
   const parts = [];
   const threadOrder = [];
   let threadIndex = 0;
@@ -35612,10 +35605,9 @@ function buildThreadData(emails) {
   return { text: parts.join('\n'), threadOrder }
 }
 
-function buildPrompt(emails, { systemOverride, userOverride, creatorEmail, model } = {}) {
-  const { text: threadData, threadOrder } = buildThreadData(emails);
+function buildPrompt$1(emails, { systemOverride, userOverride, creatorEmail, model } = {}) {
+  const { text: threadData, threadOrder } = buildThreadData$1(emails);
 
-  // Select model-specific prompt: use Llama variant for Llama models
   const isLlama = model && model.toLowerCase().includes('llama');
   const defaultTemplate = isLlama ? systemTemplateLlama : systemTemplate;
   const systemPrompt = (systemOverride || defaultTemplate).trim();
@@ -35636,13 +35628,13 @@ function buildPrompt(emails, { systemOverride, userOverride, creatorEmail, model
 }
 
 // --- Constants ---
-const AI_REQUEST_TIMEOUT_MS = 240000;
-const AI_RETRY_DELAY_MS = 2000;
-const MAX_HTTP_RETRIES = parseInt(coreExports.getInput('ai-max-retries') || '3', 10);
-const MAX_TOKENS = 20480;
+const AI_REQUEST_TIMEOUT_MS$1 = 240000;
+const AI_RETRY_DELAY_MS$1 = 2000;
+const MAX_HTTP_RETRIES$1 = parseInt(coreExports.getInput('ai-max-retries') || '3', 10);
+const MAX_TOKENS$1 = 20480;
 
-// --- Valid categories and deal types for validation ---
-const VALID_CATEGORIES = new Set([
+// --- Valid categories and deal types ---
+const VALID_CATEGORIES$1 = new Set([
   'new',
   'in_progress',
   'completed',
@@ -35650,7 +35642,7 @@ const VALID_CATEGORIES = new Set([
   'likely_scam',
   'low_confidence',
 ]);
-const VALID_DEAL_TYPES = new Set([
+const VALID_DEAL_TYPES$1 = new Set([
   'brand_collaboration',
   'sponsorship',
   'affiliate',
@@ -35661,24 +35653,63 @@ const VALID_DEAL_TYPES = new Set([
   'other_business',
 ]);
 
-// --- AI client ---
+// --- JSON Schema for structured output ---
+const CLASSIFICATION_SCHEMA = {
+  name: 'deal_classifications',
+  strict: true,
+  schema: {
+    type: 'object',
+    properties: {
+      results: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            thread_index: { type: 'integer' },
+            is_deal: { type: 'boolean' },
+            is_english: { type: 'boolean' },
+            language: { type: ['string', 'null'] },
+            ai_score: { type: 'integer' },
+            category: { type: ['string', 'null'] },
+            likely_scam: { type: 'boolean' },
+            ai_insight: { type: 'string' },
+            ai_summary: { type: 'string' },
+            main_contact: { type: ['string', 'null'] },
+            deal_brand: { type: ['string', 'null'] },
+            deal_type: { type: ['string', 'null'] },
+            deal_name: { type: ['string', 'null'] },
+            deal_value: { type: ['number', 'null'] },
+            deal_currency: { type: ['string', 'null'] },
+          },
+          required: [
+            'thread_index',
+            'is_deal',
+            'is_english',
+            'ai_score',
+            'category',
+            'likely_scam',
+            'ai_insight',
+            'ai_summary',
+          ],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['results'],
+    additionalProperties: false,
+  },
+};
 
-/**
- * Call a model with HTTP retries + exponential backoff.
- * Returns { content, usage } or throws on total failure.
- *
- * @param {string} model - Model ID
- * @param {Array} messages - Chat messages
- * @param {Object} opts - { temperature, apiUrl, apiKey }
- */
-const MAX_RATE_LIMIT_WAITS = 10;
+// --- AI client with json_schema ---
 
-async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = {}) {
+const MAX_RATE_LIMIT_WAITS$1 = 10;
+
+async function callModel$1(model, messages, { temperature = 0, apiUrl, apiKey } = {}) {
   let lastError;
   let rateLimitWaits = 0;
-  for (let attempt = 1; attempt <= MAX_HTTP_RETRIES; attempt++) {
+  for (let attempt = 1; attempt <= MAX_HTTP_RETRIES$1; attempt++) {
     try {
-      console.log(`[ai-client] ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES})`);
+      console.log(`[ai-client] ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES$1})`);
       const resp = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -35689,10 +35720,10 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
           model,
           messages,
           temperature,
-          max_tokens: MAX_TOKENS,
-          response_format: { type: 'json_object' },
+          max_tokens: MAX_TOKENS$1,
+          response_format: { type: 'json_schema', json_schema: CLASSIFICATION_SCHEMA },
         }),
-        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS$1),
       });
 
       if (!resp.ok) {
@@ -35700,20 +35731,19 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
         lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 500)}`);
         console.log(`[ai-client] ${model} HTTP ${resp.status}: ${errBody.substring(0, 500)}`);
 
-        // 429: respect Retry-After or wait 5s, don't consume retry budget
-        if (resp.status === 429 && rateLimitWaits < MAX_RATE_LIMIT_WAITS) {
+        if (resp.status === 429 && rateLimitWaits < MAX_RATE_LIMIT_WAITS$1) {
           rateLimitWaits++;
           const retryAfter = parseInt(resp.headers.get('retry-after') || '5', 10) * 1000;
           console.log(
-            `[ai-client] ${model} rate limited (${rateLimitWaits}/${MAX_RATE_LIMIT_WAITS}), waiting ${retryAfter}ms`,
+            `[ai-client] ${model} rate limited (${rateLimitWaits}/${MAX_RATE_LIMIT_WAITS$1}), waiting ${retryAfter}ms`,
           );
           await sleep(retryAfter);
-          attempt--; // don't consume attempt
+          attempt--;
           continue
         }
 
-        if (attempt < MAX_HTTP_RETRIES) {
-          await sleep(backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS }));
+        if (attempt < MAX_HTTP_RETRIES$1) {
+          await sleep(backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS$1 }));
           continue
         }
         throw lastError
@@ -35727,8 +35757,8 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
       return { content, usage }
     } catch (err) {
       lastError = err;
-      if (attempt < MAX_HTTP_RETRIES) {
-        const delay = backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS });
+      if (attempt < MAX_HTTP_RETRIES$1) {
+        const delay = backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS$1 });
         console.log(
           `[ai-client] ${model} attempt ${attempt} failed: ${err.message}, retrying in ${delay}ms`,
         );
@@ -35736,65 +35766,21 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
       }
     }
   }
-  throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES} attempts`)
+  throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES$1} attempts`)
 }
 
 /**
- * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
- * @param {string} raw — raw AI response
- * @param {string[]} [threadOrder] — maps thread_index (1-based) to thread_id
+ * Parse and validate structured JSON schema output.
+ * Expects { results: [...] } from json_schema constrained decoding.
+ * Only does schema coercion — no repair logic needed.
  */
-function parseAndValidate(raw, threadOrder) {
-  let content = raw.trim();
+function parseAndValidate$1(raw, threadOrder) {
+  const parsed = JSON.parse(raw.trim());
+  const results = parsed.results || parsed;
 
-  // Strip markdown fences
-  content = content
-    .replace(/^```(?:json)?\s*\n?/gi, '')
-    .replace(/\n?```\s*$/gi, '')
-    .trim();
+  const items = Array.isArray(results) ? results : [results];
 
-  // Try to find JSON array in mixed output
-  if (!content.startsWith('[')) {
-    const arrayStart = content.indexOf('[');
-    const arrayEnd = content.lastIndexOf(']');
-    if (arrayStart !== -1 && arrayEnd > arrayStart) {
-      content = content.slice(arrayStart, arrayEnd + 1);
-    }
-  }
-
-  // Parse
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    // Try to extract from wrapper object like {"results": [...]}
-    const objStart = content.indexOf('{');
-    const objEnd = content.lastIndexOf('}');
-    if (objStart !== -1 && objEnd > objStart) {
-      const obj = JSON.parse(content.slice(objStart, objEnd + 1));
-      const arrays = Object.values(obj).filter(Array.isArray);
-      if (arrays.length === 1) {
-        parsed = arrays[0];
-      } else {
-        throw new Error('Cannot extract JSON array from response')
-      }
-    } else {
-      throw new Error('No valid JSON found in response')
-    }
-  }
-
-  // Unwrap if object with single array property
-  if (!Array.isArray(parsed)) {
-    const arrays = Object.values(parsed).filter(Array.isArray);
-    if (arrays.length === 1) {
-      parsed = arrays[0];
-    } else {
-      throw new Error('Response is not a JSON array')
-    }
-  }
-
-  // Schema validation and coercion
-  return parsed.map((r) => ({
+  return items.map((r) => ({
     thread_id:
       threadOrder && r.thread_index != null
         ? threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || '')
@@ -35803,14 +35789,14 @@ function parseAndValidate(raw, threadOrder) {
     is_english: r.is_english !== false,
     language: r.language || null,
     ai_score: Math.min(10, Math.max(1, Math.round(Number(r.ai_score) || 5))),
-    category: r.is_deal ? (VALID_CATEGORIES.has(r.category) ? r.category : 'low_confidence') : null,
+    category: r.is_deal ? (VALID_CATEGORIES$1.has(r.category) ? r.category : 'low_confidence') : null,
     likely_scam: Boolean(r.likely_scam) || r.category === 'likely_scam',
     ai_insight: String(r.ai_insight || ''),
     ai_summary: String(r.ai_summary || '').slice(0, 1000),
     main_contact: r.is_deal ? r.main_contact || null : null,
     deal_brand: r.is_deal ? r.deal_brand || null : null,
     deal_type: r.is_deal
-      ? VALID_DEAL_TYPES.has(r.deal_type)
+      ? VALID_DEAL_TYPES$1.has(r.deal_type)
         ? r.deal_type
         : 'other_business'
       : null,
@@ -38344,6 +38330,8 @@ var groundTruth = [
 	}
 ];
 
+const MAX_BATCH_ATTEMPTS = 10;
+
 const PROMPT_BASE_URL = 'https://raw.githubusercontent.com/creatorland/dealsync-action';
 
 async function fetchPromptsByHash(hash) {
@@ -38369,12 +38357,18 @@ async function runEval() {
   const batchSize = parseInt(coreExports.getInput('batch-size') || '1', 10);
   const concurrency = parseInt(coreExports.getInput('concurrency') || '10', 10);
   const promptHash = coreExports.getInput('prompt-hash') || '';
+  const systemPromptInput = coreExports.getInput('system-prompt') || '';
+  const userPromptInput = coreExports.getInput('user-prompt') || '';
 
   if (!hyperbolicKey) throw new Error('ai-api-key is required for eval')
 
-  // Fetch prompts from a specific commit hash, or use bundled defaults
+  // Priority: direct prompt inputs > commit hash > bundled defaults
   let promptOverrides = {};
-  if (promptHash) {
+  if (systemPromptInput || userPromptInput) {
+    console.log(`[eval] using inline prompt overrides (system=${systemPromptInput.length} chars, user=${userPromptInput.length} chars)`);
+    if (systemPromptInput) promptOverrides.systemOverride = systemPromptInput;
+    if (userPromptInput) promptOverrides.userOverride = userPromptInput;
+  } else if (promptHash) {
     console.log(`[eval] fetching prompts from commit ${promptHash}`);
     promptOverrides = await fetchPromptsByHash(promptHash);
   }
@@ -38407,18 +38401,18 @@ async function runEval() {
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
 
+  // Split ground truth into batches (0 = all at once) — same for every run
+  const batches = [];
+  if (batchSize > 0) {
+    for (let i = 0; i < usableEntries.length; i += batchSize) {
+      batches.push(usableEntries.slice(i, i + batchSize));
+    }
+  } else {
+    batches.push(usableEntries);
+  }
+
   for (let run = 1; run <= numRuns; run++) {
     console.log(`[eval] --- run ${run}/${numRuns} ---`);
-
-    // Split ground truth into batches (0 = all at once)
-    const batches = [];
-    if (batchSize > 0) {
-      for (let i = 0; i < usableEntries.length; i += batchSize) {
-        batches.push(usableEntries.slice(i, i + batchSize));
-      }
-    } else {
-      batches.push(usableEntries);
-    }
 
     const runHealth = {
       clean: 0,
@@ -38431,48 +38425,42 @@ async function runEval() {
     // Process batches with concurrency pool
     async function processBatch(batch, batchIdx) {
       const allEmails = batch.flatMap((gt) => gt.emails);
-      const { systemPrompt, userPrompt } = buildPrompt(allEmails, promptOverrides);
+      const { systemPrompt, userPrompt, threadOrder } = buildPrompt$1(allEmails, promptOverrides);
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ];
 
-      let rawContent = null;
-      let usage = {};
-      try {
-        const result = await callModel(model, messages, { temperature, ...aiOpts });
-        rawContent = result.content;
-        usage = result.usage || {};
-      } catch (apiErr) {
-        console.log(`[eval] run ${run} batch ${batchIdx + 1} API failed: ${apiErr.message}`);
-        return { threads: [], health: 'failed', usage }
-      }
-
-      // Layer 1: Local JSON repair
-      try {
-        const parsed = parseAndValidate(rawContent);
-        return { threads: parsed, health: 'clean', usage }
-      } catch (parseErr) {
-        // Layer 2: Corrective retry
+      for (let attempt = 1; attempt <= MAX_BATCH_ATTEMPTS; attempt++) {
+        let rawContent = null;
+        let usage = {};
         try {
-          const correctiveMessages = [
-            ...messages,
-            { role: 'assistant', content: rawContent },
-            {
-              role: 'user',
-              content: `Your previous response could not be parsed as valid JSON.\n\nParse error:\n${parseErr.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting. Return ONLY the JSON array.`,
-            },
-          ];
-          const corrected = await callModel(model, correctiveMessages, {
-            temperature: 0,
-            ...aiOpts,
-          });
-          const parsed = parseAndValidate(corrected.content);
-          return { threads: parsed, health: 'corrective_retry', usage }
-        } catch (correctiveErr) {
-          console.log(
-            `[eval] run ${run} batch ${batchIdx + 1}: corrective retry failed: ${correctiveErr.message}`,
-          );
+          const result = await callModel$1(model, messages, { temperature, ...aiOpts });
+          rawContent = result.content;
+          usage = result.usage || {};
+        } catch (apiErr) {
+          console.log(`[eval] run ${run} batch ${batchIdx + 1} attempt ${attempt}/${MAX_BATCH_ATTEMPTS} API failed: ${apiErr.message}`);
+          if (attempt < MAX_BATCH_ATTEMPTS) {
+            const delay = backoffMs(attempt - 1, { base: 2000, max: 30000, jitter: true });
+            console.log(`[eval] retrying batch ${batchIdx + 1} in ${delay}ms`);
+            await sleep(delay);
+            continue
+          }
+          return { threads: [], health: 'failed', usage }
+        }
+
+        // json_schema enforces structure — just parse and coerce
+        try {
+          const parsed = parseAndValidate$1(rawContent, threadOrder);
+          return { threads: parsed, health: 'clean', usage }
+        } catch (parseErr) {
+          console.log(`[eval] run ${run} batch ${batchIdx + 1} attempt ${attempt}/${MAX_BATCH_ATTEMPTS} parse failed: ${parseErr.message}`);
+          if (attempt < MAX_BATCH_ATTEMPTS) {
+            const delay = backoffMs(attempt - 1, { base: 2000, max: 30000, jitter: true });
+            console.log(`[eval] retrying batch ${batchIdx + 1} in ${delay}ms`);
+            await sleep(delay);
+            continue
+          }
           return { threads: [], health: 'failed', usage }
         }
       }
@@ -38572,10 +38560,788 @@ async function runEval() {
   return result
 }
 
-const THRESHOLDS = {
-  recall: 0.95,
-  precision: 0.4,
-  consistency: 0.03,
+var min_recall = 0.95;
+var min_precision = 0.4;
+var max_recall_stddev = 0.03;
+var thresholds = {
+	min_recall: min_recall,
+	min_precision: min_precision,
+	max_recall_stddev: max_recall_stddev};
+
+var model = "deepseek/deepseek-chat-v3-0324";
+var temperature = 0;
+var batch_size = 5;
+var prompt_hash = "bundled";
+var runs = 10;
+var successful_runs = 10;
+var detection = {
+	recall: {
+		mean: 0.9,
+		stddev: 0.0204
+	},
+	precision: {
+		mean: 0.9646},
+	f2: {
+		mean: 0.9121}
+};
+var categorization = {
+	accuracy: {
+		mean: 0.639},
+	per_category: {
+		completed: {
+			mean: 1,
+			min: 1,
+			max: 1,
+			stddev: 0,
+			ground_truth_count: 2
+		},
+		not_interested: {
+			mean: 0.6044,
+			min: 0.3,
+			max: 0.8,
+			stddev: 0.1837,
+			ground_truth_count: 10
+		},
+		"new": {
+			mean: 1,
+			min: 1,
+			max: 1,
+			stddev: 0,
+			ground_truth_count: 1
+		},
+		in_progress: {
+			mean: 0.7143,
+			min: 0.5714,
+			max: 0.8571,
+			stddev: 0.0639,
+			ground_truth_count: 7
+		},
+		likely_scam: {
+			mean: 0.3333,
+			min: 0.3333,
+			max: 0.3333,
+			stddev: 0,
+			ground_truth_count: 4
+		}
+	}
+};
+var urgency_scoring = {
+	in_range_rate: {
+		mean: 0.4816}
+};
+var scam_detection = {
+	accuracy: {
+		mean: 0.5}};
+var json_health = {
+	clean_parse_rate: {
+		mean: 1},
+	corrective_retry_rate: {
+		mean: 0},
+	total_failures: 0
+};
+var cost = {
+	avg_cost_per_thread: 0.013466
+};
+var per_thread = [
+	{
+		id: "gt-001",
+		description: "Contract signed, all deliverables confirmed completed, payment processed....",
+		expected: {
+			is_deal: true,
+			category: "completed",
+			likely_scam: false,
+			score_range: [
+				9,
+				10
+			]
+		},
+		detection_correct: 10,
+		category_correct: 10,
+		score_in_range: 0,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-002",
+		description: "All deliverables fulfilled, final payment processed, performance metrics...",
+		expected: {
+			is_deal: true,
+			category: "completed",
+			likely_scam: false,
+			score_range: [
+				9,
+				10
+			]
+		},
+		detection_correct: 10,
+		category_correct: 10,
+		score_in_range: 0,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-003",
+		description: "Brand outreach for paid TikTok campaign. Creator responded but platform...",
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 10,
+		score_in_range: 0,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-004",
+		description: "Paid TikTok campaign for new creator-focused email product. Creator...",
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-005",
+		description: "Paid YouTube campaign for Dealsync with Kennedy Goebel. Creator engaged, and...",
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 10,
+		score_in_range: 0,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-006",
+		description: "Paid YouTube campaign outreach to creator Patricia. Creator declined in...",
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 4,
+		score_in_range: 7,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-007",
+		description: "Paid YouTube campaign thread with creator Fischip. Creator signaled they...",
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 4,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-008",
+		description: "Paid YouTube campaign opportunity outreach for Dealsync. Creator declined in...",
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 8,
+		score_in_range: 5,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-009",
+		description: "Paid YouTube campaign outreach to creator Daidai. Creator declined.",
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 8,
+		score_in_range: 3,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-010",
+		description: "Paid YouTube campaign outreach to creator Loren. Creator declined in thread...",
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 8,
+		score_in_range: 2,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-017",
+		description: "Cold B2B service outreach about employee benefits. NOT a scam despite .info...",
+		expected: {
+			is_deal: true,
+			category: "new",
+			likely_scam: false,
+			score_range: [
+				3,
+				4
+			]
+		},
+		detection_correct: 0,
+		category_correct: 0,
+		score_in_range: 0,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-019",
+		description: "Multi-message thread about paid YouTube campaign. Creator collaboration...",
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 10,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-020",
+		description: "Paid YouTube campaign opportunity with Dealsync. Active negotiation between...",
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 10,
+		score_in_range: 9,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-021",
+		description: "Paid YouTube collaboration for Dealsync. Active thread with creator...",
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 8,
+		score_in_range: 3,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-022",
+		description: "Paid YouTube campaign for Dealsync. Quick follow-up note from Creatorland...",
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 10,
+		score_in_range: 1,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-023",
+		description: "Multi-message thread about paid YouTube campaign with creator Tadii. Active...",
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 10,
+		score_in_range: 1,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-024",
+		description: "Paid YouTube campaign with Think Smart channel. Creator engaged, discussion...",
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 1,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-025",
+		description: "Paid YouTube campaign discussion with Future AI creator. Creator directed to...",
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 3,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-026",
+		description: "Multi-message paid YouTube campaign thread with creator Olivia Gudaniec....",
+		expected: {
+			is_deal: true,
+			category: "in_progress",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 10,
+		category_correct: 1,
+		score_in_range: 5,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-027",
+		description: "Paid YouTube campaign discussion with creator Danielle. Active collaboration...",
+		expected: {
+			is_deal: true,
+			category: "not_interested",
+			likely_scam: false,
+			score_range: [
+				7,
+				9
+			]
+		},
+		detection_correct: 6,
+		category_correct: 6,
+		score_in_range: 0,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-031",
+		description: "Scam: spoofed Nike domain (n1ke-collaborations.com), urgency pressure,...",
+		expected: {
+			is_deal: true,
+			category: "likely_scam",
+			likely_scam: true,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 10,
+		score_in_range: 2,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-032",
+		description: "Scam: tallium.info domain has no live website associated with it....",
+		expected: {
+			is_deal: true,
+			category: "likely_scam",
+			likely_scam: true,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 0,
+		scam_correct: 0,
+		total_runs: 10
+	},
+	{
+		id: "gt-034",
+		description: "Automated security notification with potential malicious links.",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-035",
+		description: "Scam: suspicious .info domain (nassaucapitalnavigation.info), unsolicited...",
+		expected: {
+			is_deal: true,
+			category: "likely_scam",
+			likely_scam: true,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 0,
+		scam_correct: 0,
+		total_runs: 10
+	},
+	{
+		id: "gt-036",
+		description: "Scam: phishing email impersonating Google Drive shared drive notification....",
+		expected: {
+			is_deal: true,
+			category: "likely_scam",
+			likely_scam: true,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 0,
+		category_correct: 0,
+		score_in_range: 7,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-039",
+		description: "Edge case: AI-powered networking intro that could be mistaken for a brand...",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 0,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-043",
+		description: "Newsletter: Digiday Daily industry newsletter about advertising/creator...",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-044",
+		description: "Newsletter: Digiday Daily newsletter about middle-tier creators in the...",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-045",
+		description: "Newsletter: beehiiv platform notification about community engagement badge....",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-047",
+		description: "Investor/VC: Short Squeez financial newsletter about private equity....",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-049",
+		description: "Investor/VC: Calendar acceptance for meeting between Plus 8 and Creatorland....",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 1,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-050",
+		description: "Newsletter",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-052",
+		description: "SaaS: GMass support thread about account management. Customer service...",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-054",
+		description: "Newsletter/article about AI and spreadsheets. Industry content marketing,...",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-057",
+		description: "Cold outreach for survey participation, not a brand deal",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 2,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-058",
+		description: "Personal/misc: Non-deal email from MBOX. Not a brand partnership.",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 2,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-059",
+		description: "Personal/misc: Non-deal email from MBOX. Not a brand partnership.",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 2,
+		category_correct: 0,
+		score_in_range: 0,
+		scam_correct: 10,
+		total_runs: 10
+	},
+	{
+		id: "gt-060",
+		description: "Personal/misc: Non-deal email from MBOX. Not a brand partnership.",
+		expected: {
+			is_deal: false,
+			category: null,
+			likely_scam: false,
+			score_range: [
+				1,
+				2
+			]
+		},
+		detection_correct: 10,
+		category_correct: 0,
+		score_in_range: 10,
+		scam_correct: 10,
+		total_runs: 10
+	}
+];
+var baseline = {
+	model: model,
+	temperature: temperature,
+	batch_size: batch_size,
+	prompt_hash: prompt_hash,
+	runs: runs,
+	successful_runs: successful_runs,
+	detection: detection,
+	categorization: categorization,
+	urgency_scoring: urgency_scoring,
+	scam_detection: scam_detection,
+	json_health: json_health,
+	cost: cost,
+	per_thread: per_thread
 };
 
 function compareMetric(valA, valB) {
@@ -38584,14 +39350,127 @@ function compareMetric(valA, valB) {
   return { a: +valA.toFixed(4), b: +valB.toFixed(4), delta, winner }
 }
 
+function generateReport(a, b, comparison, perCategoryComparison, jsonComparison, costComparison, regressions, passFail) {
+  const lines = [];
+  const pct = (v) => `${(v * 100).toFixed(1)}%`;
+  const delta = (d) => `${d > 0 ? '+' : ''}${d}`;
+  const winner = (w) => (w === 'tie' ? 'Tie' : w === 'a' ? 'A' : 'B');
+
+  lines.push('# A/B Eval Report');
+  lines.push('');
+
+  // Configuration
+  lines.push('## Configuration');
+  lines.push('');
+  lines.push('| | A | B |');
+  lines.push('|---|---|---|');
+  lines.push(`| Model | ${a.model || '-'} | ${b.model || '-'} |`);
+  lines.push(`| Prompt Hash | ${a.prompt_hash || '-'} | ${b.prompt_hash || '-'} |`);
+  lines.push(`| Runs | ${a.runs} | ${b.runs} |`);
+  lines.push(`| Temperature | ${a.temperature ?? '-'} | ${b.temperature ?? '-'} |`);
+  lines.push(`| Batch Size | ${a.batch_size ?? '-'} | ${b.batch_size ?? '-'} |`);
+  lines.push('');
+
+  // Detection Metrics
+  lines.push('## Detection Metrics');
+  lines.push('');
+  lines.push('| Metric | A | B | Delta | Winner |');
+  lines.push('|---|---|---|---|---|');
+  lines.push(`| Recall | ${pct(comparison.recall.a)} | ${pct(comparison.recall.b)} | ${delta(comparison.recall.delta)} | ${winner(comparison.recall.winner)} |`);
+  lines.push(`| Precision | ${pct(comparison.precision.a)} | ${pct(comparison.precision.b)} | ${delta(comparison.precision.delta)} | ${winner(comparison.precision.winner)} |`);
+  lines.push(`| F2 | ${pct(comparison.f2.a)} | ${pct(comparison.f2.b)} | ${delta(comparison.f2.delta)} | ${winner(comparison.f2.winner)} |`);
+  lines.push('');
+
+  // Sub-Metrics
+  lines.push('## Sub-Metrics');
+  lines.push('');
+  lines.push('| Metric | A | B | Delta | Winner |');
+  lines.push('|---|---|---|---|---|');
+  lines.push(`| Category Accuracy | ${pct(comparison.category_accuracy.a)} | ${pct(comparison.category_accuracy.b)} | ${delta(comparison.category_accuracy.delta)} | ${winner(comparison.category_accuracy.winner)} |`);
+  lines.push(`| Urgency Scoring | ${pct(comparison.score_in_range.a)} | ${pct(comparison.score_in_range.b)} | ${delta(comparison.score_in_range.delta)} | ${winner(comparison.score_in_range.winner)} |`);
+  lines.push(`| Scam Detection | ${pct(comparison.scam_detection.a)} | ${pct(comparison.scam_detection.b)} | ${delta(comparison.scam_detection.delta)} | ${winner(comparison.scam_detection.winner)} |`);
+  lines.push(`| Cost/Thread | $${costComparison.a} | $${costComparison.b} | ${delta(costComparison.delta)} | ${winner(costComparison.winner)} |`);
+  lines.push('');
+
+  // Per-Category Breakdown
+  lines.push('## Per-Category Breakdown');
+  lines.push('');
+  lines.push('| Category | A | B | Delta | Threads | Winner |');
+  lines.push('|---|---|---|---|---|---|');
+  for (const [cat, data] of Object.entries(perCategoryComparison)) {
+    lines.push(`| ${cat} | ${pct(data.a)} | ${pct(data.b)} | ${delta(data.delta)} | ${data.a_count} | ${winner(data.winner)} |`);
+  }
+  lines.push('');
+
+  // JSON Health
+  lines.push('## JSON Health');
+  lines.push('');
+  lines.push('| Metric | A | B | Delta |');
+  lines.push('|---|---|---|---|');
+  lines.push(`| Clean Parse Rate | ${pct(jsonComparison.clean_parse_rate.a)} | ${pct(jsonComparison.clean_parse_rate.b)} | ${delta(jsonComparison.clean_parse_rate.delta)} |`);
+  lines.push(`| Corrective Retry Rate | ${pct(jsonComparison.corrective_retry_rate.a)} | ${pct(jsonComparison.corrective_retry_rate.b)} | ${delta(jsonComparison.corrective_retry_rate.delta)} |`);
+  lines.push(`| Total Failures | ${jsonComparison.total_failures.a} | ${jsonComparison.total_failures.b} | - |`);
+  lines.push('');
+
+  // Regressions (only if any)
+  const hasRegressions = regressions.new_missed_deals.length > 0 || regressions.new_missed_scams.length > 0 || regressions.category_regressions.length > 0;
+  if (hasRegressions) {
+    lines.push('## Regressions');
+    lines.push('');
+    if (regressions.new_missed_deals.length > 0) {
+      lines.push(`- **New Missed Deals:** ${regressions.new_missed_deals.join(', ')}`);
+    }
+    if (regressions.new_missed_scams.length > 0) {
+      lines.push(`- **New Missed Scams:** ${regressions.new_missed_scams.join(', ')}`);
+    }
+    if (regressions.category_regressions.length > 0) {
+      lines.push(`- **Category Regressions:** ${regressions.category_regressions.join(', ')}`);
+    }
+    lines.push('');
+  }
+
+  // Pass/Fail Verdict
+  lines.push('## Pass/Fail Verdict');
+  lines.push('');
+  lines.push(`**${passFail.verdict}**`);
+  lines.push('');
+  lines.push('| Criterion | Result |');
+  lines.push('|---|---|');
+  for (const [key, val] of Object.entries(passFail)) {
+    if (key === 'verdict') continue
+    lines.push(`| ${key} | ${val ? 'PASS' : 'FAIL'} |`);
+  }
+  lines.push('');
+
+  // Recommendation
+  lines.push('## Recommendation');
+  lines.push('');
+  if (passFail.verdict === 'PASS') {
+    lines.push('Adopt **B** — all criteria passed.');
+  } else {
+    const failures = Object.entries(passFail)
+      .filter(([k, v]) => k !== 'verdict' && v === false)
+      .map(([k]) => k);
+    lines.push(`Keep **A** — B failed: ${failures.join(', ')}.`);
+  }
+  lines.push('');
+
+  return lines.join('\n')
+}
+
 async function runEvalCompare() {
   const resultAStr = coreExports.getInput('result-a');
   const resultBStr = coreExports.getInput('result-b');
 
-  if (!resultAStr || !resultBStr) throw new Error('result-a and result-b are required')
+  if (!resultBStr) throw new Error('result-b is required')
 
-  const a = JSON.parse(resultAStr);
+  // Use bundled eval/baseline.json when result-a is not provided
+  const a = resultAStr ? JSON.parse(resultAStr) : baseline;
   const b = JSON.parse(resultBStr);
+
+  if (!resultAStr) {
+    console.log(`[eval-compare] using bundled baseline (model=${a.model}, prompt=${a.prompt_hash || 'bundled'}, runs=${a.runs})`);
+  }
 
   // Side-by-side metric comparison
   const comparison = {
@@ -38665,10 +39544,10 @@ async function runEvalCompare() {
 
   // Pass/fail verdict
   const passFail = {
-    b_recall_above_95: b.detection.recall.mean >= THRESHOLDS.recall,
-    b_precision_above_40: b.detection.precision.mean >= THRESHOLDS.precision,
-    b_f2_above_baseline: b.detection.f2.mean >= a.detection.f2.mean,
-    b_consistency_within_3pct: b.detection.recall.stddev <= THRESHOLDS.consistency,
+    b_recall_above_min: b.detection.recall.mean >= thresholds.min_recall,
+    b_precision_above_min: b.detection.precision.mean >= thresholds.min_precision,
+    b_f2_non_regression: b.detection.f2.mean >= a.detection.f2.mean,
+    b_recall_stddev_ok: b.detection.recall.stddev <= thresholds.max_recall_stddev,
     no_new_missed_deals: newMissedDeals.length === 0,
     b_scam_no_regression: newMissedScams.length === 0,
     b_category_no_regression: b.categorization.accuracy.mean >= a.categorization.accuracy.mean,
@@ -38697,6 +39576,8 @@ async function runEvalCompare() {
     },
     pass_fail: passFail,
   };
+
+  result.report_markdown = generateReport(a, b, comparison, perCategoryComparison, jsonComparison, costComparison, result.regressions, passFail);
 
   const fmt = (d) => `${d > 0 ? '+' : ''}${d}`;
   console.log(`[eval-compare] verdict: ${passFail.verdict}`);
@@ -39074,6 +39955,267 @@ async function runFilterPipeline() {
     total_rejected: totalRejected,
     stuck_failed: stuckFailed,
   }
+}
+
+// --- Prompt building ---
+
+function groupByThread(emails) {
+  const threads = {};
+  for (const email of emails) {
+    const threadId = email.threadId || email.id;
+    if (!threads[threadId]) threads[threadId] = [];
+    threads[threadId].push(email);
+  }
+  return threads
+}
+
+function buildThreadData(emails) {
+  const threads = groupByThread(emails);
+  const parts = [];
+  const threadOrder = [];
+  let threadIndex = 0;
+
+  for (const [threadId, threadEmails] of Object.entries(threads)) {
+    threadIndex++;
+    threadOrder.push(threadId);
+    let section = `THREAD_ID_INDEX: ${threadIndex}\n`;
+    section += `MODE: FULL_THREAD\n`;
+    section += `Message Count: ${threadEmails.length}\n`;
+
+    const previousSummary = threadEmails[0].previousAiSummary;
+    section += `PREVIOUS_AI_SUMMARY: ${previousSummary || 'None'}\n\n`;
+
+    threadEmails.forEach((email, i) => {
+      const from = getHeader(email, 'from');
+      const date = getHeader(email, 'date');
+      const subject = getHeader(email, 'subject');
+      section += `[Message ${i + 1}]\n`;
+      section += `From: ${from}\n`;
+      section += `Date: ${date}\n`;
+      section += `Subject: ${subject}\n\n`;
+      const rawBody = email.body || email.replyBody || '';
+      const body = sanitizeEmailBody(rawBody) || '[no body]';
+      section += `${body}\n\n`;
+      if (rawBody.length > 5000) {
+        console.log(
+          `[ai-prompt] thread=${threadId} msg=${i + 1}: rawBody=${rawBody.length} chars → sanitized=${body.length} chars`,
+        );
+      }
+    });
+
+    section += '===\n';
+    parts.push(section);
+  }
+
+  return { text: parts.join('\n'), threadOrder }
+}
+
+function buildPrompt(emails, { systemOverride, userOverride, creatorEmail, model } = {}) {
+  const { text: threadData, threadOrder } = buildThreadData(emails);
+
+  // Select model-specific prompt: use Llama variant for Llama models
+  const isLlama = model && model.toLowerCase().includes('llama');
+  const defaultTemplate = isLlama ? systemTemplateLlama : systemTemplate;
+  const systemPrompt = (systemOverride || defaultTemplate).trim();
+
+  const creatorLine = creatorEmail ? `Creator email: ${creatorEmail}\n\n` : '';
+
+  const userPrompt = (userOverride || classificationInstructions)
+    .replace('{{THREAD_DATA}}', creatorLine + threadData)
+    .trim();
+
+  console.log(
+    `[ai-prompt] ${emails.length} emails, ${threadOrder.length} threads, ` +
+      `system=${systemPrompt.length} chars, user=${userPrompt.length} chars, ` +
+      `threadData=${threadData.length} chars`,
+  );
+
+  return { systemPrompt, userPrompt, threadOrder }
+}
+
+// --- Constants ---
+const AI_REQUEST_TIMEOUT_MS = 240000;
+const AI_RETRY_DELAY_MS = 2000;
+const MAX_HTTP_RETRIES = parseInt(coreExports.getInput('ai-max-retries') || '3', 10);
+const MAX_TOKENS = 20480;
+
+// --- Valid categories and deal types for validation ---
+const VALID_CATEGORIES = new Set([
+  'new',
+  'in_progress',
+  'completed',
+  'not_interested',
+  'likely_scam',
+  'low_confidence',
+]);
+const VALID_DEAL_TYPES = new Set([
+  'brand_collaboration',
+  'sponsorship',
+  'affiliate',
+  'product_seeding',
+  'ambassador',
+  'content_partnership',
+  'paid_placement',
+  'other_business',
+]);
+
+// --- AI client ---
+
+/**
+ * Call a model with HTTP retries + exponential backoff.
+ * Returns { content, usage } or throws on total failure.
+ *
+ * @param {string} model - Model ID
+ * @param {Array} messages - Chat messages
+ * @param {Object} opts - { temperature, apiUrl, apiKey }
+ */
+const MAX_RATE_LIMIT_WAITS = 10;
+
+async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = {}) {
+  let lastError;
+  let rateLimitWaits = 0;
+  for (let attempt = 1; attempt <= MAX_HTTP_RETRIES; attempt++) {
+    try {
+      console.log(`[ai-client] ${model} (attempt ${attempt}/${MAX_HTTP_RETRIES})`);
+      const resp = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          temperature,
+          max_tokens: MAX_TOKENS,
+          response_format: { type: 'json_object' },
+        }),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+      });
+
+      if (!resp.ok) {
+        const errBody = await resp.text().catch(() => '');
+        lastError = new Error(`HTTP ${resp.status}: ${errBody.substring(0, 500)}`);
+        console.log(`[ai-client] ${model} HTTP ${resp.status}: ${errBody.substring(0, 500)}`);
+
+        // 429: respect Retry-After or wait 5s, don't consume retry budget
+        if (resp.status === 429 && rateLimitWaits < MAX_RATE_LIMIT_WAITS) {
+          rateLimitWaits++;
+          const retryAfter = parseInt(resp.headers.get('retry-after') || '5', 10) * 1000;
+          console.log(
+            `[ai-client] ${model} rate limited (${rateLimitWaits}/${MAX_RATE_LIMIT_WAITS}), waiting ${retryAfter}ms`,
+          );
+          await sleep(retryAfter);
+          attempt--; // don't consume attempt
+          continue
+        }
+
+        if (attempt < MAX_HTTP_RETRIES) {
+          await sleep(backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS }));
+          continue
+        }
+        throw lastError
+      }
+
+      const result = await resp.json();
+      const content = result.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Empty response from model')
+
+      const usage = result.usage || {};
+      return { content, usage }
+    } catch (err) {
+      lastError = err;
+      if (attempt < MAX_HTTP_RETRIES) {
+        const delay = backoffMs(attempt - 1, { base: AI_RETRY_DELAY_MS });
+        console.log(
+          `[ai-client] ${model} attempt ${attempt} failed: ${err.message}, retrying in ${delay}ms`,
+        );
+        await sleep(delay);
+      }
+    }
+  }
+  throw lastError || new Error(`${model} failed after ${MAX_HTTP_RETRIES} attempts`)
+}
+
+/**
+ * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
+ * @param {string} raw — raw AI response
+ * @param {string[]} [threadOrder] — maps thread_index (1-based) to thread_id
+ */
+function parseAndValidate(raw, threadOrder) {
+  let content = raw.trim();
+
+  // Strip markdown fences
+  content = content
+    .replace(/^```(?:json)?\s*\n?/gi, '')
+    .replace(/\n?```\s*$/gi, '')
+    .trim();
+
+  // Try to find JSON array in mixed output
+  if (!content.startsWith('[')) {
+    const arrayStart = content.indexOf('[');
+    const arrayEnd = content.lastIndexOf(']');
+    if (arrayStart !== -1 && arrayEnd > arrayStart) {
+      content = content.slice(arrayStart, arrayEnd + 1);
+    }
+  }
+
+  // Parse
+  let parsed;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    // Try to extract from wrapper object like {"results": [...]}
+    const objStart = content.indexOf('{');
+    const objEnd = content.lastIndexOf('}');
+    if (objStart !== -1 && objEnd > objStart) {
+      const obj = JSON.parse(content.slice(objStart, objEnd + 1));
+      const arrays = Object.values(obj).filter(Array.isArray);
+      if (arrays.length === 1) {
+        parsed = arrays[0];
+      } else {
+        throw new Error('Cannot extract JSON array from response')
+      }
+    } else {
+      throw new Error('No valid JSON found in response')
+    }
+  }
+
+  // Unwrap if object with single array property
+  if (!Array.isArray(parsed)) {
+    const arrays = Object.values(parsed).filter(Array.isArray);
+    if (arrays.length === 1) {
+      parsed = arrays[0];
+    } else {
+      throw new Error('Response is not a JSON array')
+    }
+  }
+
+  // Schema validation and coercion
+  return parsed.map((r) => ({
+    thread_id:
+      threadOrder && r.thread_index != null
+        ? threadOrder[Math.max(0, Number(r.thread_index) - 1)] || String(r.thread_id || '')
+        : String(r.thread_id || ''),
+    is_deal: Boolean(r.is_deal),
+    is_english: r.is_english !== false,
+    language: r.language || null,
+    ai_score: Math.min(10, Math.max(1, Math.round(Number(r.ai_score) || 5))),
+    category: r.is_deal ? (VALID_CATEGORIES.has(r.category) ? r.category : 'low_confidence') : null,
+    likely_scam: Boolean(r.likely_scam) || r.category === 'likely_scam',
+    ai_insight: String(r.ai_insight || ''),
+    ai_summary: String(r.ai_summary || '').slice(0, 1000),
+    main_contact: r.is_deal ? r.main_contact || null : null,
+    deal_brand: r.is_deal ? r.deal_brand || null : null,
+    deal_type: r.is_deal
+      ? VALID_DEAL_TYPES.has(r.deal_type)
+        ? r.deal_type
+        : 'other_business'
+      : null,
+    deal_name: r.is_deal ? r.deal_name || null : null,
+    deal_value: r.deal_value != null ? Number(r.deal_value) : null,
+    deal_currency: r.deal_currency || null,
+  }))
 }
 
 /**

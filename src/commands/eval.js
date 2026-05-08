@@ -1,5 +1,8 @@
 import * as core from '@actions/core'
-import { buildPrompt, callModel, parseAndValidate } from '../lib/ai.js'
+import { buildPrompt, callModel, parseAndValidate } from '../lib/ai-v2.js'
+import { sleep, backoffMs } from '../lib/retry.js'
+
+const MAX_BATCH_ATTEMPTS = 10
 import { isRejected } from '../lib/emails.js'
 import {
   computeDetectionMetrics,
@@ -36,12 +39,18 @@ export async function runEval() {
   const batchSize = parseInt(core.getInput('batch-size') || '1', 10)
   const concurrency = parseInt(core.getInput('concurrency') || '10', 10)
   const promptHash = core.getInput('prompt-hash') || ''
+  const systemPromptInput = core.getInput('system-prompt') || ''
+  const userPromptInput = core.getInput('user-prompt') || ''
 
   if (!hyperbolicKey) throw new Error('ai-api-key is required for eval')
 
-  // Fetch prompts from a specific commit hash, or use bundled defaults
+  // Priority: direct prompt inputs > commit hash > bundled defaults
   let promptOverrides = {}
-  if (promptHash) {
+  if (systemPromptInput || userPromptInput) {
+    console.log(`[eval] using inline prompt overrides (system=${systemPromptInput.length} chars, user=${userPromptInput.length} chars)`)
+    if (systemPromptInput) promptOverrides.systemOverride = systemPromptInput
+    if (userPromptInput) promptOverrides.userOverride = userPromptInput
+  } else if (promptHash) {
     console.log(`[eval] fetching prompts from commit ${promptHash}`)
     promptOverrides = await fetchPromptsByHash(promptHash)
   }
@@ -74,18 +83,18 @@ export async function runEval() {
   let totalInputTokens = 0
   let totalOutputTokens = 0
 
+  // Split ground truth into batches (0 = all at once) — same for every run
+  const batches = []
+  if (batchSize > 0) {
+    for (let i = 0; i < usableEntries.length; i += batchSize) {
+      batches.push(usableEntries.slice(i, i + batchSize))
+    }
+  } else {
+    batches.push(usableEntries)
+  }
+
   for (let run = 1; run <= numRuns; run++) {
     console.log(`[eval] --- run ${run}/${numRuns} ---`)
-
-    // Split ground truth into batches (0 = all at once)
-    const batches = []
-    if (batchSize > 0) {
-      for (let i = 0; i < usableEntries.length; i += batchSize) {
-        batches.push(usableEntries.slice(i, i + batchSize))
-      }
-    } else {
-      batches.push(usableEntries)
-    }
 
     const runHealth = {
       clean: 0,
@@ -98,48 +107,42 @@ export async function runEval() {
     // Process batches with concurrency pool
     async function processBatch(batch, batchIdx) {
       const allEmails = batch.flatMap((gt) => gt.emails)
-      const { systemPrompt, userPrompt } = buildPrompt(allEmails, promptOverrides)
+      const { systemPrompt, userPrompt, threadOrder } = buildPrompt(allEmails, promptOverrides)
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
       ]
 
-      let rawContent = null
-      let usage = {}
-      try {
-        const result = await callModel(model, messages, { temperature, ...aiOpts })
-        rawContent = result.content
-        usage = result.usage || {}
-      } catch (apiErr) {
-        console.log(`[eval] run ${run} batch ${batchIdx + 1} API failed: ${apiErr.message}`)
-        return { threads: [], health: 'failed', usage }
-      }
-
-      // Layer 1: Local JSON repair
-      try {
-        const parsed = parseAndValidate(rawContent)
-        return { threads: parsed, health: 'clean', usage }
-      } catch (parseErr) {
-        // Layer 2: Corrective retry
+      for (let attempt = 1; attempt <= MAX_BATCH_ATTEMPTS; attempt++) {
+        let rawContent = null
+        let usage = {}
         try {
-          const correctiveMessages = [
-            ...messages,
-            { role: 'assistant', content: rawContent },
-            {
-              role: 'user',
-              content: `Your previous response could not be parsed as valid JSON.\n\nParse error:\n${parseErr.message}\n\nPlease return the corrected classification as a valid JSON array. Fix only the JSON formatting. Return ONLY the JSON array.`,
-            },
-          ]
-          const corrected = await callModel(model, correctiveMessages, {
-            temperature: 0,
-            ...aiOpts,
-          })
-          const parsed = parseAndValidate(corrected.content)
-          return { threads: parsed, health: 'corrective_retry', usage }
-        } catch (correctiveErr) {
-          console.log(
-            `[eval] run ${run} batch ${batchIdx + 1}: corrective retry failed: ${correctiveErr.message}`,
-          )
+          const result = await callModel(model, messages, { temperature, ...aiOpts })
+          rawContent = result.content
+          usage = result.usage || {}
+        } catch (apiErr) {
+          console.log(`[eval] run ${run} batch ${batchIdx + 1} attempt ${attempt}/${MAX_BATCH_ATTEMPTS} API failed: ${apiErr.message}`)
+          if (attempt < MAX_BATCH_ATTEMPTS) {
+            const delay = backoffMs(attempt - 1, { base: 2000, max: 30000, jitter: true })
+            console.log(`[eval] retrying batch ${batchIdx + 1} in ${delay}ms`)
+            await sleep(delay)
+            continue
+          }
+          return { threads: [], health: 'failed', usage }
+        }
+
+        // json_schema enforces structure — just parse and coerce
+        try {
+          const parsed = parseAndValidate(rawContent, threadOrder)
+          return { threads: parsed, health: 'clean', usage }
+        } catch (parseErr) {
+          console.log(`[eval] run ${run} batch ${batchIdx + 1} attempt ${attempt}/${MAX_BATCH_ATTEMPTS} parse failed: ${parseErr.message}`)
+          if (attempt < MAX_BATCH_ATTEMPTS) {
+            const delay = backoffMs(attempt - 1, { base: 2000, max: 30000, jitter: true })
+            console.log(`[eval] retrying batch ${batchIdx + 1} in ${delay}ms`)
+            await sleep(delay)
+            continue
+          }
           return { threads: [], health: 'failed', usage }
         }
       }

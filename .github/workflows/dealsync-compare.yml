@@ -1,0 +1,34 @@
+# Compare Workflow — compare two eval results directly
+#
+# Pass result_a and result_b as JSON inputs. If result_a is empty,
+# compares against eval/baseline.json bundled in the action.
+#
+# Use this when you already have eval results and just want the report.
+
+name: dealsync-compare
+on:
+  workflow_dispatch:
+    inputs:
+      result_a:
+        type: string
+        description: 'Eval result JSON for variant A (empty = use bundled baseline)'
+        default: ''
+      result_b:
+        type: string
+        description: 'Eval result JSON for variant B (required)'
+        default: ''
+
+jobs:
+  compare:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    environment: '0x248d3b31f1ffc78c4dcd0993da48b6568fe1f58cfac9f61554804f505dafd140'
+    steps:
+      - id: compare
+        name: Compare results
+        timeout-minutes: 60
+        uses: creatorland/dealsync-action@04f5c30
+        with:
+          command: eval-compare
+          result-a: ${{ inputs.result_a || '' }}
+          result-b: ${{ inputs.result_b || '' }}

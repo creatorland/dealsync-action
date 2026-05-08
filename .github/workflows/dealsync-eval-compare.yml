@@ -1,0 +1,68 @@
+# Eval + Compare Workflow — evaluate a candidate prompt against the saved baseline
+#
+# Runs eval on the candidate, then compares against eval/baseline.json.
+# To update the baseline: run dealsync-eval, copy the result JSON to eval/baseline.json, PR it.
+#
+# NOTE: W3 does not currently resolve ${{ inputs.X }} expressions.
+# To change settings, edit the default values below and redeploy.
+
+name: dealsync-eval-compare
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        type: string
+        description: Model to evaluate
+        default: 'deepseek/deepseek-chat-v3-0324'
+      prompt_hash:
+        type: string
+        description: 'Candidate prompt commit hash (empty = use bundled prompts)'
+        default: ''
+      runs:
+        type: string
+        description: Number of eval runs
+        default: '10'
+      temperature:
+        type: string
+        description: AI temperature
+        default: '0'
+      batch_size:
+        type: string
+        description: Threads per AI call
+        default: '5'
+
+jobs:
+  eval-candidate:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    environment: '0x248d3b31f1ffc78c4dcd0993da48b6568fe1f58cfac9f61554804f505dafd140'
+    outputs:
+      result: ${{ steps.run-eval.outputs.result }}
+    steps:
+      - id: run-eval
+        name: Evaluate candidate
+        timeout-minutes: 60
+        uses: creatorland/dealsync-action@30b0887
+        with:
+          command: eval
+          ai-api-key: ${{ secrets.AI_API_KEY }}
+          ai-api-url: ${{ secrets.AI_API_URL }}
+          ai-primary-model: ${{ inputs.model || 'deepseek/deepseek-chat-v3-0324' }}
+          prompt-hash: ${{ inputs.prompt_hash || '' }}
+          runs: ${{ inputs.runs || '10' }}
+          temperature: ${{ inputs.temperature || '0' }}
+          batch-size: ${{ inputs.batch_size || '5' }}
+
+  compare:
+    timeout-minutes: 60
+    needs: [eval-candidate]
+    runs-on: ubuntu-latest
+    environment: '0x248d3b31f1ffc78c4dcd0993da48b6568fe1f58cfac9f61554804f505dafd140'
+    steps:
+      - id: compare
+        name: Compare against baseline
+        timeout-minutes: 60
+        uses: creatorland/dealsync-action@30b0887
+        with:
+          command: eval-compare
+          result-b: ${{ needs.eval-candidate.outputs.result }}

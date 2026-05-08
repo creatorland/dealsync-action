@@ -1,0 +1,58 @@
+# Eval Workflow — run a single variant against ground truth
+#
+# Available models (OpenRouter):
+#   deepseek/deepseek-chat-v3-0324           (default, current production)
+#   deepseek/deepseek-r1-0528                (reasoning, newest)
+#   deepseek/deepseek-r1                     (reasoning)
+#   qwen/qwen3-coder-480b-a35b-instruct      (coder, newest)
+#   meta-llama/llama-3.3-70b-instruct        (smallest)
+#
+# NOTE: W3 does not currently resolve ${{ inputs.X }} expressions.
+# To change settings, edit the default values below and redeploy.
+
+name: dealsync-eval
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        type: string
+        description: Model to evaluate
+        default: 'deepseek/deepseek-chat-v3-0324'
+      prompt_hash:
+        type: string
+        description: 'Prompt commit hash (empty = use bundled prompts)'
+        default: ''
+      runs:
+        type: string
+        description: Number of eval runs
+        default: '10'
+      temperature:
+        type: string
+        description: AI temperature
+        default: '0'
+      batch_size:
+        type: string
+        description: Threads per AI call
+        default: '5'
+
+jobs:
+  eval:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    environment: '0x248d3b31f1ffc78c4dcd0993da48b6568fe1f58cfac9f61554804f505dafd140'
+    outputs:
+      result: ${{ steps.run-eval.outputs.result }}
+    steps:
+      - id: run-eval
+        name: Run evaluation
+        timeout-minutes: 60
+        uses: creatorland/dealsync-action@30b0887
+        with:
+          command: eval
+          ai-api-key: ${{ secrets.AI_API_KEY }}
+          ai-api-url: ${{ secrets.AI_API_URL }}
+          ai-primary-model: ${{ inputs.model || 'deepseek/deepseek-chat-v3-0324' }}
+          prompt-hash: ${{ inputs.prompt_hash || '' }}
+          runs: ${{ inputs.runs || '10' }}
+          temperature: ${{ inputs.temperature || '0' }}
+          batch-size: ${{ inputs.batch_size || '5' }}

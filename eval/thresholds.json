@@ -1,0 +1,9 @@
+{
+  "min_recall": 0.95,
+  "min_precision": 0.40,
+  "max_recall_stddev": 0.03,
+  "require_f2_non_regression": true,
+  "require_no_new_missed_deals": true,
+  "require_no_scam_regression": true,
+  "require_no_category_regression": true
+}

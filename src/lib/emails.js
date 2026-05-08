@@ -26,8 +26,6 @@ export function getHeader(email, name) {
   return header?.value || ''
 }
 
-const MAX_BODY_CHARS = 3000 // Per email — keeps token usage reasonable for batches of 5
-
 /**
  * Sanitize an email body for AI classification.
  * @param {string} body - Raw email body (may be HTML or plaintext)
@@ -69,11 +67,6 @@ export function sanitizeEmailBody(body) {
     .replace(/[ \t]{2,}/g, ' ') // Collapse horizontal whitespace
     .replace(/^\s+$/gm, '') // Remove whitespace-only lines
     .trim()
-
-  // Step 4: Truncate
-  if (text.length > MAX_BODY_CHARS) {
-    text = text.substring(0, MAX_BODY_CHARS) + '\n[... truncated]'
-  }
 
   return text
 }
