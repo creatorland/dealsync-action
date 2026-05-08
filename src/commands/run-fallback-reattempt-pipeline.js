@@ -125,9 +125,7 @@ export async function runFallbackReattemptPipeline() {
     )
   }
   if (!backendBaseUrl || !sharedSecret) {
-    throw new Error(
-      'dealsync-backend-base-url and dealsync-v2-shared-secret are required',
-    )
+    throw new Error('dealsync-backend-base-url and dealsync-v2-shared-secret are required')
   }
 
   const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks(
@@ -155,9 +153,7 @@ export async function runFallbackReattemptPipeline() {
         try {
           ;({ userId, syncStateId } = extractRowFields(row))
         } catch (err) {
-          core.error(
-            `[fallback-reattempt] cid=${cid} skip invalid row: ${err.message}`,
-          )
+          core.error(`[fallback-reattempt] cid=${cid} skip invalid row: ${err.message}`)
           errors++
           return
         }

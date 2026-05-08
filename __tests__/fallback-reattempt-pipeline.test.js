@@ -8,10 +8,7 @@ import {
 
 describe('fallbackReattemptEligibility.selectUnreattemptedFallbacks', () => {
   it('builds an SQL string scoped to LOOKBACK + failed + fallback_reason set', () => {
-    const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks(
-      'EMAIL_CORE_STAGING',
-      200,
-    )
+    const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks('EMAIL_CORE_STAGING', 200)
     expect(sql).toContain('EMAIL_CORE_STAGING.sync_states')
     expect(sql).toMatch(/sync_strategy\s*=\s*'LOOKBACK'/)
     expect(sql).toMatch(/status\s*=\s*'failed'/)
@@ -19,30 +16,21 @@ describe('fallbackReattemptEligibility.selectUnreattemptedFallbacks', () => {
   })
 
   it('enforces the one-shot guarantee via originating_sync_state_id IS NULL + NOT EXISTS successor', () => {
-    const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks(
-      'EMAIL_CORE_STAGING',
-      50,
-    )
+    const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks('EMAIL_CORE_STAGING', 50)
     expect(sql).toMatch(/originating_sync_state_id IS NULL/)
     expect(sql).toMatch(/NOT EXISTS\s*\(/)
     expect(sql).toMatch(/originating_sync_state_id\s*=\s*ss\.id/)
   })
 
   it('bounds history to 7 days so ancient failures do not get re-attempted', () => {
-    const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks(
-      'EMAIL_CORE_STAGING',
-      50,
-    )
+    const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks('EMAIL_CORE_STAGING', 50)
     // Uses INTERVAL 'N' MINUTE (proven against SxT in deal-states.js) rather
     // than the unverified DAY unit; 7 days = 10080 minutes.
     expect(sql).toMatch(/INTERVAL\s+'10080'\s+MINUTE/i)
   })
 
   it('LIMITs by the requested batch size', () => {
-    const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks(
-      'EMAIL_CORE_STAGING',
-      77,
-    )
+    const sql = fallbackReattemptEligibility.selectUnreattemptedFallbacks('EMAIL_CORE_STAGING', 77)
     expect(sql).toMatch(/LIMIT 77\s*$/)
   })
 
@@ -133,11 +121,10 @@ describe('postFallbackReattempt', () => {
     })
     global.fetch = fetchMock
 
-    const res = await postFallbackReattempt(
-      'https://backend.example/api',
-      's3cret',
-      { userId: 'user-1', originatingSyncStateId: 'sync-60d' },
-    )
+    const res = await postFallbackReattempt('https://backend.example/api', 's3cret', {
+      userId: 'user-1',
+      originatingSyncStateId: 'sync-60d',
+    })
 
     expect(res).toEqual({ ok: true, status: 200 })
     expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -157,11 +144,10 @@ describe('postFallbackReattempt', () => {
   it('treats 409 as success (already in progress)', async () => {
     global.fetch = jest.fn().mockResolvedValue({ status: 409, ok: false })
 
-    const res = await postFallbackReattempt(
-      'https://backend.example/api',
-      's',
-      { userId: 'u', originatingSyncStateId: 'orig' },
-    )
+    const res = await postFallbackReattempt('https://backend.example/api', 's', {
+      userId: 'u',
+      originatingSyncStateId: 'orig',
+    })
 
     expect(res).toEqual({ ok: true, status: 409 })
   })
@@ -173,11 +159,10 @@ describe('postFallbackReattempt', () => {
       text: jest.fn().mockResolvedValue('boom'),
     })
 
-    const res = await postFallbackReattempt(
-      'https://backend.example/api',
-      's',
-      { userId: 'u', originatingSyncStateId: 'orig' },
-    )
+    const res = await postFallbackReattempt('https://backend.example/api', 's', {
+      userId: 'u',
+      originatingSyncStateId: 'orig',
+    })
 
     expect(res.ok).toBe(false)
     expect(res.status).toBe(500)
@@ -188,11 +173,10 @@ describe('postFallbackReattempt', () => {
     const fetchMock = jest.fn().mockResolvedValue({ status: 200, ok: true })
     global.fetch = fetchMock
 
-    await postFallbackReattempt(
-      'https://backend.example/api///',
-      's',
-      { userId: 'u', originatingSyncStateId: 'orig' },
-    )
+    await postFallbackReattempt('https://backend.example/api///', 's', {
+      userId: 'u',
+      originatingSyncStateId: 'orig',
+    })
 
     const [url] = fetchMock.mock.calls[0]
     expect(url).toBe('https://backend.example/api/v1/dealsync-v2/sync/ingestion-trigger')

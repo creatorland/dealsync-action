@@ -248,7 +248,14 @@ function enrichAndCollect(emails, allEmails, metaByMessageId) {
  * email-service now returns matching HTTP status codes (200/207/502).
  */
 async function fetchEmailsFromService(messageIds, metaByMessageId, opts) {
-  const { emailServiceUrl, userId, fetchTimeoutMs, chunkSize, maxRetries = DEFAULT_MAX_RETRIES, format } = opts
+  const {
+    emailServiceUrl,
+    userId,
+    fetchTimeoutMs,
+    chunkSize,
+    maxRetries = DEFAULT_MAX_RETRIES,
+    format,
+  } = opts
 
   if (!messageIds || messageIds.length === 0) return []
 

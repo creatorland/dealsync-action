@@ -174,9 +174,7 @@ describe('dealStates', () => {
     })
 
     it('rejects invalid mega batch ID', () => {
-      expect(() =>
-        dealStates.restampSubBatches(S, "'; DROP TABLE --", [])
-      ).toThrow('Invalid ID')
+      expect(() => dealStates.restampSubBatches(S, "'; DROP TABLE --", [])).toThrow('Invalid ID')
     })
   })
 

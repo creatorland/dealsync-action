@@ -7,11 +7,13 @@ import { runClassifyPipeline } from './commands/run-classify-pipeline.js'
 import { runRecoveryPipeline } from './commands/run-recovery-pipeline.js'
 import { runEmitScanCompleteWebhooks } from './commands/emit-scan-complete-webhooks.js'
 import { runFallbackReattemptPipeline } from './commands/run-fallback-reattempt-pipeline.js'
+import { runBrandContactsBackfill } from './commands/run-brand-contacts-backfill.js'
 
 const COMMANDS = {
   'sync-deal-states': runSyncDealStates,
   eval: runEval,
   'eval-compare': runEvalCompare,
+  'run-brand-contacts-backfill': runBrandContactsBackfill,
   'run-filter-pipeline': runFilterPipeline,
   'run-classify-pipeline': runClassifyPipeline,
   'run-recovery-pipeline': runRecoveryPipeline,

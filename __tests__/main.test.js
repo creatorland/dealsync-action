@@ -48,6 +48,22 @@ jest.unstable_mockModule('../src/commands/run-fallback-reattempt-pipeline.js', (
     .mockResolvedValue({ scanned: 0, posted: 0, alreadyInProgress: 0, errors: 0 }),
 }))
 
+jest.unstable_mockModule('../src/commands/run-brand-contacts-backfill.js', () => ({
+  runBrandContactsBackfill: jest.fn().mockResolvedValue({
+    correlationId: 'test-cid',
+    usersConsidered: 0,
+    usersEligible: 0,
+    usersSkippedRevoked: 0,
+    usersSkippedNoToken: 0,
+    usersSkippedAlreadyInFlight: 0,
+    dispatched: 0,
+    dispatchSkippedAlreadyInProgress: 0,
+    dispatchFailed: 0,
+    durationMs: 100,
+    attributionTag: 'brand-contacts-backfill',
+  }),
+}))
+
 const core = await import('@actions/core')
 const { run } = await import('../src/main.js')
 
@@ -85,6 +101,19 @@ describe('dealsync main (command router)', () => {
       posted: 0,
       errors: 0,
     })
+  })
+
+  it('routes run-brand-contacts-backfill (Story 2.4 / dealsync-v2#474)', async () => {
+    core.getInput.mockImplementation((name) =>
+      name === 'command' ? 'run-brand-contacts-backfill' : '',
+    )
+
+    await run()
+
+    expect(outputs['success']).toBe('true')
+    const result = JSON.parse(outputs['result'])
+    expect(result.attributionTag).toBe('brand-contacts-backfill')
+    expect(result.correlationId).toBe('test-cid')
   })
 
   it('routes run-fallback-reattempt-pipeline (Phase 3 / dealsync-v2#522)', async () => {

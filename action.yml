@@ -1,10 +1,10 @@
 name: 'Dealsync'
-description: 'Dealsync pipeline action — run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, sync-deal-states, emit-scan-complete-webhooks, run-fallback-reattempt-pipeline, eval, eval-compare'
+description: 'Dealsync pipeline action — run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, run-brand-contacts-backfill, sync-deal-states, emit-scan-complete-webhooks, run-fallback-reattempt-pipeline, eval, eval-compare'
 author: 'creatorland'
 
 inputs:
   command:
-    description: 'Operation: run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, sync-deal-states, emit-scan-complete-webhooks, run-fallback-reattempt-pipeline, eval, eval-compare'
+    description: 'Operation: run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, run-brand-contacts-backfill, sync-deal-states, emit-scan-complete-webhooks, run-fallback-reattempt-pipeline, eval, eval-compare'
     required: true
   sxt-auth-url:
     description: 'SxT auth proxy URL'
@@ -111,11 +111,11 @@ inputs:
     description: 'Max HTTP retries for email service calls'
     default: '3'
   dealsync-backend-base-url:
-    description: 'Backend API base URL. Trailing slashes are OK and will be trimmed. Required for emit-scan-complete-webhooks.'
+    description: 'Backend API base URL. Trailing slashes are OK and will be trimmed. Required for emit-scan-complete-webhooks, run-fallback-reattempt-pipeline, run-brand-contacts-backfill.'
   dealsync-v2-shared-secret:
-    description: 'DEALSYNC_V2_SHARED_SECRET for x-shared-secret on webhook POST. Required for emit-scan-complete-webhooks.'
+    description: 'DEALSYNC_V2_SHARED_SECRET for x-shared-secret on backend POSTs. Required for emit-scan-complete-webhooks, run-fallback-reattempt-pipeline, run-brand-contacts-backfill.'
   firestore-service-account-json:
-    description: 'GCP service account JSON (full object) for Firestore REST read of users/{id}.scanCompleteSentAt; must include a non-empty project_id. Required for emit-scan-complete-webhooks unless env FIRESTORE_SERVICE_ACCOUNT_JSON is set to the same stringified JSON with a non-empty project_id.'
+    description: 'GCP service account JSON (full object) for Firestore REST. Must include a non-empty project_id. Required for emit-scan-complete-webhooks (read users/{id}.scanCompleteSentAt) and run-brand-contacts-backfill (paginate users + check users-sensitive-data tokens). Env FIRESTORE_SERVICE_ACCOUNT_JSON accepted as fallback when input is empty.'
   scan-complete-webhook-concurrency:
     description: 'Max parallel Firestore reads + webhook POSTs per batch (emit-scan-complete-webhooks)'
     default: '5'
@@ -128,6 +128,20 @@ inputs:
   fallback-reattempt-batch-size:
     description: 'Max unreattempted-fallback rows returned per cron run (LIMIT on SxT eligibility query). One-shot guarantee + 7-day history bound make this safe to cap (run-fallback-reattempt-pipeline).'
     default: '200'
+  gcp-project-id:
+    description: 'GCP project ID for Firestore REST API calls. Required when command is run-brand-contacts-backfill; falls back to project_id from firestore-service-account-json if not set.'
+  backfill-batch-size:
+    description: 'Max tier-eligible users to dispatch per cron run (run-brand-contacts-backfill).'
+    default: '75'
+  backfill-concurrency:
+    description: 'Max parallel token checks + backend POSTs per batch (run-brand-contacts-backfill).'
+    default: '5'
+  backfill-attribution-tag:
+    description: 'Attribution tag sent to backend on each backfill dispatch (run-brand-contacts-backfill). Must match core-email-metadata-ingestion BRAND_CONTACTS_BACKFILL_TAG.'
+    default: 'brand-contacts-backfill'
+  backfill-dry-run:
+    description: 'When true, backend skips Gmail fetch + downstream side-effects (run-brand-contacts-backfill).'
+    default: 'false'
 
 outputs:
   success:

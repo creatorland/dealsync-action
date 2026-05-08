@@ -79,9 +79,7 @@ async function deadLetterExhausted(exec, schema, activeStatus, batchType) {
     const bid = row.BATCH_ID
     const safeBid = sanitizeId(bid)
 
-    const countRows = await exec(
-      dealStatesSql.countByBatchAndStatus(schema, safeBid, activeStatus),
-    )
+    const countRows = await exec(dealStatesSql.countByBatchAndStatus(schema, safeBid, activeStatus))
     const n = Number(countRows?.[0]?.C ?? 0) || 0
     if (n === 0) continue
 
