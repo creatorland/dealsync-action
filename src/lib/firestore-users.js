@@ -285,7 +285,9 @@ export async function checkLegacyTokenPresence({ tokenProvider, gcpProjectId, us
     } catch (err) {
       // Network-level failure (DNS, connection refused, AbortSignal timeout).
       // These are exactly the transient cases retry exists for.
-      lastErr = new Error(`Firestore token check network failure for userId=${userId}: ${err.message}`)
+      lastErr = new Error(
+        `Firestore token check network failure for userId=${userId}: ${err.message}`,
+      )
       continue
     }
 
@@ -303,9 +305,7 @@ export async function checkLegacyTokenPresence({ tokenProvider, gcpProjectId, us
     // caller's fault (auth, permissions, malformed request) — don't burn retries.
     const text = await resp.text().catch(() => '<unreadable>')
     const truncated = text.slice(0, 500)
-    lastErr = new Error(
-      `Firestore token check ${resp.status} for userId=${userId}: ${truncated}`,
-    )
+    lastErr = new Error(`Firestore token check ${resp.status} for userId=${userId}: ${truncated}`)
     if (resp.status < 500) break
   }
 

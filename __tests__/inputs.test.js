@@ -17,12 +17,12 @@ describe('parsePositiveIntegerInput', () => {
 
   it('enforces optional upper bound — fail fast on misconfig', () => {
     expect(parsePositiveIntegerInput('500', 'batch-size', { max: 500 })).toBe(500)
-    expect(() =>
-      parsePositiveIntegerInput('501', 'batch-size', { max: 500 }),
-    ).toThrow(/must be ≤ 500/)
-    expect(() =>
-      parsePositiveIntegerInput('999999999', 'batch-size', { max: 500 }),
-    ).toThrow(/must be ≤ 500/)
+    expect(() => parsePositiveIntegerInput('501', 'batch-size', { max: 500 })).toThrow(
+      /must be ≤ 500/,
+    )
+    expect(() => parsePositiveIntegerInput('999999999', 'batch-size', { max: 500 })).toThrow(
+      /must be ≤ 500/,
+    )
   })
 
   it('without a max, accepts arbitrarily large positive integers (backwards-compat)', () => {

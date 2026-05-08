@@ -40391,12 +40391,49 @@ async function runRecoveryPipeline() {
  * @param {string} inputName
  * @returns {number}
  */
-function parsePositiveIntegerInput(raw, inputName) {
+/**
+ * @param {string} raw
+ * @param {string} inputName
+ * @param {{ max?: number }} [opts]
+ * @returns {number}
+ */
+function parsePositiveIntegerInput(raw, inputName, opts = {}) {
   const normalized = String(raw ?? '').trim();
   if (!/^[1-9][0-9]*$/.test(normalized)) {
     throw new Error(`${inputName} must be a positive integer`)
   }
-  return Number(normalized)
+  const value = Number(normalized);
+  if (opts.max != null && value > opts.max) {
+    throw new Error(
+      `${inputName} must be ≤ ${opts.max} (got ${value}); higher values risk OOM / time-out on the GitHub Actions runner`,
+    )
+  }
+  return value
+}
+
+/**
+ * Parse a boolean-shaped action input with explicit whitelist semantics.
+ * Empty / unset → caller's default. Recognized truthy: 'true' / '1' / 'yes'.
+ * Recognized falsy: 'false' / '0' / 'no'. Anything else throws — protects
+ * against typos like 'treu' silently falling back to the default and (for
+ * destructive operations like `backfill-dry-run`) running live when the
+ * operator intended dry-run.
+ *
+ * @param {string} raw
+ * @param {string} inputName
+ * @param {boolean} defaultValue
+ * @returns {boolean}
+ */
+function parseStrictBoolean(raw, inputName, defaultValue) {
+  const normalized = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  if (normalized === '') return defaultValue
+  if (['true', '1', 'yes'].includes(normalized)) return true
+  if (['false', '0', 'no'].includes(normalized)) return false
+  throw new Error(
+    `${inputName} must be one of: true, false, 1, 0, yes, no (case-insensitive); got "${raw}"`,
+  )
 }
 
 /**
@@ -41053,17 +41090,36 @@ async function runFallbackReattemptPipeline() {
 
 const FIRESTORE_BASE = 'https://firestore.googleapis.com/v1';
 
+// Retry policy for transient network failures on Firestore REST GETs:
+// 3 attempts (initial + 2 retries), exponential backoff 500ms → 2s.
+// Sized for sub-5s p99 wall-clock per user under typical Firestore latency,
+// keeping the per-batch fan-out within the action's 30-min job timeout
+// even at concurrency=5 with worst-case retries on every user.
+const TOKEN_CHECK_MAX_ATTEMPTS = 3;
+const TOKEN_CHECK_BACKOFF_BASE_MS = 500;
+const TOKEN_CHECK_BACKOFF_MAX_MS = 2000;
+
 /**
  * Async generator yielding pages of tier-eligible users from Firestore REST runQuery.
- * Filter: permissionTier.tier == 'readonly' AND permissionTier.tierRevokedAt == null.
+ * Filter: permissionTier.tier == 'readonly' (single equality — does NOT require a
+ * composite index). The caller applies in-memory filters for `tierRevokedAt`,
+ * `backfillCircuitBrokenAt`, and `backfillDispatchedAt`.
+ *
+ * Why single-equality only on the wire: a composite filter combining
+ * `tier == 'readonly'` AND `tierRevokedAt IS_NULL` requires a Firestore composite
+ * index `(permissionTier.tier, permissionTier.tierRevokedAt, __name__)`, which is
+ * a deploy-time gate (must be provisioned via Firestore Console / Terraform before
+ * the first run, otherwise the API returns FAILED_PRECONDITION). Filtering
+ * `tierRevokedAt` in-memory eliminates the index dependency at the cost of a
+ * larger raw fetch — `revokedRate` of the readonly cohort scales the over-fetch.
+ * For the BC backlog of ~4,116 users with very-low revoke rate this is trivial.
+ *
  * Orders by __name__ for stable cursor pagination.
  *
- * Pages are fetched in chunks of `max(batchSize * 4, 200)` raw documents; the caller
- * applies the in-memory `backfillCircuitBrokenAt` filter and is responsible for
- * `break`ing once it has accumulated enough eligible candidates. The generator paginates
- * until Firestore returns a short page (natural end). This avoids the prior cap on raw
- * page size that could starve the caller of eligible candidates when revoked /
- * circuit-broken users dominate a single page.
+ * Pages are fetched in chunks of `max(batchSize * 4, 200)` raw documents; the
+ * caller is responsible for `break`ing once it has accumulated enough eligible
+ * candidates. The generator paginates until Firestore returns a short page
+ * (natural end).
  *
  * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, batchSize: number }} opts
  * @yields {{ userId: string, permissionTier: object }[]}
@@ -41079,23 +41135,10 @@ async function* paginateTierEligibleUsers({ tokenProvider, gcpProjectId, batchSi
     const structuredQuery = {
       from: [{ collectionId: 'users' }],
       where: {
-        compositeFilter: {
-          op: 'AND',
-          filters: [
-            {
-              fieldFilter: {
-                field: { fieldPath: 'permissionTier.tier' },
-                op: 'EQUAL',
-                value: { stringValue: 'readonly' },
-              },
-            },
-            {
-              unaryFilter: {
-                field: { fieldPath: 'permissionTier.tierRevokedAt' },
-                op: 'IS_NULL',
-              },
-            },
-          ],
+        fieldFilter: {
+          field: { fieldPath: 'permissionTier.tier' },
+          op: 'EQUAL',
+          value: { stringValue: 'readonly' },
         },
       },
       orderBy: [{ field: { fieldPath: '__name__' }, direction: 'ASCENDING' }],
@@ -41113,19 +41156,31 @@ async function* paginateTierEligibleUsers({ tokenProvider, gcpProjectId, batchSi
       };
     }
 
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ structuredQuery }),
-      signal: AbortSignal.timeout(60_000),
-    });
+    let resp;
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ structuredQuery }),
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch (err) {
+      // Network-level failure (DNS, connection refused, AbortSignal timeout).
+      // Without this catch the unhandled rejection crashes the generator AND
+      // the caller's for-await loop with no actionable diagnostic context.
+      // Re-throw with the URL + cursor position so triage can correlate to
+      // exactly which page failed mid-pagination.
+      throw new Error(
+        `Firestore runQuery network failure (startAfter=${startAfter ?? '<none>'}): ${err.message}`,
+      )
+    }
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '<unreadable>');
-      throw new Error(`Firestore runQuery ${resp.status}: ${text}`)
+      throw new Error(`Firestore runQuery ${resp.status}: ${text.slice(0, 500)}`)
     }
 
     const results = await resp.json();
@@ -41162,7 +41217,7 @@ async function* paginateTierEligibleUsers({ tokenProvider, gcpProjectId, batchSi
 /**
  * Extract permissionTier fields from a Firestore document.
  * @param {object} doc
- * @returns {{ tier: string, tierRevokedAt: string|null, backfillCircuitBrokenAt: string|null } | null}
+ * @returns {{ tier: string, tierRevokedAt: string|null, backfillCircuitBrokenAt: string|null, backfillDispatchedAt: string|null } | null}
  */
 function extractPermissionTier(doc) {
   const fields = doc?.fields?.permissionTier?.mapValue?.fields;
@@ -41171,49 +41226,155 @@ function extractPermissionTier(doc) {
   const tier = fields.tier?.stringValue;
   if (!tier) return null
 
-  const tierRevokedAt = fields.tierRevokedAt?.stringValue ?? null;
-  const backfillCircuitBrokenAt = fields.backfillCircuitBrokenAt?.stringValue ?? null;
+  const tierRevokedAt = fields.tierRevokedAt?.timestampValue ?? null;
+  const backfillCircuitBrokenAt = fields.backfillCircuitBrokenAt?.timestampValue ?? null;
+  const backfillDispatchedAt = fields.backfillDispatchedAt?.timestampValue ?? null;
 
-  return { tier, tierRevokedAt, backfillCircuitBrokenAt }
+  return { tier, tierRevokedAt, backfillCircuitBrokenAt, backfillDispatchedAt }
 }
 
 /**
- * Check whether the legacy plaintext OAuth token document exists at
- * users-sensitive-data/{userId}/oauth-token/youtube.
- * Treats 404 as absent (not an error). Read-only.
+ * Batched token-presence check via Firestore REST `:batchGet`. Returns a Map
+ * keyed by userId with `{ present: boolean }` for each entry. Mask is pinned
+ * to `__name__` so Firestore returns only document references — NEVER the
+ * plaintext OAuth token contents.
  *
- * Uses `mask.fieldPaths=__name__` so Firestore returns only the document name —
- * NEVER the plaintext OAuth token contents (`refreshToken`, `scope`). BC11.1's
- * legacy plaintext path must stay server-side; the W3 caller only needs to know
- * the document exists so `core-email-metadata-ingestion` can fetch it itself.
+ * Wraps the same retry policy as the single-user `checkLegacyTokenPresence`.
+ * On retry exhaustion: throws (does NOT degrade to per-user fallback —
+ * caller decides how to handle batch failure; default behavior is to mark
+ * the whole batch as `dispatchFailedTokenCheck` and continue with the next
+ * user-set on the next cron firing).
+ *
+ * Firestore batchGet limits to 500 documents per request; caller is
+ * responsible for chunking when batchSize exceeds this. For Brand Contacts
+ * the daily batch is 75 users, well below the limit.
+ *
+ * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, userIds: string[] }} opts
+ * @returns {Promise<Map<string, { present: boolean }>>}
+ */
+async function batchCheckLegacyTokenPresence({ tokenProvider, gcpProjectId, userIds }) {
+  if (userIds.length === 0) return new Map()
+
+  const databasePath = `projects/${encodeURIComponent(gcpProjectId)}/databases/(default)`;
+  const url = `${FIRESTORE_BASE}/${databasePath}/documents:batchGet`;
+  const documents = userIds.map(
+    (userId) =>
+      `${databasePath}/documents/users-sensitive-data/${encodeURIComponent(userId)}/oauth-token/youtube`,
+  );
+
+  let lastErr;
+  for (let attempt = 0; attempt < TOKEN_CHECK_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      await sleep(
+        backoffMs(attempt - 1, {
+          base: TOKEN_CHECK_BACKOFF_BASE_MS,
+          max: TOKEN_CHECK_BACKOFF_MAX_MS,
+          jitter: true,
+        }),
+      );
+    }
+
+    let resp;
+    try {
+      const accessToken = await tokenProvider();
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          documents,
+          mask: { fieldPaths: ['__name__'] },
+        }),
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch (err) {
+      lastErr = new Error(`Firestore batchGet network failure: ${err.message}`);
+      continue
+    }
+
+    if (resp.ok) {
+      const results = await resp.json();
+      const out = new Map();
+      // Firestore batchGet returns one entry per requested document, in order.
+      // Each entry is either `{ found: { name, fields }, ... }` (present) or
+      // `{ missing: <doc-name>, ... }` (absent — the 404 equivalent).
+      // Document order matches the request, so we can pair by index.
+      for (let i = 0; i < results.length; i++) {
+        const entry = results[i];
+        const userId = userIds[i];
+        const present = entry?.found != null;
+        out.set(userId, { present });
+      }
+      return out
+    }
+
+    const text = await resp.text().catch(() => '<unreadable>');
+    const truncated = text.slice(0, 500);
+    lastErr = new Error(`Firestore batchGet ${resp.status}: ${truncated}`);
+    if (resp.status < 500) break
+  }
+
+  throw lastErr
+}
+
+/**
+ * Persist `permissionTier.backfillDispatchedAt = <REQUEST_TIME>` on the user doc
+ * via Firestore REST `:commit` with a `setToServerValue: REQUEST_TIME` transform.
+ * Server-time avoids per-runner clock-skew drift across the 4,116-user campaign.
+ *
+ * Required for backfill correctness (NFR-1): without this marker, the read-side
+ * tier-eligibility query (`tier === 'readonly' AND tierRevokedAt IS NULL`)
+ * keeps returning already-dispatched users every cron firing, starving the
+ * orchestrator's daily candidate pool and re-dispatching the same first-N users
+ * every day forever. The orchestrator's read-side filter excludes users with
+ * `backfillDispatchedAt != null`.
+ *
+ * Idempotent at the application layer — caller only invokes after a successful
+ * dispatch (HTTP 200/201). 409 (already-in-progress) does NOT mark; the prior
+ * dispatcher's caller owns the eventual mark on its 200 response.
  *
  * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, userId: string }} opts
- * @returns {Promise<{ present: boolean }>}
+ * @returns {Promise<void>}
  */
-async function checkLegacyTokenPresence({ tokenProvider, gcpProjectId, userId }) {
+async function markBackfillDispatched({ tokenProvider, gcpProjectId, userId }) {
   const accessToken = await tokenProvider();
-  const path = `projects/${encodeURIComponent(gcpProjectId)}/databases/(default)/documents/users-sensitive-data/${encodeURIComponent(userId)}/oauth-token/youtube`;
-  const url = new URL(`${FIRESTORE_BASE}/${path}`);
-  url.searchParams.set('mask.fieldPaths', '__name__');
+  const docName = `projects/${encodeURIComponent(gcpProjectId)}/databases/(default)/documents/users/${encodeURIComponent(userId)}`;
+  const url = `${FIRESTORE_BASE}/projects/${encodeURIComponent(gcpProjectId)}/databases/(default)/documents:commit`;
 
-  const resp = await fetch(url.toString(), {
-    method: 'GET',
-    headers: { Authorization: `Bearer ${accessToken}` },
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      writes: [
+        {
+          transform: {
+            document: docName,
+            fieldTransforms: [
+              {
+                fieldPath: 'permissionTier.backfillDispatchedAt',
+                setToServerValue: 'REQUEST_TIME',
+              },
+            ],
+          },
+        },
+      ],
+    }),
     signal: AbortSignal.timeout(30_000),
   });
 
-  if (resp.status === 404) {
-    await resp.body?.cancel().catch(() => {});
-    return { present: false }
-  }
-
   if (!resp.ok) {
     const text = await resp.text().catch(() => '<unreadable>');
-    throw new Error(`Firestore token check ${resp.status} for userId=${userId}: ${text}`)
+    throw new Error(
+      `Firestore mark-dispatched ${resp.status} for userId=${userId}: ${text.slice(0, 500)}`,
+    )
   }
 
   await resp.body?.cancel().catch(() => {});
-  return { present: true }
 }
 
 /**
@@ -41294,20 +41455,22 @@ async function runBrandContactsBackfill() {
 
   const gcpProjectIdInput = normalizeOptionalProjectId(coreExports.getInput('gcp-project-id'));
 
+  // Upper bounds aligned with Firestore :batchGet hard cap (500 docs/request)
+  // and Gmail-quota / NFR-1 sustained-rate budgets respectively. Higher values
+  // risk OOM / job-timeout on the GitHub Actions runner; safer to fail fast at
+  // config parse than to stack-trace mid-run.
   const batchSize = parsePositiveIntegerInput(
     coreExports.getInput('backfill-batch-size') || '75',
     'backfill-batch-size',
+    { max: 500 },
   );
   const concurrency = parsePositiveIntegerInput(
     coreExports.getInput('backfill-concurrency') || '5',
     'backfill-concurrency',
+    { max: 50 },
   );
   const attributionTag = coreExports.getInput('backfill-attribution-tag') || 'brand-contacts-backfill';
-  const dryRun = ['true', '1', 'yes'].includes(
-    String(coreExports.getInput('backfill-dry-run') ?? '')
-      .trim()
-      .toLowerCase(),
-  );
+  const dryRun = parseStrictBoolean(coreExports.getInput('backfill-dry-run'), 'backfill-dry-run', false);
 
   if (!backendBaseUrl || !sharedSecret || !saJsonRaw) {
     throw new Error(
@@ -41343,9 +41506,20 @@ async function runBrandContactsBackfill() {
   let usersSkippedRevoked = 0;
   let usersSkippedNoToken = 0;
   let usersSkippedAlreadyInFlight = 0;
+  let usersSkippedAlreadyDispatched = 0;
   let dispatched = 0;
   let dispatchSkippedAlreadyInProgress = 0;
-  let dispatchFailed = 0;
+  // Split failure counters so Story 2.10's canary can distinguish "Firestore is
+  // broken (us)" from "backend is broken (them)" without grepping logs. The
+  // legacy single `dispatchFailed` is preserved as a sum of the two for
+  // backwards-compatible alerting (= dispatchFailedTokenCheck + dispatchFailedBackend).
+  let dispatchFailedTokenCheck = 0;
+  let dispatchFailedBackend = 0;
+  // Surfaces unexpected worker exceptions (TypeError, etc.) that escape the
+  // workerFn's try/catch. Without an explicit counter the .catch() at the
+  // pool boundary would swallow systemic bugs into a `console.log` line and
+  // the run would exit 0. Story 2.10's canary should fire on this >0.
+  let workerExceptions = 0;
 
   // Cap per-user skip logs at first N per cohort to bound action-log size.
   // Without this, a high-skip-rate run (e.g., bulk of remaining users are revoked
@@ -41355,6 +41529,7 @@ async function runBrandContactsBackfill() {
   const SKIP_LOG_CAP = 5;
   let revokedLogged = 0;
   let circuitBrokenLogged = 0;
+  let alreadyDispatchedLogged = 0;
 
   console.log(
     `[brand-contacts-backfill] cid=${correlationId} starting batchSize=${batchSize} concurrency=${concurrency} dryRun=${dryRun}`,
@@ -41396,6 +41571,23 @@ async function runBrandContactsBackfill() {
         continue
       }
 
+      // Persistent dispatch marker: skip users already dispatched in a prior cron
+      // firing. Without this, the read-side query keeps re-yielding the same
+      // already-dispatched users every day (the dispatch doesn't mutate `tier`
+      // or `tierRevokedAt` — those are owned by Epic 1's tier-change webhook),
+      // starving NFR-1's 8-week / 4,116-user budget. Marker is written by
+      // `markBackfillDispatched` after a successful 200/201 dispatch.
+      if (permissionTier.backfillDispatchedAt != null) {
+        usersSkippedAlreadyDispatched++;
+        if (alreadyDispatchedLogged < SKIP_LOG_CAP) {
+          coreExports.info(
+            `[brand-contacts-backfill] cid=${correlationId} skip already-dispatched userId=${userId}`,
+          );
+          alreadyDispatchedLogged++;
+        }
+        continue
+      }
+
       usersEligible++;
       candidates.push(userId);
 
@@ -41408,6 +41600,33 @@ async function runBrandContactsBackfill() {
     `[brand-contacts-backfill] cid=${correlationId} considered=${usersConsidered} eligible=${usersEligible} candidates=${candidates.length}`,
   );
 
+  // Batch the token-presence check upfront in a single Firestore :batchGet
+  // call instead of N separate GETs. For the daily 75-user chunk this collapses
+  // ~75 round-trips to 1 (Firestore allows up to 500 docs per batchGet).
+  // On batch-failure: every candidate increments dispatchFailedTokenCheck and
+  // the run continues with the next set on the next cron firing — strictly
+  // worse-case-equivalent to the prior per-user behavior.
+  let tokenPresenceMap = new Map();
+  if (candidates.length > 0) {
+    try {
+      tokenPresenceMap = await batchCheckLegacyTokenPresence({
+        tokenProvider,
+        gcpProjectId,
+        userIds: candidates,
+      });
+    } catch (err) {
+      coreExports.error(
+        `[brand-contacts-backfill] cid=${correlationId} batch token check failed (count=${candidates.length}): ${err.message}`,
+      );
+      // Degrade: charge every candidate to dispatchFailedTokenCheck so the
+      // metric reflects the lost work, and skip dispatch entirely. The
+      // already-dispatched marker is NOT written, so these users are
+      // re-considered tomorrow.
+      dispatchFailedTokenCheck += candidates.length;
+      candidates.length = 0;
+    }
+  }
+
   let candidateIdx = 0;
 
   const claimFn = async () => {
@@ -41419,17 +41638,7 @@ async function runBrandContactsBackfill() {
   const workerFn = async (batch) => {
     const { userId } = batch;
 
-    let tokenPresent;
-    try {
-      const result = await checkLegacyTokenPresence({ tokenProvider, gcpProjectId, userId });
-      tokenPresent = result.present;
-    } catch (err) {
-      coreExports.error(
-        `[brand-contacts-backfill] cid=${correlationId} token check failed userId=${userId}: ${err.message}`,
-      );
-      dispatchFailed++;
-      return
-    }
+    const tokenPresent = tokenPresenceMap.get(userId)?.present ?? false;
 
     if (!tokenPresent) {
       usersSkippedNoToken++;
@@ -41456,7 +41665,7 @@ async function runBrandContactsBackfill() {
       }
 
       if (!res.ok) {
-        dispatchFailed++;
+        dispatchFailedBackend++;
         coreExports.error(
           `[brand-contacts-backfill] cid=${correlationId} POST failed userId=${userId} status=${res.status} body=${(res.text || '').slice(0, 500)}`,
         );
@@ -41465,16 +41674,38 @@ async function runBrandContactsBackfill() {
 
       dispatched++;
       console.log(`[brand-contacts-backfill] cid=${correlationId} dispatched userId=${userId}`);
+
+      // Persist `permissionTier.backfillDispatchedAt = serverTimestamp` AFTER the
+      // 2xx ack so the same userId doesn't re-enqueue tomorrow. Mark-failure is
+      // recoverable (backend's idempotency catches the re-dispatch tomorrow), so
+      // the failure is logged but does NOT roll back `dispatched` or the metric.
+      try {
+        await markBackfillDispatched({ tokenProvider, gcpProjectId, userId });
+      } catch (markErr) {
+        coreExports.warning(
+          `[brand-contacts-backfill] cid=${correlationId} mark-dispatched failed userId=${userId}: ${markErr.message} (user will be re-considered next cron firing)`,
+        );
+      }
     } catch (err) {
-      dispatchFailed++;
+      // Network-level throw on the backend POST (DNS / connection refused / timeout).
+      // Counted under dispatchFailedBackend — symptom is "backend POST didn't
+      // complete," same triage bucket as 4xx/5xx responses.
+      dispatchFailedBackend++;
       coreExports.error(
         `[brand-contacts-backfill] cid=${correlationId} dispatch error userId=${userId}: ${err.message}`,
       );
     }
   };
 
+  const onWorkerException = (err) => {
+    workerExceptions++;
+    coreExports.error(
+      `[brand-contacts-backfill] cid=${correlationId} worker exception (escaped workerFn try/catch): ${err?.message ?? err}`,
+    );
+  };
+
   if (candidates.length > 0) {
-    await runPool(claimFn, workerFn, { maxConcurrent: concurrency });
+    await runPool(claimFn, workerFn, { maxConcurrent: concurrency, onWorkerException });
   }
 
   const durationMs = Date.now() - startMs;
@@ -41485,14 +41716,31 @@ async function runBrandContactsBackfill() {
     usersSkippedRevoked,
     usersSkippedNoToken,
     usersSkippedAlreadyInFlight,
+    usersSkippedAlreadyDispatched,
     dispatched,
     dispatchSkippedAlreadyInProgress,
-    dispatchFailed,
+    dispatchFailedTokenCheck,
+    dispatchFailedBackend,
+    // Legacy aggregate counter retained for backwards-compatible alerting on
+    // Story 2.10's canary. New filters should prefer the split fields.
+    dispatchFailed: dispatchFailedTokenCheck + dispatchFailedBackend,
+    workerExceptions,
     durationMs,
     attributionTag,
   };
 
   console.log(JSON.stringify({ event: 'backfill_run_complete', ...summary }));
+
+  // Surface escaped worker exceptions to the GitHub Action step's exit code.
+  // Per-user failures (token check / backend POST) are bounded outcomes counted
+  // in `dispatchFailed*`; an exception escaping `workerFn`'s try/catch is a
+  // programming bug. Refuse to exit 0 on this so the runner job goes red and
+  // operators don't silently miss systemic regressions.
+  if (workerExceptions > 0) {
+    throw new Error(
+      `Backfill run completed but ${workerExceptions} worker exception(s) escaped — see action log; refusing to exit 0`,
+    )
+  }
 
   return summary
 }
@@ -41502,11 +41750,17 @@ async function runBrandContactsBackfill() {
  * the backfill use case where each "batch" is a single userId and per-user
  * errors are caught inside workerFn (no retry / dead-letter at the pool level).
  *
+ * Unexpected worker exceptions (TypeError, etc. that escape workerFn's
+ * try/catch) are surfaced via the optional `onWorkerException` callback —
+ * the caller increments a counter + uses `core.error` so the GitHub Action
+ * step is annotated with the failure. Pool continues so siblings finish; the
+ * caller decides whether to throw at end-of-run based on the counter.
+ *
  * @param {() => Promise<object|null>} claimFn
  * @param {(batch: object) => Promise<void>} workerFn
- * @param {{ maxConcurrent: number }} opts
+ * @param {{ maxConcurrent: number, onWorkerException?: (err: unknown) => void }} opts
  */
-async function runPool(claimFn, workerFn, { maxConcurrent }) {
+async function runPool(claimFn, workerFn, { maxConcurrent, onWorkerException }) {
   const active = new Set();
 
   while (true) {
@@ -41517,12 +41771,13 @@ async function runPool(claimFn, workerFn, { maxConcurrent }) {
         await Promise.race(active);
         continue
       }
-      // Defensive .catch(): workerFn catches its own errors today, but if a future
-      // change lets one leak, swallow at the pool boundary so siblings finish.
+      // workerFn catches its own expected per-user errors. Anything that escapes
+      // is a programming bug, not a user-side failure — surface via callback so
+      // the run summary reflects it; do NOT re-throw (siblings must complete).
       const worker = (async () => {
         await workerFn(batch);
       })().catch((err) => {
-        console.log(`[brand-contacts-backfill] worker exception: ${err?.message ?? err}`);
+        if (onWorkerException) onWorkerException(err);
       });
       active.add(worker);
       worker.finally(() => active.delete(worker));

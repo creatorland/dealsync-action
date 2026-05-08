@@ -1,9 +1,6 @@
 import { jest } from '@jest/globals'
 import { generateKeyPairSync } from 'node:crypto'
-import {
-  runBrandContactsBackfill,
-  runPool,
-} from '../src/commands/run-brand-contacts-backfill.js'
+import { runBrandContactsBackfill, runPool } from '../src/commands/run-brand-contacts-backfill.js'
 
 describe('runBrandContactsBackfill orchestration', () => {
   const origFetch = global.fetch
