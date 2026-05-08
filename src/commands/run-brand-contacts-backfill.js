@@ -91,6 +91,11 @@ export async function runBrandContactsBackfill() {
   // backwards-compatible alerting (= dispatchFailedTokenCheck + dispatchFailedBackend).
   let dispatchFailedTokenCheck = 0
   let dispatchFailedBackend = 0
+  // Surfaces unexpected worker exceptions (TypeError, etc.) that escape the
+  // workerFn's try/catch. Without an explicit counter the .catch() at the
+  // pool boundary would swallow systemic bugs into a `console.log` line and
+  // the run would exit 0. Story 2.10's canary should fire on this >0.
+  let workerExceptions = 0
 
   // Cap per-user skip logs at first N per cohort to bound action-log size.
   // Without this, a high-skip-rate run (e.g., bulk of remaining users are revoked
@@ -251,8 +256,15 @@ export async function runBrandContactsBackfill() {
     }
   }
 
+  const onWorkerException = (err) => {
+    workerExceptions++
+    core.error(
+      `[brand-contacts-backfill] cid=${correlationId} worker exception (escaped workerFn try/catch): ${err?.message ?? err}`,
+    )
+  }
+
   if (candidates.length > 0) {
-    await runPool(claimFn, workerFn, { maxConcurrent: concurrency })
+    await runPool(claimFn, workerFn, { maxConcurrent: concurrency, onWorkerException })
   }
 
   const durationMs = Date.now() - startMs
@@ -271,11 +283,23 @@ export async function runBrandContactsBackfill() {
     // Legacy aggregate counter retained for backwards-compatible alerting on
     // Story 2.10's canary. New filters should prefer the split fields.
     dispatchFailed: dispatchFailedTokenCheck + dispatchFailedBackend,
+    workerExceptions,
     durationMs,
     attributionTag,
   }
 
   console.log(JSON.stringify({ event: 'backfill_run_complete', ...summary }))
+
+  // Surface escaped worker exceptions to the GitHub Action step's exit code.
+  // Per-user failures (token check / backend POST) are bounded outcomes counted
+  // in `dispatchFailed*`; an exception escaping `workerFn`'s try/catch is a
+  // programming bug. Refuse to exit 0 on this so the runner job goes red and
+  // operators don't silently miss systemic regressions.
+  if (workerExceptions > 0) {
+    throw new Error(
+      `Backfill run completed but ${workerExceptions} worker exception(s) escaped — see action log; refusing to exit 0`,
+    )
+  }
 
   return summary
 }
@@ -285,11 +309,17 @@ export async function runBrandContactsBackfill() {
  * the backfill use case where each "batch" is a single userId and per-user
  * errors are caught inside workerFn (no retry / dead-letter at the pool level).
  *
+ * Unexpected worker exceptions (TypeError, etc. that escape workerFn's
+ * try/catch) are surfaced via the optional `onWorkerException` callback —
+ * the caller increments a counter + uses `core.error` so the GitHub Action
+ * step is annotated with the failure. Pool continues so siblings finish; the
+ * caller decides whether to throw at end-of-run based on the counter.
+ *
  * @param {() => Promise<object|null>} claimFn
  * @param {(batch: object) => Promise<void>} workerFn
- * @param {{ maxConcurrent: number }} opts
+ * @param {{ maxConcurrent: number, onWorkerException?: (err: unknown) => void }} opts
  */
-async function runPool(claimFn, workerFn, { maxConcurrent }) {
+export async function runPool(claimFn, workerFn, { maxConcurrent, onWorkerException }) {
   const active = new Set()
 
   while (true) {
@@ -300,12 +330,13 @@ async function runPool(claimFn, workerFn, { maxConcurrent }) {
         await Promise.race(active)
         continue
       }
-      // Defensive .catch(): workerFn catches its own errors today, but if a future
-      // change lets one leak, swallow at the pool boundary so siblings finish.
+      // workerFn catches its own expected per-user errors. Anything that escapes
+      // is a programming bug, not a user-side failure — surface via callback so
+      // the run summary reflects it; do NOT re-throw (siblings must complete).
       const worker = (async () => {
         await workerFn(batch)
       })().catch((err) => {
-        console.log(`[brand-contacts-backfill] worker exception: ${err?.message ?? err}`)
+        if (onWorkerException) onWorkerException(err)
       })
       active.add(worker)
       worker.finally(() => active.delete(worker))

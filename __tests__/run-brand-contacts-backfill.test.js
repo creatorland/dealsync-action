@@ -1,6 +1,9 @@
 import { jest } from '@jest/globals'
 import { generateKeyPairSync } from 'node:crypto'
-import { runBrandContactsBackfill } from '../src/commands/run-brand-contacts-backfill.js'
+import {
+  runBrandContactsBackfill,
+  runPool,
+} from '../src/commands/run-brand-contacts-backfill.js'
 
 describe('runBrandContactsBackfill orchestration', () => {
   const origFetch = global.fetch
@@ -437,6 +440,40 @@ describe('runBrandContactsBackfill orchestration', () => {
     expect(summary.dispatchFailedBackend).toBe(1)
     // Legacy aggregate stays accurate for backwards-compat alerts.
     expect(summary.dispatchFailed).toBe(2)
+  })
+
+  it('Fix #6: runPool surfaces escaped worker exceptions via onWorkerException callback', async () => {
+    // Direct unit test of the pool's exception-surfacing contract — the
+    // orchestrator's workerFn is comprehensively try/catched in production,
+    // so we exercise the pool boundary directly. Without onWorkerException
+    // wired, an unexpected TypeError from a future workerFn change would be
+    // swallowed into a `console.log` and the action would exit 0.
+    const claimed = ['u1', 'u2', 'u3']
+    let claimIdx = 0
+    const claimFn = async () => {
+      if (claimIdx >= claimed.length) return null
+      return { userId: claimed[claimIdx++] }
+    }
+
+    const exceptions = []
+    const workerFn = async ({ userId }) => {
+      // Simulate a programming bug that escapes whatever try/catch the worker
+      // had in its previous incarnation.
+      if (userId === 'u2') {
+        throw new TypeError(`synthetic escape for ${userId}`)
+      }
+    }
+
+    await runPool(claimFn, workerFn, {
+      maxConcurrent: 1,
+      onWorkerException: (err) => exceptions.push(err),
+    })
+
+    expect(exceptions).toHaveLength(1)
+    expect(exceptions[0]).toBeInstanceOf(TypeError)
+    expect(exceptions[0].message).toBe('synthetic escape for u2')
+    // Crucially: u3 still ran (the pool didn't abort on u2's failure).
+    expect(claimIdx).toBe(3)
   })
 
   it('body-shape locked: POST carries exactly userId, syncStrategy, origin, attributionTag, dryRun', async () => {
