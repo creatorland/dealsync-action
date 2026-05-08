@@ -152,6 +152,92 @@ function extractPermissionTier(doc) {
 }
 
 /**
+ * Batched token-presence check via Firestore REST `:batchGet`. Returns a Map
+ * keyed by userId with `{ present: boolean }` for each entry. Mask is pinned
+ * to `__name__` so Firestore returns only document references — NEVER the
+ * plaintext OAuth token contents.
+ *
+ * Wraps the same retry policy as the single-user `checkLegacyTokenPresence`.
+ * On retry exhaustion: throws (does NOT degrade to per-user fallback —
+ * caller decides how to handle batch failure; default behavior is to mark
+ * the whole batch as `dispatchFailedTokenCheck` and continue with the next
+ * user-set on the next cron firing).
+ *
+ * Firestore batchGet limits to 500 documents per request; caller is
+ * responsible for chunking when batchSize exceeds this. For Brand Contacts
+ * the daily batch is 75 users, well below the limit.
+ *
+ * @param {{ tokenProvider: () => Promise<string>, gcpProjectId: string, userIds: string[] }} opts
+ * @returns {Promise<Map<string, { present: boolean }>>}
+ */
+export async function batchCheckLegacyTokenPresence({ tokenProvider, gcpProjectId, userIds }) {
+  if (userIds.length === 0) return new Map()
+
+  const databasePath = `projects/${encodeURIComponent(gcpProjectId)}/databases/(default)`
+  const url = `${FIRESTORE_BASE}/${databasePath}/documents:batchGet`
+  const documents = userIds.map(
+    (userId) =>
+      `${databasePath}/documents/users-sensitive-data/${encodeURIComponent(userId)}/oauth-token/youtube`,
+  )
+
+  let lastErr
+  for (let attempt = 0; attempt < TOKEN_CHECK_MAX_ATTEMPTS; attempt++) {
+    if (attempt > 0) {
+      await sleep(
+        backoffMs(attempt - 1, {
+          base: TOKEN_CHECK_BACKOFF_BASE_MS,
+          max: TOKEN_CHECK_BACKOFF_MAX_MS,
+          jitter: true,
+        }),
+      )
+    }
+
+    let resp
+    try {
+      const accessToken = await tokenProvider()
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          documents,
+          mask: { fieldPaths: ['__name__'] },
+        }),
+        signal: AbortSignal.timeout(60_000),
+      })
+    } catch (err) {
+      lastErr = new Error(`Firestore batchGet network failure: ${err.message}`)
+      continue
+    }
+
+    if (resp.ok) {
+      const results = await resp.json()
+      const out = new Map()
+      // Firestore batchGet returns one entry per requested document, in order.
+      // Each entry is either `{ found: { name, fields }, ... }` (present) or
+      // `{ missing: <doc-name>, ... }` (absent — the 404 equivalent).
+      // Document order matches the request, so we can pair by index.
+      for (let i = 0; i < results.length; i++) {
+        const entry = results[i]
+        const userId = userIds[i]
+        const present = entry?.found != null
+        out.set(userId, { present })
+      }
+      return out
+    }
+
+    const text = await resp.text().catch(() => '<unreadable>')
+    const truncated = text.slice(0, 500)
+    lastErr = new Error(`Firestore batchGet ${resp.status}: ${truncated}`)
+    if (resp.status < 500) break
+  }
+
+  throw lastErr
+}
+
+/**
  * Check whether the legacy plaintext OAuth token document exists at
  * users-sensitive-data/{userId}/oauth-token/youtube.
  * Treats 404 as absent (not an error). Read-only.

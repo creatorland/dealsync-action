@@ -10,7 +10,7 @@ jest.unstable_mockModule('@actions/core', () => ({
   warning: jest.fn(),
 }))
 
-const { paginateTierEligibleUsers, checkLegacyTokenPresence } =
+const { paginateTierEligibleUsers, checkLegacyTokenPresence, batchCheckLegacyTokenPresence } =
   await import('../src/lib/firestore-users.js')
 
 describe('paginateTierEligibleUsers', () => {
@@ -348,6 +348,111 @@ describe('checkLegacyTokenPresence', () => {
     ).rejects.toThrow(/Firestore token check 401/)
 
     // 4xx must short-circuit retry — first attempt only.
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('batchCheckLegacyTokenPresence', () => {
+  let origFetch
+
+  beforeEach(() => {
+    origFetch = global.fetch
+  })
+  afterEach(() => {
+    global.fetch = origFetch
+  })
+
+  it('returns empty Map for empty userIds (no fetch issued)', async () => {
+    global.fetch = jest.fn()
+    const result = await batchCheckLegacyTokenPresence({
+      tokenProvider: async () => 'tok',
+      gcpProjectId: 'test-project',
+      userIds: [],
+    })
+    expect(result).toBeInstanceOf(Map)
+    expect(result.size).toBe(0)
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+
+  it('issues a single batchGet for N userIds and pairs by index', async () => {
+    global.fetch = jest.fn(async (url, init) => {
+      const reqBody = JSON.parse(init.body)
+      // Pin the field-mask security guarantee — batched path must not pull
+      // plaintext OAuth fields either.
+      expect(reqBody.mask).toEqual({ fieldPaths: ['__name__'] })
+      const responses = reqBody.documents.map((docPath, i) => {
+        // Even-indexed = found; odd = missing — proves response order
+        // pairing is correct.
+        if (i % 2 === 0) return { found: { name: docPath } }
+        return { missing: docPath }
+      })
+      return { ok: true, status: 200, json: async () => responses }
+    })
+
+    const result = await batchCheckLegacyTokenPresence({
+      tokenProvider: async () => 'tok',
+      gcpProjectId: 'test-project',
+      userIds: ['u-a', 'u-b', 'u-c', 'u-d'],
+    })
+
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(result.get('u-a')).toEqual({ present: true })
+    expect(result.get('u-b')).toEqual({ present: false })
+    expect(result.get('u-c')).toEqual({ present: true })
+    expect(result.get('u-d')).toEqual({ present: false })
+  })
+
+  it('retries on 5xx and succeeds on a later attempt', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => 'unavailable' })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => [{ found: { name: 'doc' } }],
+      })
+
+    const result = await batchCheckLegacyTokenPresence({
+      tokenProvider: async () => 'tok',
+      gcpProjectId: 'test-project',
+      userIds: ['u-1'],
+    })
+
+    expect(result.get('u-1')).toEqual({ present: true })
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('throws after retry exhaustion on persistent 5xx — caller charges all candidates to dispatchFailedTokenCheck', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => 'persistent server error',
+    })
+
+    await expect(
+      batchCheckLegacyTokenPresence({
+        tokenProvider: async () => 'tok',
+        gcpProjectId: 'test-project',
+        userIds: ['u-1', 'u-2'],
+      }),
+    ).rejects.toThrow(/Firestore batchGet 500/)
+  })
+
+  it('does NOT retry on 4xx', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => 'unauthorized',
+    })
+
+    await expect(
+      batchCheckLegacyTokenPresence({
+        tokenProvider: async () => 'tok',
+        gcpProjectId: 'test-project',
+        userIds: ['u-1', 'u-2'],
+      }),
+    ).rejects.toThrow(/Firestore batchGet 401/)
+
     expect(global.fetch).toHaveBeenCalledTimes(1)
   })
 })

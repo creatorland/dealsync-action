@@ -14,7 +14,7 @@ import {
 import { makeGoogleDatastoreTokenProvider } from '../lib/scan-complete.js'
 import {
   paginateTierEligibleUsers,
-  checkLegacyTokenPresence,
+  batchCheckLegacyTokenPresence,
   markBackfillDispatched,
 } from '../lib/firestore-users.js'
 import { postBackfillIngestionTrigger } from '../lib/backfill-dispatch.js'
@@ -172,6 +172,33 @@ export async function runBrandContactsBackfill() {
     `[brand-contacts-backfill] cid=${correlationId} considered=${usersConsidered} eligible=${usersEligible} candidates=${candidates.length}`,
   )
 
+  // Batch the token-presence check upfront in a single Firestore :batchGet
+  // call instead of N separate GETs. For the daily 75-user chunk this collapses
+  // ~75 round-trips to 1 (Firestore allows up to 500 docs per batchGet).
+  // On batch-failure: every candidate increments dispatchFailedTokenCheck and
+  // the run continues with the next set on the next cron firing — strictly
+  // worse-case-equivalent to the prior per-user behavior.
+  let tokenPresenceMap = new Map()
+  if (candidates.length > 0) {
+    try {
+      tokenPresenceMap = await batchCheckLegacyTokenPresence({
+        tokenProvider,
+        gcpProjectId,
+        userIds: candidates,
+      })
+    } catch (err) {
+      core.error(
+        `[brand-contacts-backfill] cid=${correlationId} batch token check failed (count=${candidates.length}): ${err.message}`,
+      )
+      // Degrade: charge every candidate to dispatchFailedTokenCheck so the
+      // metric reflects the lost work, and skip dispatch entirely. The
+      // already-dispatched marker is NOT written, so these users are
+      // re-considered tomorrow.
+      dispatchFailedTokenCheck += candidates.length
+      candidates.length = 0
+    }
+  }
+
   let candidateIdx = 0
 
   const claimFn = async () => {
@@ -183,17 +210,7 @@ export async function runBrandContactsBackfill() {
   const workerFn = async (batch) => {
     const { userId } = batch
 
-    let tokenPresent
-    try {
-      const result = await checkLegacyTokenPresence({ tokenProvider, gcpProjectId, userId })
-      tokenPresent = result.present
-    } catch (err) {
-      core.error(
-        `[brand-contacts-backfill] cid=${correlationId} token check failed userId=${userId}: ${err.message}`,
-      )
-      dispatchFailedTokenCheck++
-      return
-    }
+    const tokenPresent = tokenPresenceMap.get(userId)?.present ?? false
 
     if (!tokenPresent) {
       usersSkippedNoToken++
