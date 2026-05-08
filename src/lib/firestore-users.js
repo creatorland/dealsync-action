@@ -74,19 +74,31 @@ export async function* paginateTierEligibleUsers({ tokenProvider, gcpProjectId, 
       }
     }
 
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ structuredQuery }),
-      signal: AbortSignal.timeout(60_000),
-    })
+    let resp
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ structuredQuery }),
+        signal: AbortSignal.timeout(60_000),
+      })
+    } catch (err) {
+      // Network-level failure (DNS, connection refused, AbortSignal timeout).
+      // Without this catch the unhandled rejection crashes the generator AND
+      // the caller's for-await loop with no actionable diagnostic context.
+      // Re-throw with the URL + cursor position so triage can correlate to
+      // exactly which page failed mid-pagination.
+      throw new Error(
+        `Firestore runQuery network failure (startAfter=${startAfter ?? '<none>'}): ${err.message}`,
+      )
+    }
 
     if (!resp.ok) {
       const text = await resp.text().catch(() => '<unreadable>')
-      throw new Error(`Firestore runQuery ${resp.status}: ${text}`)
+      throw new Error(`Firestore runQuery ${resp.status}: ${text.slice(0, 500)}`)
     }
 
     const results = await resp.json()
