@@ -1,14 +1,8 @@
 name: ds-scan-complete-10m-betanet
 authority: '0x7504607d40696d6Ad89e72f4D820fD1fBCD1143b'
 on:
-  # PAUSED 2026-05-20 per gh creatorland/dealsync-v2#545 — emit-scan-complete-webhooks
-  # eligibility SQL does not discriminate by attribution_tag/origin, so it fires for
-  # backfill-driven LOOKBACK completions as if they were user-initiated first scans.
-  # Today the backend's scanCompleteSentAt dedupe is the only thing preventing
-  # misleading "your scan is complete" emails from being sent to backfilled users.
-  # Restore after the backend webhook guard in creatorland/backend lands + deploys.
-  # schedule:
-  #   - cron: '*/10 * * * *'
+  schedule:
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 concurrency:
