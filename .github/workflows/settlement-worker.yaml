@@ -1,0 +1,47 @@
+name: 'Settlement Worker'
+
+# Manual dispatch only during Phase 0 spike. Story 0.6 (cron-tick latency
+# probe) will add scheduler-service-driven cron triggers per Architecture
+# §"Settlement Worker Specification > Backpressure".
+on:
+  workflow_dispatch:
+    inputs:
+      outbox-id:
+        description: 'Optional: dispatch against a specific settlement_outbox row id (spike-mode single-row drain). Leave blank for normal batch claim.'
+        required: false
+        type: string
+
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    steps:
+      - id: guard
+        uses: creatorland/dealsync-action/src/outbox-settlement-guard@main
+        with:
+          batch-size: 100
+          lease-seconds: 60
+          worker-id: ${{ github.run_id }}
+          outbox-id: ${{ inputs.outbox-id }}
+          supabase-url: ${{ secrets.W3_SECRET_SUPABASE_URL }}
+          supabase-service-role-key: ${{ secrets.W3_SECRET_SUPABASE_SERVICE_ROLE_KEY }}
+
+      - id: worker
+        if: steps.guard.outputs.claimed-count != '0'
+        uses: creatorland/dealsync-action/src/outbox-settlement-worker@main
+        with:
+          claimed-batch: ${{ steps.guard.outputs.claimed-batch }}
+          worker-id: ${{ github.run_id }}
+          lease-seconds: 60
+          supabase-url: ${{ secrets.W3_SECRET_SUPABASE_URL }}
+          supabase-service-role-key: ${{ secrets.W3_SECRET_SUPABASE_SERVICE_ROLE_KEY }}
+          sxt-auth-url: ${{ secrets.W3_SECRET_SXT_AUTH_URL }}
+          sxt-auth-secret: ${{ secrets.W3_SECRET_SXT_AUTH_SECRET }}
+
+      - id: finalize
+        if: always() && steps.guard.outputs.claimed-count != '0'
+        uses: creatorland/dealsync-action/src/outbox-settlement-finalizer@main
+        with:
+          results: ${{ steps.worker.outputs.results }}
+          worker-id: ${{ github.run_id }}
+          supabase-url: ${{ secrets.W3_SECRET_SUPABASE_URL }}
+          supabase-service-role-key: ${{ secrets.W3_SECRET_SUPABASE_SERVICE_ROLE_KEY }}
