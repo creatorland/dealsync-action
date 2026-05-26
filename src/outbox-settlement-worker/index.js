@@ -45,8 +45,15 @@ async function fetchSxtJwt(sxtAuthUrl, sxtAuthSecret, account = 'external') {
     throw new Error(`SxT JWT proxy ${resp.status}: ${await resp.text()}`)
   }
   const body = await resp.json()
-  // Handle both shapes per Story 0.1's findings
-  return body?.data?.accessToken || body?.data || body?.accessToken
+  // Handle both shapes per Story 0.1's findings (backend's actual is
+  // body.data.accessToken; sxt skill's sample documents body.data directly).
+  const jwt = body?.data?.accessToken || body?.data || body?.accessToken
+  if (!jwt || typeof jwt !== 'string') {
+    throw new Error(
+      `SxT JWT proxy returned no recognizable token (shapes checked: body.data.accessToken / body.data / body.accessToken). Got: ${JSON.stringify(body).slice(0, 200)}`,
+    )
+  }
+  return jwt
 }
 
 /**
@@ -92,8 +99,20 @@ async function sxtExecute(jwt, biscuit, sqlText, refreshJwt) {
  * Map: deal → dealsync_stg_v1.deals, contact → dealsync_stg_v1.contacts, etc.
  * Phase 1 stories 1.x formalize these mirrors; for the spike we point at
  * the existing sandbox-era SxT tables shared with prod.
+ *
+ * Safety invariants enforced here (regression-tested in __tests__/build-sxt-upsert.test.js):
+ *   - Empty payload rejected (the resulting `DO UPDATE SET` would be empty
+ *     and produce invalid SQL — caller bug, fail loud).
+ *   - Column names from payload keys MUST match a strict SQL identifier
+ *     regex (`^[a-zA-Z_][a-zA-Z0-9_]*$`). The architecture treats payload
+ *     as snake_case business-row state; anything else is a caller bug and
+ *     a potential SQL-injection vector through the column position.
+ *   - String values are single-quote-escaped; numbers serialize raw; null
+ *     becomes literal NULL. Phase 1 T3 hardening (Story 3.1) replaces
+ *     string-interpolation with the rate-limiter's prepared-statement path.
  */
-function buildSxtUpsert(row) {
+const SQL_IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/
+export function buildSxtUpsert(row) {
   const tableMap = {
     deal: 'DEALSYNC_STG_V1.DEALS',
     contact: 'DEALSYNC_STG_V1.CONTACTS',
@@ -105,18 +124,41 @@ function buildSxtUpsert(row) {
   if (!sxtTable) {
     throw new Error(`outbox-settlement-worker: unknown aggregate ${row.aggregate} for SxT mapping`)
   }
-  // The diagnostic-correlation SQL comment per Architecture §"Idempotency contract" item 2.
-  // It rides through SxT's query history but does NOT participate in the conflict key
+  const payload = row.payload || {}
+  const payloadKeys = Object.keys(payload)
+  if (payloadKeys.length === 0) {
+    // Empty payload would produce `DO UPDATE SET ` (empty) — invalid SQL.
+    // The architecture's full body would always have a non-empty row state
+    // via DELETE/INSERT/UPDATE...RETURNING. Spike: fail loud on caller bug.
+    throw new Error(
+      `outbox-settlement-worker: cannot build SxT UPSERT for outbox_id=${row.id} — payload is empty (no columns to insert)`,
+    )
+  }
+  for (const k of payloadKeys) {
+    if (!SQL_IDENT_RE.test(k)) {
+      // Column-name injection guard: payload keys are interpolated into the
+      // SQL string positionally as column identifiers. SxT does not support
+      // identifier-quoting on the producer side here (the legacy worker
+      // relies on the same invariant). Reject anything that isn't a strict
+      // SQL identifier so a malformed key can never alter the SQL shape.
+      throw new Error(
+        `outbox-settlement-worker: payload key "${k}" is not a valid SQL identifier (must match ${SQL_IDENT_RE}); cannot build UPSERT for outbox_id=${row.id}`,
+      )
+    }
+  }
+  const id = row.aggregate_id
+  if (typeof id !== 'string' || id.length === 0) {
+    throw new Error(
+      `outbox-settlement-worker: row.aggregate_id must be a non-empty string for outbox_id=${row.id}`,
+    )
+  }
+  // The diagnostic-correlation SQL comment per Architecture §"Idempotency
+  // contract" item 2. Informational; does NOT participate in conflict key
   // or commitment hash.
   const idComment = `-- outbox_id: ${row.id}`
-  // Spike scope: minimal column set. Story 2.x maps all business columns per the
-  // canonical schema. For Phase 0 we just push id + the payload columns that exist
-  // on the SxT mirror.
-  const payload = row.payload || {}
-  const id = row.aggregate_id
-  // Build VALUES clause from payload keys. String-interpolated since SxT doesn't
-  // support parameterized queries.
-  const cols = ['ID', ...Object.keys(payload).map((k) => k.toUpperCase())]
+  // Build VALUES clause from payload keys. String-interpolated since SxT
+  // doesn't support parameterized queries.
+  const cols = ['ID', ...payloadKeys.map((k) => k.toUpperCase())]
   const vals = [
     `'${id.replace(/'/g, "''")}'`,
     ...Object.values(payload).map((v) =>
@@ -127,7 +169,7 @@ function buildSxtUpsert(row) {
           : `'${String(v).replace(/'/g, "''")}'`,
     ),
   ]
-  const updateClause = Object.keys(payload)
+  const updateClause = payloadKeys
     .map((k) => `${k.toUpperCase()} = EXCLUDED.${k.toUpperCase()}`)
     .join(', ')
   return `${idComment}
@@ -205,7 +247,7 @@ export async function run(inputs) {
     emitEvent('settlement.attempted', {
       outbox_id: row.id,
       aggregate: row.aggregate,
-      traceId: row.trace_id,
+      trace_id: row.trace_id,
       run_id: workerId,
       ...(dryRun ? { dry_run: true, sxt_sql: sxtSql } : {}),
     })

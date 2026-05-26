@@ -1,8 +1,32 @@
 name: 'Settlement Worker'
 
+# ─────────────────────────────────────────────────────────────────────────
+# PHASE 0 SPIKE — STRUCTURAL FILE ONLY, NOT YET DISPATCHABLE
+# ─────────────────────────────────────────────────────────────────────────
+# This workflow references actions via
+#   uses: creatorland/dealsync-action/src/outbox-settlement-{guard,worker,finalizer}@main
+# but those source directories ship the JS module ONLY in this spike — no
+# `action.yml` shells and no bundled `dist/index.js`. As-is the workflow
+# will NOT execute via `gh workflow run` or W3 dispatch; GHA's `uses:`
+# resolver needs an `action.yml` at each path.
+#
+# Story 0.6 (cron-tick latency probe; FR-P0-6) ships the missing pieces:
+#   - action.yml per action (inputs/outputs/runs:node24)
+#   - Rollup-bundled dist/index.js per action
+#   - W3 secret store entries (W3_SECRET_SUPABASE_URL etc.)
+#   - scheduler-service cron triggers per Architecture
+#     §"Settlement Worker Specification > Backpressure"
+#
+# Until then the worker is validated locally via
+# `scripts/run-worker-locally.mjs` — the source modules under src/ are the
+# actual portable JS that Story 0.6 will wrap.
+#
+# Static validation: `mcp__w3__compile-workflow` confirms YAML is W3-valid
+# (valid=true, no GHA-only features, all expression refs resolve).
+# ─────────────────────────────────────────────────────────────────────────
+
 # Manual dispatch only during Phase 0 spike. Story 0.6 (cron-tick latency
-# probe) will add scheduler-service-driven cron triggers per Architecture
-# §"Settlement Worker Specification > Backpressure".
+# probe) will add scheduler-service-driven cron triggers.
 on:
   workflow_dispatch:
     inputs:

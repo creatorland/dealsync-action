@@ -58,7 +58,12 @@ async function main() {
     // Mirror the workflow YAML's gate: skip worker + finalize when no claim.
     // Still emit the workflow_completed terminal event for observability.
     const workerOut = { results: [] }
-    await runFinalizer({ results: workerOut.results, workerId, batchSize })
+    await runFinalizer({
+      results: workerOut.results,
+      workerId,
+      batchSize,
+      claimedCount: 0,
+    })
     const elapsed = Date.now() - t0
     process.stdout.write(`\n→ local-runner: claimed 0 rows, exiting (elapsed ${elapsed}ms)\n`)
     return
@@ -71,11 +76,13 @@ async function main() {
     leaseSeconds,
   })
 
-  // Step 3: finalize
+  // Step 3: finalize — thread claimedCount from guard so more-work decision
+  // is correct even when worker skipped rows on lease-loss.
   const finalizerOut = await runFinalizer({
     results: workerOut.results,
     workerId,
     batchSize,
+    claimedCount: guardOut.claimedCount,
   })
 
   const elapsed = Date.now() - t0

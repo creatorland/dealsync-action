@@ -56,13 +56,21 @@ export async function run(inputs) {
   if (outboxId) {
     claimedBatch = rows.filter((r) => String(r.id) === outboxId)
     if (claimedBatch.length === 0 && rows.length > 0) {
+      // Guard claimed a different row than spike requested (the lower-id
+      // same-aggregate ordering guard inside claim_outbox_batch is free to
+      // pick a different eligible row when our requested id isn't the
+      // lowest-eligible). Spike behavior: skip — the other row's lease
+      // will EXPIRE NATURALLY after lease_seconds (60s default); we do
+      // NOT have an explicit release-claim RPC in spike scope, so the
+      // other row remains leased to this worker until the lease elapses.
+      // Story 3.x adds an explicit release path so the worker can yield
+      // a non-matching claim back to the eligible pool immediately.
       emitEvent('settlement.spike_mode_skipped_other_row', {
         run_id: workerId,
         requested_outbox_id: outboxId,
         claimed_other_id: rows[0]?.id,
-        note: 'Guard claimed a different row than spike requested. Releasing claim by not acking.',
+        note: 'Spike-mode requested a specific outbox id but Guard claimed a different eligible row. The other row stays leased until claim_expires_at elapses; no explicit release in spike scope.',
       })
-      // Lease will expire naturally; next tick can re-claim if needed.
     }
   }
 

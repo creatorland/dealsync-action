@@ -5,14 +5,20 @@
  *   - 'settled' → call mark_settled(row_id, worker_id); on false (lease lost
  *     to another worker), emit settlement.lease_lost
  *   - 'failed'  → call mark_attempt_failed(row_id, worker_id, error); on
- *     false (lease lost), emit settlement.lease_lost
+ *     false (lease lost), emit settlement.lease_lost; emit settlement.retry_scheduled
  *
- * Per-row outcome events: settlement.succeeded OR settlement.retry_scheduled
- * OR settlement.dead_letter (the last when attempts + 1 >= 10).
+ * Per-row outcome events in spike scope: settlement.succeeded OR
+ * settlement.retry_scheduled. The dead-letter decision (attempts + 1 >= 10
+ * → settlement.dead_letter) per architecture is DEFERRED to Story 3.1
+ * production hardening — the spike's single-row dispatch doesn't exercise
+ * the retry-exhaustion path, and emitting it requires post-update row read
+ * (current attempts count) which the spike skips to keep the round-trip
+ * minimal. Story 3.1's full finalizer reads attempts post-mark_attempt_failed
+ * and branches on attempts >= 10 → dead_letter (+ B3 dead_letter_left_gap
+ * deterministic-recheck signal, Story 5.2).
  *
  * Phase 0 simplifications (deferred):
- *   - No settlement.dead_letter_left_gap event (B3 deterministic-recheck
- *     signal; Epic 5 reconciliation Mode B is the first consumer)
+ *   - settlement.dead_letter / settlement.dead_letter_left_gap → Story 3.1 + 5.2
  *
  * Architecture source: §"Settlement Worker Specification > W3 workflow shape" lines 1985-2003
  */
@@ -21,9 +27,10 @@ import { emitEvent, requireEnv, supabaseRpc } from '../lib/spike-runtime.js'
 
 /**
  * @param {object} inputs
- * @param {object[]} inputs.results       Per-row outcomes from worker
+ * @param {object[]} inputs.results       Per-row outcomes from worker (may be SHORTER than the guard's claimed batch if rows were skipped on renew_outbox_lease=false)
  * @param {string} inputs.workerId
- * @param {number} inputs.batchSize       For more-work flag determination
+ * @param {number} inputs.batchSize       Originally-requested batch size
+ * @param {number} inputs.claimedCount    Number of rows the guard claimed (BEFORE worker skips). Used for more-work decision so a partial batch with mid-flight lease-loss skips still reports more-work correctly.
  * @returns {Promise<{ moreWork: boolean, settledCount: number, failedCount: number, deadLetterCount: number }>}
  */
 export async function run(inputs) {
@@ -31,6 +38,10 @@ export async function run(inputs) {
   const supabaseKey = requireEnv('SUPABASE_SERVICE_ROLE_KEY')
   const { results, workerId } = inputs
   const batchSize = Number(inputs.batchSize ?? 100)
+  // claimedCount defaults to results.length for backwards-compat with callers
+  // that don't thread it through (spike-only safety net; the local-runner
+  // does thread it). Architecture's more-work decision rule: claimed == batch.
+  const claimedCount = Number(inputs.claimedCount ?? results.length)
   if (!Array.isArray(results)) {
     throw new Error('outbox-settlement-finalizer: results must be an array')
   }
@@ -98,10 +109,15 @@ export async function run(inputs) {
     }
   }
 
-  const moreWork = results.length === batchSize
+  // more-work decision per Architecture §"W3 workflow shape" Finalizer row:
+  // true when the GUARD claimed a full batch (suggests more eligible rows
+  // are sitting in the outbox). Use claimedCount, not results.length —
+  // results.length can be < claimedCount when renew_outbox_lease=false
+  // skipped a row, which is not a signal about outbox depth.
+  const moreWork = claimedCount === batchSize
   emitEvent('settlement.workflow_completed', {
     run_id: workerId,
-    claimed_count: results.length,
+    claimed_count: claimedCount,
     settled_count: settledCount,
     failed_count: failedCount,
     dead_letter_count: deadLetterCount,
