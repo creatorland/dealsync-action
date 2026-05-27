@@ -27428,18 +27428,123 @@ async function sxtExecute(jwt, biscuit, sqlText, refreshJwt) {
  *     string-interpolation with the rate-limiter's prepared-statement path.
  */
 const SQL_IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-function buildSxtUpsert(row) {
-  const tableMap = {
-    deal: 'DEALSYNC_STG_V1.DEALS',
-    contact: 'DEALSYNC_STG_V1.CONTACTS',
-    email_thread_eval: 'DEALSYNC_STG_V1.EMAIL_THREAD_EVALUATIONS',
-    ai_eval_audit: 'DEALSYNC_STG_V1.AI_EVALUATION_AUDITS',
-    thread_user_state: 'DEALSYNC_STG_V1.THREAD_USER_STATE',
-  };
-  const sxtTable = tableMap[row.aggregate];
+
+/**
+ * Aggregate → SxT table mapping. Shared by buildSxtUpsert (for INSERT)
+ * and fetchExistingSxtRow (for SELECT). Phase 1 stories 1.x formalize
+ * these mirrors; for the spike we point at the existing sandbox-era
+ * SxT tables shared with prod.
+ */
+const SXT_TABLE_FOR_AGGREGATE = {
+  deal: 'DEALSYNC_STG_V1.DEALS',
+  contact: 'DEALSYNC_STG_V1.CONTACTS',
+  email_thread_eval: 'DEALSYNC_STG_V1.EMAIL_THREAD_EVALUATIONS',
+  ai_eval_audit: 'DEALSYNC_STG_V1.AI_EVALUATION_AUDITS',
+  thread_user_state: 'DEALSYNC_STG_V1.THREAD_USER_STATE',
+};
+
+/**
+ * Fetch the existing SxT row for an aggregate, keyed by ID.
+ *
+ * Added 2026-05-27 per Story 0.1 Task 7: SxT validates NOT NULL columns
+ * on the INSERT clause of `INSERT ... ON CONFLICT (ID) DO UPDATE` even
+ * when the UPDATE branch will be taken. The worker therefore needs to
+ * send all columns the table requires, not just the patch's delta.
+ * We resolve by reading the existing row, merging the patch onto it,
+ * then sending a full-row UPSERT (mergeExistingRowWithPayload).
+ *
+ * Returns: lowercase-keyed row object (SxT returns UPPERCASE; we
+ * normalize so it can merge cleanly with payload's lowercase keys),
+ * or null if the row doesn't exist.
+ */
+async function fetchExistingSxtRow(jwt, biscuit, aggregate, aggregateId, refreshJwt) {
+  const sxtTable = SXT_TABLE_FOR_AGGREGATE[aggregate];
   if (!sxtTable) {
-    throw new Error(`outbox-settlement-worker: unknown aggregate ${row.aggregate} for SxT mapping`)
+    throw new Error(
+      `outbox-settlement-worker: unknown aggregate ${aggregate} for SxT mapping`,
+    )
   }
+  if (typeof aggregateId !== 'string' || aggregateId.length === 0) {
+    throw new Error(
+      `outbox-settlement-worker: aggregateId must be a non-empty string for SxT SELECT`,
+    )
+  }
+  const sql = `SELECT * FROM ${sxtTable} WHERE ID = '${aggregateId.replace(/'/g, "''")}' LIMIT 1`;
+  const result = await sxtExecute(jwt, biscuit, sql, refreshJwt);
+  if (!Array.isArray(result) || result.length === 0) return null
+  return Object.fromEntries(
+    Object.entries(result[0]).map(([k, v]) => [k.toLowerCase(), v]),
+  )
+}
+
+/**
+ * Merge an existing SxT row's columns with an outbox row's patch payload.
+ * The payload wins on overlapping keys (it represents the new state).
+ * The 'id' column from the existing row is excluded — buildSxtUpsert
+ * uses row.aggregate_id as the canonical ID source so never duplicate it.
+ *
+ * Added 2026-05-27 per Story 0.1 Task 7. See fetchExistingSxtRow docstring
+ * for the SxT NOT NULL motivation.
+ *
+ * @param {object|null} existingRow  Lowercase-keyed row from fetchExistingSxtRow, or null
+ * @param {object} payload           Outbox row's patch payload (lowercase keys)
+ * @returns {object}                  Merged payload suitable for buildSxtUpsert
+ */
+function mergeExistingRowWithPayload(existingRow, payload) {
+  const safePayload = payload || {};
+  if (!existingRow) return { ...safePayload }
+  const merged = { ...existingRow, ...safePayload };
+  delete merged.id;
+  return merged
+}
+
+/**
+ * Serialize a JS value for SxT SQL string-interpolation. SxT doesn't
+ * support parameterized queries, so this is the safe-form: null → NULL,
+ * number → as-is, everything else → single-quote-escaped string.
+ */
+function serializeSqlValue(v) {
+  if (v === null || v === undefined) return 'NULL'
+  if (typeof v === 'number') return String(v)
+  return `'${String(v).replace(/'/g, "''")}'`
+}
+
+/**
+ * Validate identifier-shape on a payload key. Payload keys interpolate
+ * into SQL positionally as column identifiers; SxT doesn't support
+ * identifier-quoting on the producer side, so we reject anything that
+ * isn't a strict SQL identifier.
+ */
+function assertValidSqlIdent(k, outboxId) {
+  if (!SQL_IDENT_RE.test(k)) {
+    throw new Error(
+      `outbox-settlement-worker: payload key "${k}" is not a valid SQL identifier (must match ${SQL_IDENT_RE}); cannot build UPSERT for outbox_id=${outboxId}`,
+    )
+  }
+}
+
+function resolveSxtTable(aggregate) {
+  const sxtTable = SXT_TABLE_FOR_AGGREGATE[aggregate];
+  if (!sxtTable) {
+    throw new Error(
+      `outbox-settlement-worker: unknown aggregate ${aggregate} for SxT mapping`,
+    )
+  }
+  return sxtTable
+}
+
+function assertNonEmptyAggregateId(row) {
+  const id = row.aggregate_id;
+  if (typeof id !== 'string' || id.length === 0) {
+    throw new Error(
+      `outbox-settlement-worker: row.aggregate_id must be a non-empty string for outbox_id=${row.id}`,
+    )
+  }
+  return id
+}
+
+function buildSxtUpsert(row) {
+  const sxtTable = resolveSxtTable(row.aggregate);
   const payload = row.payload || {};
   const payloadKeys = Object.keys(payload);
   if (payloadKeys.length === 0) {
@@ -27450,42 +27555,81 @@ function buildSxtUpsert(row) {
       `outbox-settlement-worker: cannot build SxT UPSERT for outbox_id=${row.id} — payload is empty (no columns to insert)`,
     )
   }
-  for (const k of payloadKeys) {
-    if (!SQL_IDENT_RE.test(k)) {
-      // Column-name injection guard: payload keys are interpolated into the
-      // SQL string positionally as column identifiers. SxT does not support
-      // identifier-quoting on the producer side here (the legacy worker
-      // relies on the same invariant). Reject anything that isn't a strict
-      // SQL identifier so a malformed key can never alter the SQL shape.
-      throw new Error(
-        `outbox-settlement-worker: payload key "${k}" is not a valid SQL identifier (must match ${SQL_IDENT_RE}); cannot build UPSERT for outbox_id=${row.id}`,
-      )
-    }
-  }
-  const id = row.aggregate_id;
-  if (typeof id !== 'string' || id.length === 0) {
-    throw new Error(
-      `outbox-settlement-worker: row.aggregate_id must be a non-empty string for outbox_id=${row.id}`,
-    )
-  }
+  for (const k of payloadKeys) assertValidSqlIdent(k, row.id);
+  const id = assertNonEmptyAggregateId(row);
   // The diagnostic-correlation SQL comment per Architecture §"Idempotency
   // contract" item 2. Informational; does NOT participate in conflict key
   // or commitment hash.
   const idComment = `-- outbox_id: ${row.id}`;
-  // Build VALUES clause from payload keys. String-interpolated since SxT
-  // doesn't support parameterized queries.
   const cols = ['ID', ...payloadKeys.map((k) => k.toUpperCase())];
+  const vals = [`'${id.replace(/'/g, "''")}'`, ...Object.values(payload).map(serializeSqlValue)];
+  const updateClause = payloadKeys
+    .map((k) => `${k.toUpperCase()} = EXCLUDED.${k.toUpperCase()}`)
+    .join(', ');
+  return `${idComment}
+INSERT INTO ${sxtTable} (${cols.join(', ')})
+VALUES (${vals.join(', ')})
+ON CONFLICT (ID) DO UPDATE SET ${updateClause}`
+}
+
+/**
+ * Build a SxT UPSERT where the INSERT/VALUES clause uses the full merged
+ * payload (to satisfy SxT's NOT NULL validation on the INSERT branch — see
+ * `fetchExistingSxtRow` docstring) but the `DO UPDATE SET` clause only
+ * touches the columns from the ORIGINAL patch (`row.payload`).
+ *
+ * Why this split matters (Copilot review on PR #24): if the UPDATE SET
+ * clause updated all merged columns, then any non-atomic read-modify-write
+ * race (e.g., outbox rows for the same aggregate processed out of order)
+ * would clobber newer column values with stale values read from the
+ * existing SxT row. Restricting UPDATE SET to only the patch's keys keeps
+ * the operational semantics aligned with the architecture's "delta only"
+ * write contract — the merged payload exists *purely* to make the INSERT
+ * branch pass NOT NULL when the row doesn't exist (or to keep `EXCLUDED.X`
+ * well-defined for the UPDATE clause).
+ *
+ * Added 2026-05-27 per Story 0.1 Task 7.
+ */
+function buildSxtMergedUpsert(row, mergedPayload) {
+  const sxtTable = resolveSxtTable(row.aggregate);
+  const patch = row.payload || {};
+  const patchKeys = Object.keys(patch);
+  if (patchKeys.length === 0) {
+    throw new Error(
+      `outbox-settlement-worker: cannot build merged UPSERT for outbox_id=${row.id} — row.payload is empty (nothing to update)`,
+    )
+  }
+  if (!mergedPayload || typeof mergedPayload !== 'object') {
+    throw new Error(
+      `outbox-settlement-worker: mergedPayload must be a non-null object for outbox_id=${row.id}`,
+    )
+  }
+  const insertKeys = Object.keys(mergedPayload);
+  if (insertKeys.length === 0) {
+    throw new Error(
+      `outbox-settlement-worker: mergedPayload is empty for outbox_id=${row.id} — INSERT clause would be invalid`,
+    )
+  }
+  for (const k of insertKeys) assertValidSqlIdent(k, row.id);
+  // Every patch key must appear in the merged payload (otherwise
+  // `EXCLUDED.<patchCol>` references a column the INSERT didn't supply).
+  for (const k of patchKeys) {
+    if (!Object.prototype.hasOwnProperty.call(mergedPayload, k)) {
+      throw new Error(
+        `outbox-settlement-worker: patch key "${k}" missing from mergedPayload (build merge logic bug) for outbox_id=${row.id}`,
+      )
+    }
+  }
+  const id = assertNonEmptyAggregateId(row);
+  const idComment = `-- outbox_id: ${row.id}`;
+  const cols = ['ID', ...insertKeys.map((k) => k.toUpperCase())];
   const vals = [
     `'${id.replace(/'/g, "''")}'`,
-    ...Object.values(payload).map((v) =>
-      v === null
-        ? 'NULL'
-        : typeof v === 'number'
-          ? String(v)
-          : `'${String(v).replace(/'/g, "''")}'`,
-    ),
+    ...Object.values(mergedPayload).map(serializeSqlValue),
   ];
-  const updateClause = payloadKeys
+  // ✱ UPDATE SET uses ONLY patchKeys — not insertKeys — so concurrent
+  // out-of-order outbox rows don't clobber each other's untouched columns.
+  const updateClause = patchKeys
     .map((k) => `${k.toUpperCase()} = EXCLUDED.${k.toUpperCase()}`)
     .join(', ');
   return `${idComment}
@@ -27558,20 +27702,50 @@ async function run(inputs) {
       continue
     }
 
-    // (2) SxT UPSERT (dry-run logs the SQL; real-mode executes it)
-    const sxtSql = buildSxtUpsert(row);
+    // (2) SxT UPSERT — read-merge-upsert per Story 0.1 Task 7
+    //
+    // Real-mode: fetch the existing SxT row, merge the patch over it, build
+    // a full-row UPSERT. This is required because SxT validates NOT NULL on
+    // the INSERT clause even when the conflict path takes the UPDATE branch
+    // — a partial-payload UPSERT against an existing row fails with
+    // "integrity constraint" against any non-trivial table schema.
+    // Verified empirically 2026-05-27 against staging (Story 0.1 Task 5
+    // substrate-validation).
+    //
+    // Dry-run: no SxT connection to read from, so we fall back to the
+    // partial-payload UPSERT (informational SQL only, not executed).
+    let sxtSql = null;
+    let dryRunSql = null;
+    if (dryRun) {
+      dryRunSql = buildSxtUpsert(row);
+    }
     emitEvent('settlement.attempted', {
       outbox_id: row.id,
       aggregate: row.aggregate,
       trace_id: row.trace_id,
       run_id: workerId,
-      ...(dryRun ? { dry_run: true, sxt_sql: sxtSql } : {}),
+      ...(dryRun ? { dry_run: true, sxt_sql: dryRunSql } : {}),
     });
 
     let status = 'settled';
     let error = null;
     if (!dryRun) {
       try {
+        const existingRow = await fetchExistingSxtRow(
+          jwt,
+          sxtBiscuit,
+          row.aggregate,
+          row.aggregate_id,
+          refreshJwt,
+        );
+        const fullPayload = mergeExistingRowWithPayload(existingRow, row.payload);
+        // Build the UPSERT with: INSERT/VALUES from the merged full row
+        // (so SxT's NOT NULL validation passes on the INSERT branch), but
+        // DO UPDATE SET from the original row.payload keys only (so we
+        // don't clobber columns the patch didn't touch with potentially
+        // stale values from the existing-row read). See buildSxtMergedUpsert
+        // docstring for the race-condition rationale.
+        sxtSql = buildSxtMergedUpsert(row, fullPayload);
         await sxtExecute(jwt, sxtBiscuit, sxtSql, refreshJwt);
       } catch (e) {
         status = 'failed';
