@@ -478,13 +478,59 @@ describe('mergeExistingRowWithPayload id-strip consistency (Task 7 cleanup, B-H2
     expect(mergeExistingRowWithPayload(null, { category: 'completed' })).not.toHaveProperty('id')
   })
 
-  it('preserves payload key named id (payload wins over id-strip — fail-loud at buildSxtUpsert)', () => {
+  it('preserves payload key named id at the merge layer (rejected downstream by buildSxtUpsert)', () => {
     // The id-strip applies to existingRow only — payload keys pass through
-    // (and the downstream buildSxtUpsert/buildSxtMergedUpsert validates
-    // identifier shape). This documents the contract.
+    // the merge unmodified. The downstream buildSxtUpsert/buildSxtMergedUpsert
+    // is responsible for failing loud on the collision (see assertValidSqlIdent
+    // — payload key uppercasing to 'ID' is explicitly rejected per the
+    // Copilot review on PR #25).
     expect(mergeExistingRowWithPayload({ id: 'existing-id' }, { id: 'payload-id' })).toEqual({
       id: 'payload-id',
     })
+  })
+})
+
+describe('payload id-key rejection at upsert layer (PR #25 Copilot review)', () => {
+  it('buildSxtUpsert rejects payload with lowercase "id" key', () => {
+    expect(() =>
+      buildSxtUpsert({
+        id: 1,
+        aggregate: 'deal',
+        aggregate_id: 'deal-abc',
+        payload: { id: 'duplicate', category: 'completed' },
+      }),
+    ).toThrow(/collides with the canonical ID column/)
+  })
+
+  it('buildSxtUpsert rejects payload with "Id" or "ID" (case-insensitive)', () => {
+    expect(() =>
+      buildSxtUpsert({
+        id: 1,
+        aggregate: 'deal',
+        aggregate_id: 'deal-abc',
+        payload: { Id: 'x' },
+      }),
+    ).toThrow(/collides with the canonical ID column/)
+    expect(() =>
+      buildSxtUpsert({
+        id: 1,
+        aggregate: 'deal',
+        aggregate_id: 'deal-abc',
+        payload: { ID: 'x' },
+      }),
+    ).toThrow(/collides with the canonical ID column/)
+  })
+
+  it('buildSxtMergedUpsert rejects merged payload with "id" key (defense-in-depth)', () => {
+    // If a caller hand-crafts a mergedPayload with an 'id' key (bypassing
+    // mergeExistingRowWithPayload which would have stripped existing-row id),
+    // the upsert builder still rejects it.
+    expect(() =>
+      buildSxtMergedUpsert(
+        { id: 1, aggregate: 'deal', aggregate_id: 'deal-abc', payload: { category: 'x' } },
+        { id: 'leaked-id', category: 'x', user_id: 'u1' },
+      ),
+    ).toThrow(/collides with the canonical ID column/)
   })
 })
 

@@ -27563,12 +27563,22 @@ function serializeSqlValue(v) {
  * Validate identifier-shape on a payload key. Payload keys interpolate
  * into SQL positionally as column identifiers; SxT doesn't support
  * identifier-quoting on the producer side, so we reject anything that
- * isn't a strict SQL identifier.
+ * isn't a strict SQL identifier. Also explicitly rejects keys that
+ * uppercase to `ID` — `buildSxtUpsert` adds an `ID` column derived from
+ * `row.aggregate_id`, so a payload `id` (or `Id`/`ID`) would produce a
+ * duplicate `ID` column in the INSERT clause and either invalid SQL or
+ * a confusing runtime SxT error. Fail loud with a clear message instead.
+ * (Copilot review on PR #25.)
  */
 function assertValidSqlIdent(k, outboxId) {
   if (!SQL_IDENT_RE.test(k)) {
     throw new Error(
       `outbox-settlement-worker: payload key "${k}" is not a valid SQL identifier (must match ${SQL_IDENT_RE}); cannot build UPSERT for outbox_id=${outboxId}`,
+    )
+  }
+  if (k.toUpperCase() === 'ID') {
+    throw new Error(
+      `outbox-settlement-worker: payload key "${k}" collides with the canonical ID column (derived from row.aggregate_id) for outbox_id=${outboxId} — do not include an "id" column in the outbox payload`,
     )
   }
 }
@@ -27834,10 +27844,20 @@ async function run(inputs) {
             on: 'between_select_and_upsert',
             run_id: workerId,
           });
-          status = 'lease_lost';
-          throw new Error(
-            `outbox-settlement-worker: lease lost after SxT SELECT, before UPSERT (outbox_id=${row.id})`,
-          )
+          // Lease-loss is benign here — the next worker pass picks the row
+          // back up cleanly. We can't `continue` from inside the try/catch
+          // since results.push happens after the for-body, so jump straight
+          // to writing a `lease_lost` results entry and skip the UPSERT.
+          // Throwing into the outer catch would mask this as `failed` which
+          // looks like a hard error to the finalizer (Copilot review on #25).
+          results.push({
+            outbox_id: row.id,
+            aggregate: row.aggregate,
+            status: 'lease_lost',
+            error: null,
+            latency_ms: Date.now() - t0,
+          });
+          continue
         }
         const fullPayload = mergeExistingRowWithPayload(existingRow, row.payload);
         // Build the UPSERT with: INSERT/VALUES from the merged full row

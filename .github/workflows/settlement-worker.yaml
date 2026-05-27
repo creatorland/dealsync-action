@@ -1,28 +1,21 @@
 name: 'Settlement Worker'
 
 # ─────────────────────────────────────────────────────────────────────────
-# PHASE 0 SPIKE — STRUCTURAL FILE ONLY, NOT YET DISPATCHABLE
+# PHASE 0 SPIKE — workflow_dispatch + scheduler-service cron triggers
 # ─────────────────────────────────────────────────────────────────────────
-# This workflow references actions via
-#   uses: creatorland/dealsync-action/src/outbox-settlement-{guard,worker,finalizer}@main
-# but those source directories ship the JS module ONLY in this spike — no
-# `action.yml` shells and no bundled `dist/index.js`. As-is the workflow
-# will NOT execute via `gh workflow run` or W3 dispatch; GHA's `uses:`
-# resolver needs an `action.yml` at each path.
+# Story 0.6 (cron-tick latency probe; FR-P0-6, merged in #23) shipped the
+# action.yml shells + Rollup-bundled dist/index.js for guard / worker /
+# finalizer, so this workflow IS now dispatchable via `gh workflow run`
+# and W3 dispatch.
 #
-# Story 0.6 (cron-tick latency probe; FR-P0-6) ships the missing pieces:
-#   - action.yml per action (inputs/outputs/runs:node24)
-#   - Rollup-bundled dist/index.js per action
-#   - W3 secret store entries (W3_SECRET_SUPABASE_URL etc.)
-#   - scheduler-service cron triggers per Architecture
-#     §"Settlement Worker Specification > Backpressure"
+# Story 0.1 Task 7 cleanup (#25, 2026-05-27) added `sxt-biscuit` to the
+# worker step + a `GITHUB_ACTIONS && !SXT_BISCUIT` hard-fail in main.js
+# — a missing W3 secret now surfaces loudly instead of silently flipping
+# the worker to dry-run mode while the finalizer marked rows `settled`.
 #
-# Until then the worker is validated locally via
-# `scripts/run-worker-locally.mjs` — the source modules under src/ are the
-# actual portable JS that Story 0.6 will wrap.
-#
-# Static validation: `mcp__w3__compile-workflow` confirms YAML is W3-valid
-# (valid=true, no GHA-only features, all expression refs resolve).
+# Local validation still uses `scripts/run-worker-locally.mjs`; the
+# source modules under src/ are the canonical implementation that the
+# action bundles wrap. Static validation: `mcp__w3__compile-workflow`.
 # ─────────────────────────────────────────────────────────────────────────
 
 # Manual dispatch only during Phase 0 spike. Story 0.6 (cron-tick latency
