@@ -27,7 +27,12 @@
 
 import { emitEvent, requireEnv, supabaseRpc } from '../lib/spike-runtime.js'
 
-const SXT_API_URL = process.env.SXT_API_URL || 'https://api.makeinfinite.dev'
+// Read SXT_API_URL lazily inside callers (not as a module-level const) so the
+// GHA `main.js` wrapper can set `process.env.SXT_API_URL` from the
+// `sxt-api-url` action input AFTER this module is imported.
+function getSxtApiUrl() {
+  return process.env.SXT_API_URL || 'https://api.makeinfinite.dev'
+}
 
 /**
  * Fetch SxT JWT via backend's proxy. Story 0.1's select-sxt.sh fixture
@@ -61,8 +66,9 @@ async function fetchSxtJwt(sxtAuthUrl, sxtAuthSecret, account = 'external') {
  * or text). On 401, re-fetches the JWT once and retries.
  */
 async function sxtExecute(jwt, biscuit, sqlText, refreshJwt) {
+  const apiUrl = getSxtApiUrl()
   const doFetch = async (token) => {
-    return fetch(`${SXT_API_URL}/v1/sql`, {
+    return fetch(`${apiUrl}/v1/sql`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ sqlText, biscuits: [biscuit] }),

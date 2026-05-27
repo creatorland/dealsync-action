@@ -1,0 +1,36 @@
+name: 'Outbox Settlement Guard'
+description: 'Claims a batch of unsettled settlement_outbox rows via claim_outbox_batch RPC (Phase 0 spike / Story 0.6).'
+author: 'creatorland'
+
+inputs:
+  batch-size:
+    description: 'Max rows to claim from settlement_outbox.'
+    required: false
+    default: '100'
+  lease-seconds:
+    description: 'Lease window (seconds) stamped on claimed rows.'
+    required: false
+    default: '60'
+  worker-id:
+    description: 'Identifier stamped on claimed rows (typically ${{ github.run_id }}).'
+    required: true
+  outbox-id:
+    description: 'Optional: target a specific settlement_outbox row id (spike-mode single-row drain). Leave blank for normal batch claim.'
+    required: false
+    default: ''
+  supabase-url:
+    description: 'Supabase project URL.'
+    required: true
+  supabase-service-role-key:
+    description: 'Supabase service-role key — bypasses RLS.'
+    required: true
+
+outputs:
+  claimed-batch:
+    description: 'JSON-encoded array of claimed settlement_outbox rows.'
+  claimed-count:
+    description: 'Number of rows the guard claimed (string).'
+
+runs:
+  using: 'node24'
+  main: 'dist/index.js'

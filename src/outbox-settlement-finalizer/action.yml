@@ -1,0 +1,39 @@
+name: 'Outbox Settlement Finalizer'
+description: 'Acks per-row settlement outcomes via mark_settled / mark_attempt_failed RPCs (Phase 0 spike / Story 0.6).'
+author: 'creatorland'
+
+inputs:
+  results:
+    description: 'JSON-encoded array of per-row outcomes from the worker.'
+    required: true
+  worker-id:
+    description: 'Identifier (must match guard + worker) — checked by mark_settled and mark_attempt_failed ownership predicates.'
+    required: true
+  batch-size:
+    description: 'Originally-requested guard batch size. Drives the more-work decision (claimed == batch).'
+    required: false
+    default: '100'
+  claimed-count:
+    description: 'Number of rows the guard claimed (BEFORE worker skips). Falls back to results.length if absent.'
+    required: false
+    default: ''
+  supabase-url:
+    description: 'Supabase project URL.'
+    required: true
+  supabase-service-role-key:
+    description: 'Supabase service-role key.'
+    required: true
+
+outputs:
+  more-work:
+    description: 'true when claimed == batch-size (signals the scheduler-service cadence selector that more drain may be needed).'
+  settled-count:
+    description: 'Rows marked settled (string).'
+  failed-count:
+    description: 'Rows marked attempt-failed (string).'
+  dead-letter-count:
+    description: 'Rows that crossed the dead-letter threshold (string).'
+
+runs:
+  using: 'node24'
+  main: 'dist/index.js'
