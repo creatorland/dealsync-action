@@ -30,6 +30,12 @@ on:
 
 jobs:
   settle:
+    # W3 environment that holds the W3_SECRET_* values referenced below.
+    # Set in the W3 UI as `dealsync-devnet`. When this workflow is promoted
+    # to testnet / betanet, copy the YAML with the matching env hash
+    # (testnet `0xead32ddc...` / betanet `0x12c3f02f...` per existing
+    # dealsync-*.{testnet,betanet}.yml files in this repo).
+    environment: '0x5bfebec2b2a538763351f2d592a48c7ae3a5b82a318ff39a0e70b87d59411d94'
     runs-on: ubuntu-latest
     steps:
       - id: guard
