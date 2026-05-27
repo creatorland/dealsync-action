@@ -27428,6 +27428,76 @@ async function sxtExecute(jwt, biscuit, sqlText, refreshJwt) {
  *     string-interpolation with the rate-limiter's prepared-statement path.
  */
 const SQL_IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+/**
+ * Aggregate → SxT table mapping. Shared by buildSxtUpsert (for INSERT)
+ * and fetchExistingSxtRow (for SELECT). Phase 1 stories 1.x formalize
+ * these mirrors; for the spike we point at the existing sandbox-era
+ * SxT tables shared with prod.
+ */
+const SXT_TABLE_FOR_AGGREGATE = {
+  deal: 'DEALSYNC_STG_V1.DEALS',
+  contact: 'DEALSYNC_STG_V1.CONTACTS',
+  email_thread_eval: 'DEALSYNC_STG_V1.EMAIL_THREAD_EVALUATIONS',
+  ai_eval_audit: 'DEALSYNC_STG_V1.AI_EVALUATION_AUDITS',
+  thread_user_state: 'DEALSYNC_STG_V1.THREAD_USER_STATE',
+};
+
+/**
+ * Fetch the existing SxT row for an aggregate, keyed by ID.
+ *
+ * Added 2026-05-27 per Story 0.1 Task 7: SxT validates NOT NULL columns
+ * on the INSERT clause of `INSERT ... ON CONFLICT (ID) DO UPDATE` even
+ * when the UPDATE branch will be taken. The worker therefore needs to
+ * send all columns the table requires, not just the patch's delta.
+ * We resolve by reading the existing row, merging the patch onto it,
+ * then sending a full-row UPSERT (mergeExistingRowWithPayload).
+ *
+ * Returns: lowercase-keyed row object (SxT returns UPPERCASE; we
+ * normalize so it can merge cleanly with payload's lowercase keys),
+ * or null if the row doesn't exist.
+ */
+async function fetchExistingSxtRow(jwt, biscuit, aggregate, aggregateId, refreshJwt) {
+  const sxtTable = SXT_TABLE_FOR_AGGREGATE[aggregate];
+  if (!sxtTable) {
+    throw new Error(
+      `outbox-settlement-worker: unknown aggregate ${aggregate} for SxT mapping`,
+    )
+  }
+  if (typeof aggregateId !== 'string' || aggregateId.length === 0) {
+    throw new Error(
+      `outbox-settlement-worker: aggregateId must be a non-empty string for SxT SELECT`,
+    )
+  }
+  const sql = `SELECT * FROM ${sxtTable} WHERE ID = '${aggregateId.replace(/'/g, "''")}' LIMIT 1`;
+  const result = await sxtExecute(jwt, biscuit, sql, refreshJwt);
+  if (!Array.isArray(result) || result.length === 0) return null
+  return Object.fromEntries(
+    Object.entries(result[0]).map(([k, v]) => [k.toLowerCase(), v]),
+  )
+}
+
+/**
+ * Merge an existing SxT row's columns with an outbox row's patch payload.
+ * The payload wins on overlapping keys (it represents the new state).
+ * The 'id' column from the existing row is excluded — buildSxtUpsert
+ * uses row.aggregate_id as the canonical ID source so never duplicate it.
+ *
+ * Added 2026-05-27 per Story 0.1 Task 7. See fetchExistingSxtRow docstring
+ * for the SxT NOT NULL motivation.
+ *
+ * @param {object|null} existingRow  Lowercase-keyed row from fetchExistingSxtRow, or null
+ * @param {object} payload           Outbox row's patch payload (lowercase keys)
+ * @returns {object}                  Merged payload suitable for buildSxtUpsert
+ */
+function mergeExistingRowWithPayload(existingRow, payload) {
+  const safePayload = payload || {};
+  if (!existingRow) return { ...safePayload }
+  const merged = { ...existingRow, ...safePayload };
+  delete merged.id;
+  return merged
+}
+
 function buildSxtUpsert(row) {
   const tableMap = {
     deal: 'DEALSYNC_STG_V1.DEALS',
@@ -27558,20 +27628,44 @@ async function run(inputs) {
       continue
     }
 
-    // (2) SxT UPSERT (dry-run logs the SQL; real-mode executes it)
-    const sxtSql = buildSxtUpsert(row);
+    // (2) SxT UPSERT — read-merge-upsert per Story 0.1 Task 7
+    //
+    // Real-mode: fetch the existing SxT row, merge the patch over it, build
+    // a full-row UPSERT. This is required because SxT validates NOT NULL on
+    // the INSERT clause even when the conflict path takes the UPDATE branch
+    // — a partial-payload UPSERT against an existing row fails with
+    // "integrity constraint" against any non-trivial table schema.
+    // Verified empirically 2026-05-27 against staging (Story 0.1 Task 5
+    // substrate-validation).
+    //
+    // Dry-run: no SxT connection to read from, so we fall back to the
+    // partial-payload UPSERT (informational SQL only, not executed).
+    let sxtSql = null;
+    let dryRunSql = null;
+    if (dryRun) {
+      dryRunSql = buildSxtUpsert(row);
+    }
     emitEvent('settlement.attempted', {
       outbox_id: row.id,
       aggregate: row.aggregate,
       trace_id: row.trace_id,
       run_id: workerId,
-      ...(dryRun ? { dry_run: true, sxt_sql: sxtSql } : {}),
+      ...(dryRun ? { dry_run: true, sxt_sql: dryRunSql } : {}),
     });
 
     let status = 'settled';
     let error = null;
     if (!dryRun) {
       try {
+        const existingRow = await fetchExistingSxtRow(
+          jwt,
+          sxtBiscuit,
+          row.aggregate,
+          row.aggregate_id,
+          refreshJwt,
+        );
+        const fullPayload = mergeExistingRowWithPayload(existingRow, row.payload);
+        sxtSql = buildSxtUpsert({ ...row, payload: fullPayload });
         await sxtExecute(jwt, sxtBiscuit, sxtSql, refreshJwt);
       } catch (e) {
         status = 'failed';

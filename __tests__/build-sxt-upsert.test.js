@@ -13,7 +13,9 @@
 
 import { jest } from '@jest/globals'
 
-const { buildSxtUpsert } = await import('../src/outbox-settlement-worker/index.js')
+const { buildSxtUpsert, mergeExistingRowWithPayload } = await import(
+  '../src/outbox-settlement-worker/index.js'
+)
 
 function row(overrides = {}) {
   return {
@@ -143,5 +145,126 @@ describe('buildSxtUpsert', () => {
       expect(sql).toContain('(ID, CATEGORY, UPDATED_AT)')
       expect(sql).toMatch(/CATEGORY = EXCLUDED.CATEGORY, UPDATED_AT = EXCLUDED.UPDATED_AT/)
     })
+  })
+})
+
+/**
+ * Story 0.1 Task 7 (added 2026-05-27 during substrate-validation):
+ * SxT requires all NOT NULL columns in the INSERT clause even when the
+ * conflict-path-UPDATE branch will be taken. The worker resolves this
+ * by reading the existing SxT row + merging the patch payload onto it
+ * before building a full-row UPSERT. These tests cover the merge logic;
+ * fetchExistingSxtRow is exercised end-to-end against staging in
+ * Story 0.1 Task 7.4.
+ */
+describe('mergeExistingRowWithPayload (Story 0.1 Task 7)', () => {
+  it('returns payload unchanged when existing row is null', () => {
+    expect(mergeExistingRowWithPayload(null, { category: 'booking' })).toEqual({
+      category: 'booking',
+    })
+  })
+
+  it('returns payload unchanged when existing row is undefined', () => {
+    expect(mergeExistingRowWithPayload(undefined, { category: 'booking' })).toEqual({
+      category: 'booking',
+    })
+  })
+
+  it('returns empty object when both inputs are empty/null', () => {
+    expect(mergeExistingRowWithPayload(null, null)).toEqual({})
+    expect(mergeExistingRowWithPayload(null, {})).toEqual({})
+  })
+
+  it('merges existing row + payload; payload wins on overlap', () => {
+    const existing = {
+      user_id: 'user-1',
+      thread_id: 'thread-1',
+      category: 'in_progress',
+      brand: null,
+      updated_at: '2026-01-01T00:00:00Z',
+    }
+    const payload = { category: 'not_interested', updated_at: '2026-05-27T05:00:00Z' }
+    expect(mergeExistingRowWithPayload(existing, payload)).toEqual({
+      user_id: 'user-1',
+      thread_id: 'thread-1',
+      category: 'not_interested', // payload wins
+      brand: null, // preserved from existing (null is a valid value)
+      updated_at: '2026-05-27T05:00:00Z', // payload wins
+    })
+  })
+
+  it("strips 'id' from existing row (buildSxtUpsert uses row.aggregate_id as canonical ID)", () => {
+    // Without this, the merged payload would have an 'id' key that buildSxtUpsert
+    // would emit as a duplicate ID column in the INSERT clause.
+    const existing = { id: 'existing-id-value', user_id: 'u1', category: 'in_progress' }
+    const payload = { category: 'completed' }
+    const merged = mergeExistingRowWithPayload(existing, payload)
+    expect(merged).not.toHaveProperty('id')
+    expect(merged).toEqual({ user_id: 'u1', category: 'completed' })
+  })
+
+  it('keeps payload null values (intentional clears) over existing non-null', () => {
+    const existing = { user_id: 'u1', brand: 'Acme', category: 'in_progress' }
+    const payload = { brand: null }
+    expect(mergeExistingRowWithPayload(existing, payload)).toEqual({
+      user_id: 'u1',
+      brand: null, // payload's null wins
+      category: 'in_progress',
+    })
+  })
+
+  it('produces a full-row payload that buildSxtUpsert accepts on a row whose payload alone would be partial', () => {
+    // Realistic Story 0.8 scenario: PATCH /deals/:id with {category}, backend
+    // writes payload {category, updated_at, is_ai_sorted} to outbox. SxT row
+    // exists with all 13 DEALS cols. After merge, buildSxtUpsert sees the
+    // full row and emits a valid UPSERT.
+    const existing = {
+      id: 'deal-abc', // will be stripped
+      user_id: 'user-1',
+      thread_id: 'thread-1',
+      email_thread_evaluation_id: null,
+      deal_name: 'Black Friday',
+      deal_type: 'affiliate',
+      category: 'in_progress',
+      value: null,
+      currency: null,
+      brand: 'Wellnesse',
+      is_ai_sorted: true,
+      created_at: '2026-02-12T01:10:58Z',
+      updated_at: '2026-02-12T01:10:58Z',
+    }
+    const partialPayload = {
+      category: 'not_interested',
+      updated_at: '2026-05-27T05:00:00Z',
+      is_ai_sorted: false,
+    }
+    const merged = mergeExistingRowWithPayload(existing, partialPayload)
+    const sql = buildSxtUpsert({
+      id: 11,
+      aggregate: 'deal',
+      aggregate_id: 'deal-abc',
+      payload: merged,
+    })
+    // All 12 non-id cols from existing + payload-merged → INSERT clause
+    expect(sql).toContain('USER_ID')
+    expect(sql).toContain('THREAD_ID')
+    expect(sql).toContain('BRAND')
+    expect(sql).toContain('DEAL_NAME')
+    expect(sql).toContain('CREATED_AT')
+    expect(sql).toContain('UPDATED_AT')
+    expect(sql).toContain('CATEGORY')
+    // Payload-wins values:
+    expect(sql).toContain("'not_interested'") // category
+    expect(sql).toContain("'2026-05-27T05:00:00Z'") // updated_at
+    // Existing-row values preserved:
+    expect(sql).toContain("'Wellnesse'") // brand
+    expect(sql).toContain("'Black Friday'") // deal_name
+    // ID column appears exactly once (from row.aggregate_id, not duplicated from existing)
+    expect(sql.match(/^\(ID,/m) || sql.match(/\(ID, /)).toBeTruthy()
+    const idMatches = sql.match(/\bID\b/g) || []
+    // Should appear in INSERT cols, ON CONFLICT clause; NOT in EXCLUDED.ID assignment
+    // (since 'id' was stripped from the merged payload).
+    expect(idMatches.length).toBeGreaterThanOrEqual(2)
+    expect(sql).not.toContain('ID = EXCLUDED.ID')
   })
 })
