@@ -13,9 +13,12 @@
 
 import { jest } from '@jest/globals'
 
-const { buildSxtUpsert, buildSxtMergedUpsert, mergeExistingRowWithPayload } = await import(
-  '../src/outbox-settlement-worker/index.js'
-)
+const {
+  buildSxtUpsert,
+  buildSxtMergedUpsert,
+  mergeExistingRowWithPayload,
+  normalizeSxtRowToLowercase,
+} = await import('../src/outbox-settlement-worker/index.js')
 
 function row(overrides = {}) {
   return {
@@ -360,5 +363,161 @@ describe('buildSxtMergedUpsert (Story 0.1 Task 7)', () => {
       merged,
     )
     expect(sql).not.toContain('ID = EXCLUDED.ID')
+  })
+})
+
+/**
+ * Story 0.1 Task 7 close-out review (2026-05-27) — cleanup tests for
+ * findings surfaced by parallel adversarial reviewers.
+ */
+describe('serializeSqlValue type handling (Task 7 cleanup)', () => {
+  // Indirectly exercised through buildSxtUpsert since serializeSqlValue is
+  // module-private. Each test crafts a payload value of a specific type and
+  // asserts the rendered SQL fragment.
+  function sqlFor(payload) {
+    return buildSxtUpsert({ id: 1, aggregate: 'deal', aggregate_id: 'd1', payload })
+  }
+
+  it('renders boolean true as TRUE (not quoted string)', () => {
+    expect(sqlFor({ is_ai_sorted: true })).toContain(', TRUE)')
+    expect(sqlFor({ is_ai_sorted: true })).not.toContain("'true'")
+  })
+
+  it('renders boolean false as FALSE (not quoted string)', () => {
+    expect(sqlFor({ is_ai_sorted: false })).toContain(', FALSE)')
+    expect(sqlFor({ is_ai_sorted: false })).not.toContain("'false'")
+  })
+
+  it('throws on object payload value (would otherwise emit [object Object])', () => {
+    expect(() => sqlFor({ meta: { foo: 'bar' } })).toThrow(/unsupported type "object"/)
+  })
+
+  it('throws on array payload value (would otherwise emit comma-joined string)', () => {
+    expect(() => sqlFor({ tags: ['a', 'b'] })).toThrow(/unsupported type "object"/)
+  })
+
+  it('throws on bigint payload value', () => {
+    expect(() => sqlFor({ count: 1n })).toThrow(/unsupported type "bigint"/)
+  })
+
+  it('throws on NaN', () => {
+    expect(() => sqlFor({ score: NaN })).toThrow(/non-finite number/)
+  })
+
+  it('throws on Infinity', () => {
+    expect(() => sqlFor({ score: Infinity })).toThrow(/non-finite number/)
+  })
+
+  it('still serializes null as NULL', () => {
+    expect(sqlFor({ brand: null })).toContain(', NULL)')
+  })
+
+  it('still serializes undefined as NULL', () => {
+    expect(sqlFor({ brand: undefined })).toContain(', NULL)')
+  })
+})
+
+describe('normalizeSxtRowToLowercase (Task 7 cleanup, E-M4 partial)', () => {
+  it('lowercases UPPERCASE keys (SxT default response shape)', () => {
+    expect(normalizeSxtRowToLowercase({ ID: 'x', USER_ID: 'u1', CATEGORY: 'in_progress' })).toEqual({
+      id: 'x',
+      user_id: 'u1',
+      category: 'in_progress',
+    })
+  })
+
+  it('preserves values (does not normalize value types)', () => {
+    expect(normalizeSxtRowToLowercase({ BRAND: null, IS_AI_SORTED: false, VALUE: 42 })).toEqual({
+      brand: null,
+      is_ai_sorted: false,
+      value: 42,
+    })
+  })
+
+  it('returns null for null/undefined input', () => {
+    expect(normalizeSxtRowToLowercase(null)).toBeNull()
+    expect(normalizeSxtRowToLowercase(undefined)).toBeNull()
+  })
+
+  it('returns null for non-object input', () => {
+    expect(normalizeSxtRowToLowercase('not-a-row')).toBeNull()
+    expect(normalizeSxtRowToLowercase(42)).toBeNull()
+  })
+
+  it('handles already-lowercase keys (idempotent)', () => {
+    expect(normalizeSxtRowToLowercase({ id: 'x', category: 'y' })).toEqual({ id: 'x', category: 'y' })
+  })
+
+  it('handles mixed-case keys (lowercases them all)', () => {
+    expect(normalizeSxtRowToLowercase({ Id: 'x', User_Id: 'u1' })).toEqual({ id: 'x', user_id: 'u1' })
+  })
+})
+
+describe('mergeExistingRowWithPayload id-strip consistency (Task 7 cleanup, B-H2)', () => {
+  it('strips id from existing row when payload is non-empty (existing path)', () => {
+    const existing = { id: 'stripped', user_id: 'u1', category: 'in_progress' }
+    const payload = { category: 'completed' }
+    const merged = mergeExistingRowWithPayload(existing, payload)
+    expect(merged).not.toHaveProperty('id')
+    expect(merged).toEqual({ user_id: 'u1', category: 'completed' })
+  })
+
+  it('strips id from existing row even when payload is empty (path consistency)', () => {
+    const existing = { id: 'stripped', user_id: 'u1', category: 'in_progress' }
+    expect(mergeExistingRowWithPayload(existing, {})).toEqual({
+      user_id: 'u1',
+      category: 'in_progress',
+    })
+    expect(mergeExistingRowWithPayload(existing, {})).not.toHaveProperty('id')
+  })
+
+  it('does not invent an id when existing is null (no synthetic id ever returned)', () => {
+    expect(mergeExistingRowWithPayload(null, { category: 'completed' })).toEqual({
+      category: 'completed',
+    })
+    expect(mergeExistingRowWithPayload(null, { category: 'completed' })).not.toHaveProperty('id')
+  })
+
+  it('preserves payload key named id (payload wins over id-strip — fail-loud at buildSxtUpsert)', () => {
+    // The id-strip applies to existingRow only — payload keys pass through
+    // (and the downstream buildSxtUpsert/buildSxtMergedUpsert validates
+    // identifier shape). This documents the contract.
+    expect(mergeExistingRowWithPayload({ id: 'existing-id' }, { id: 'payload-id' })).toEqual({
+      id: 'payload-id',
+    })
+  })
+})
+
+describe('buildSxtMergedUpsert race-safety scope (Task 7 cleanup, B-H3 docstring claim)', () => {
+  // These tests document the boundary of the race-safety guarantee, not bugs.
+  it('UPDATE branch: untouched columns preserved (existing row scenario)', () => {
+    const existing = { user_id: 'u1', brand: 'Wellnesse', category: 'in_progress' }
+    const patch = { category: 'completed' }
+    const merged = mergeExistingRowWithPayload(existing, patch)
+    const sql = buildSxtMergedUpsert(
+      { id: 1, aggregate: 'deal', aggregate_id: 'd1', payload: patch },
+      merged,
+    )
+    const updateClause = sql.match(/ON CONFLICT \(ID\) DO UPDATE SET ([^\n]+)$/m)[1]
+    expect(updateClause).toBe('CATEGORY = EXCLUDED.CATEGORY')
+    expect(updateClause).not.toContain('BRAND')
+    expect(updateClause).not.toContain('USER_ID')
+  })
+
+  it('first-write branch (existing=null): merged = patch only — caller responsible for NOT NULL coverage', () => {
+    // Documents the scope-clarification block in buildSxtMergedUpsert's
+    // docstring: the race-safety fix doesn't make first-write rows
+    // self-sufficient. If the patch alone omits a NOT NULL column on a
+    // brand-new SxT row, SxT still rejects on INSERT.
+    const patch = { category: 'completed' } // partial; missing user_id, etc.
+    const merged = mergeExistingRowWithPayload(null, patch)
+    expect(merged).toEqual({ category: 'completed' })
+    // buildSxtMergedUpsert itself doesn't enforce NOT NULL coverage —
+    // SxT does, at execute time. This is by design (Phase 0 spike scope).
+    const sql = buildSxtMergedUpsert(
+      { id: 1, aggregate: 'deal', aggregate_id: 'd1', payload: patch },
+      merged,
+    )
+    expect(sql).toContain('INSERT INTO DEALSYNC_STG_V1.DEALS (ID, CATEGORY)')
   })
 })

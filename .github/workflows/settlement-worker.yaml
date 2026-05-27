@@ -60,6 +60,11 @@ jobs:
           supabase-service-role-key: ${{ secrets.W3_SECRET_SUPABASE_SERVICE_ROLE_KEY }}
           sxt-auth-url: ${{ secrets.W3_SECRET_SXT_AUTH_URL }}
           sxt-auth-secret: ${{ secrets.W3_SECRET_SXT_AUTH_SECRET }}
+          # Without sxt-biscuit the worker dry-runs and the finalizer marks rows
+          # `settled` anyway — silent data-loss path. Phase 0 fix: pass the
+          # biscuit; main.js also hard-fails when GITHUB_ACTIONS is set but the
+          # biscuit input is empty, so a missing W3 secret surfaces loudly.
+          sxt-biscuit: ${{ secrets.W3_SECRET_SXT_BISCUIT }}
 
       - id: finalize
         if: always() && steps.guard.outputs.claimed-count != '0'
