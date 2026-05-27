@@ -67,5 +67,11 @@ jobs:
         with:
           results: ${{ steps.worker.outputs.results }}
           worker-id: ${{ github.run_id }}
+          # Thread batch-size + claimed-count through so the finalizer's
+          # `more-work = claimedCount === batchSize` decision is meaningful
+          # (without these the finalizer falls back to results.length and
+          # more-work is essentially always false).
+          batch-size: 100
+          claimed-count: ${{ steps.guard.outputs.claimed-count }}
           supabase-url: ${{ secrets.W3_SECRET_SUPABASE_URL }}
           supabase-service-role-key: ${{ secrets.W3_SECRET_SUPABASE_SERVICE_ROLE_KEY }}
