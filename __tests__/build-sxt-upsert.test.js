@@ -13,7 +13,7 @@
 
 import { jest } from '@jest/globals'
 
-const { buildSxtUpsert, mergeExistingRowWithPayload } = await import(
+const { buildSxtUpsert, buildSxtMergedUpsert, mergeExistingRowWithPayload } = await import(
   '../src/outbox-settlement-worker/index.js'
 )
 
@@ -213,13 +213,21 @@ describe('mergeExistingRowWithPayload (Story 0.1 Task 7)', () => {
     })
   })
 
-  it('produces a full-row payload that buildSxtUpsert accepts on a row whose payload alone would be partial', () => {
-    // Realistic Story 0.8 scenario: PATCH /deals/:id with {category}, backend
-    // writes payload {category, updated_at, is_ai_sorted} to outbox. SxT row
-    // exists with all 13 DEALS cols. After merge, buildSxtUpsert sees the
-    // full row and emits a valid UPSERT.
+})
+
+/**
+ * Story 0.1 Task 7 (PR #24 Copilot review round 2): the worker uses
+ * `buildSxtMergedUpsert` to write a SxT statement whose INSERT/VALUES
+ * clause carries the FULL merged row (satisfying SxT's NOT NULL
+ * validation on the INSERT branch) but whose `DO UPDATE SET` clause
+ * touches ONLY the original patch keys — so concurrent out-of-order
+ * outbox rows for the same aggregate cannot clobber each other's
+ * untouched columns with stale values read from the existing row.
+ */
+describe('buildSxtMergedUpsert (Story 0.1 Task 7)', () => {
+  function realisticMergedScenario() {
     const existing = {
-      id: 'deal-abc', // will be stripped
+      // id stripped by mergeExistingRowWithPayload (test that flow too)
       user_id: 'user-1',
       thread_id: 'thread-1',
       email_thread_evaluation_id: null,
@@ -233,19 +241,21 @@ describe('mergeExistingRowWithPayload (Story 0.1 Task 7)', () => {
       created_at: '2026-02-12T01:10:58Z',
       updated_at: '2026-02-12T01:10:58Z',
     }
-    const partialPayload = {
+    const patch = {
       category: 'not_interested',
       updated_at: '2026-05-27T05:00:00Z',
       is_ai_sorted: false,
     }
-    const merged = mergeExistingRowWithPayload(existing, partialPayload)
-    const sql = buildSxtUpsert({
-      id: 11,
-      aggregate: 'deal',
-      aggregate_id: 'deal-abc',
-      payload: merged,
-    })
-    // All 12 non-id cols from existing + payload-merged → INSERT clause
+    return { existing, patch, merged: { ...existing, ...patch } }
+  }
+
+  it('emits INSERT/VALUES carrying the full merged row', () => {
+    const { existing, patch, merged } = realisticMergedScenario()
+    const sql = buildSxtMergedUpsert(
+      { id: 11, aggregate: 'deal', aggregate_id: 'deal-abc', payload: patch },
+      merged,
+    )
+    // All 12 cols from the merged row show up in the INSERT clause
     expect(sql).toContain('USER_ID')
     expect(sql).toContain('THREAD_ID')
     expect(sql).toContain('BRAND')
@@ -253,18 +263,102 @@ describe('mergeExistingRowWithPayload (Story 0.1 Task 7)', () => {
     expect(sql).toContain('CREATED_AT')
     expect(sql).toContain('UPDATED_AT')
     expect(sql).toContain('CATEGORY')
-    // Payload-wins values:
-    expect(sql).toContain("'not_interested'") // category
-    expect(sql).toContain("'2026-05-27T05:00:00Z'") // updated_at
-    // Existing-row values preserved:
-    expect(sql).toContain("'Wellnesse'") // brand
-    expect(sql).toContain("'Black Friday'") // deal_name
-    // ID column appears exactly once (from row.aggregate_id, not duplicated from existing)
-    expect(sql.match(/^\(ID,/m) || sql.match(/\(ID, /)).toBeTruthy()
-    const idMatches = sql.match(/\bID\b/g) || []
-    // Should appear in INSERT cols, ON CONFLICT clause; NOT in EXCLUDED.ID assignment
-    // (since 'id' was stripped from the merged payload).
-    expect(idMatches.length).toBeGreaterThanOrEqual(2)
+    // Existing-row values preserved in VALUES:
+    expect(sql).toContain("'Wellnesse'")
+    expect(sql).toContain("'Black Friday'")
+    // Patch-wins values in VALUES:
+    expect(sql).toContain("'not_interested'")
+    expect(sql).toContain("'2026-05-27T05:00:00Z'")
+  })
+
+  it('emits DO UPDATE SET clause containing ONLY the original patch keys', () => {
+    const { patch, merged } = realisticMergedScenario()
+    const sql = buildSxtMergedUpsert(
+      { id: 11, aggregate: 'deal', aggregate_id: 'deal-abc', payload: patch },
+      merged,
+    )
+    // Extract the DO UPDATE SET clause
+    const m = sql.match(/ON CONFLICT \(ID\) DO UPDATE SET ([^\n]+)$/m)
+    expect(m).toBeTruthy()
+    const updateSet = m[1]
+    // The 3 patch keys MUST be in UPDATE SET
+    expect(updateSet).toContain('CATEGORY = EXCLUDED.CATEGORY')
+    expect(updateSet).toContain('UPDATED_AT = EXCLUDED.UPDATED_AT')
+    expect(updateSet).toContain('IS_AI_SORTED = EXCLUDED.IS_AI_SORTED')
+    // Untouched merged cols MUST NOT appear in UPDATE SET — that's the
+    // race-condition guard against stale-clobber on out-of-order processing.
+    expect(updateSet).not.toContain('USER_ID')
+    expect(updateSet).not.toContain('THREAD_ID')
+    expect(updateSet).not.toContain('BRAND')
+    expect(updateSet).not.toContain('DEAL_NAME')
+    expect(updateSet).not.toContain('DEAL_TYPE')
+    expect(updateSet).not.toContain('CREATED_AT')
+    expect(updateSet).not.toContain('VALUE')
+    expect(updateSet).not.toContain('CURRENCY')
+    expect(updateSet).not.toContain('EMAIL_THREAD_EVALUATION_ID')
+  })
+
+  it('rejects empty row.payload (nothing to update)', () => {
+    expect(() =>
+      buildSxtMergedUpsert(
+        { id: 11, aggregate: 'deal', aggregate_id: 'deal-abc', payload: {} },
+        { user_id: 'u1', category: 'in_progress' },
+      ),
+    ).toThrow(/row\.payload is empty/)
+  })
+
+  it('rejects null mergedPayload', () => {
+    expect(() =>
+      buildSxtMergedUpsert(
+        { id: 11, aggregate: 'deal', aggregate_id: 'deal-abc', payload: { category: 'x' } },
+        null,
+      ),
+    ).toThrow(/mergedPayload must be a non-null object/)
+  })
+
+  it('rejects empty mergedPayload', () => {
+    expect(() =>
+      buildSxtMergedUpsert(
+        { id: 11, aggregate: 'deal', aggregate_id: 'deal-abc', payload: { category: 'x' } },
+        {},
+      ),
+    ).toThrow(/mergedPayload is empty/)
+  })
+
+  it('rejects when a patch key is missing from merged (caller bug)', () => {
+    expect(() =>
+      buildSxtMergedUpsert(
+        {
+          id: 11,
+          aggregate: 'deal',
+          aggregate_id: 'deal-abc',
+          payload: { category: 'x', some_new_col: 'y' },
+        },
+        { user_id: 'u1', category: 'in_progress' }, // missing some_new_col
+      ),
+    ).toThrow(/patch key "some_new_col" missing from mergedPayload/)
+  })
+
+  it('rejects unknown aggregate', () => {
+    expect(() =>
+      buildSxtMergedUpsert(
+        {
+          id: 11,
+          aggregate: 'mystery_aggregate',
+          aggregate_id: 'x',
+          payload: { category: 'x' },
+        },
+        { category: 'x', user_id: 'u1' },
+      ),
+    ).toThrow(/unknown aggregate mystery_aggregate/)
+  })
+
+  it("does NOT emit an `ID = EXCLUDED.ID` SET assignment (id is excluded from patch by design)", () => {
+    const { patch, merged } = realisticMergedScenario()
+    const sql = buildSxtMergedUpsert(
+      { id: 11, aggregate: 'deal', aggregate_id: 'deal-abc', payload: patch },
+      merged,
+    )
     expect(sql).not.toContain('ID = EXCLUDED.ID')
   })
 })
