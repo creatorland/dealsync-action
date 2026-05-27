@@ -23,9 +23,20 @@ async function main() {
     const sxtAuthSecret = core.getInput('sxt-auth-secret')
     if (sxtAuthSecret) process.env.SXT_AUTH_SECRET = sxtAuthSecret
     const sxtBiscuit = core.getInput('sxt-biscuit')
-    if (sxtBiscuit) process.env.SXT_BISCUIT = sxtBiscuit
+    if (sxtBiscuit && sxtBiscuit.trim()) process.env.SXT_BISCUIT = sxtBiscuit.trim()
     const sxtApiUrl = core.getInput('sxt-api-url')
     if (sxtApiUrl) process.env.SXT_API_URL = sxtApiUrl
+
+    // Hard-fail under W3 / GHA dispatch when the biscuit is missing or empty.
+    // Without this guard the worker silently dry-runs and the finalizer marks
+    // rows `settled` anyway — a silent data-loss path. The local-runner uses
+    // this same module via `run()` directly (no @actions/core inputs), so the
+    // guard only fires in CI/W3 where GITHUB_ACTIONS is set by the runner.
+    if (process.env.GITHUB_ACTIONS === 'true' && !process.env.SXT_BISCUIT) {
+      throw new Error(
+        'outbox-settlement-worker: SXT_BISCUIT input is empty under W3/GHA dispatch — would silently dry-run while the finalizer marks rows settled. Provision the W3_SECRET_SXT_BISCUIT secret and pass it as sxt-biscuit in the workflow.',
+      )
+    }
 
     const claimedBatchRaw = core.getInput('claimed-batch', { required: true })
     let claimedBatch

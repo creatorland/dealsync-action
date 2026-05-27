@@ -27457,6 +27457,17 @@ const SXT_TABLE_FOR_AGGREGATE = {
  * normalize so it can merge cleanly with payload's lowercase keys),
  * or null if the row doesn't exist.
  */
+/**
+ * Convert a SxT result row's UPPERCASE keys to lowercase so it can merge
+ * cleanly with payload's lowercase keys. Extracted as a separately-exported
+ * helper for unit-testability (the network-using fetchExistingSxtRow itself
+ * is exercised end-to-end against staging per Story 0.1 Task 7.4).
+ */
+function normalizeSxtRowToLowercase(rawRow) {
+  if (!rawRow || typeof rawRow !== 'object') return null
+  return Object.fromEntries(Object.entries(rawRow).map(([k, v]) => [k.toLowerCase(), v]))
+}
+
 async function fetchExistingSxtRow(jwt, biscuit, aggregate, aggregateId, refreshJwt) {
   const sxtTable = SXT_TABLE_FOR_AGGREGATE[aggregate];
   if (!sxtTable) {
@@ -27469,12 +27480,19 @@ async function fetchExistingSxtRow(jwt, biscuit, aggregate, aggregateId, refresh
       `outbox-settlement-worker: aggregateId must be a non-empty string for SxT SELECT`,
     )
   }
+  // Length cap matches the architecture's outbox-row aggregate_id contract.
+  // Without a cap a pathological caller could load up a multi-megabyte ID and
+  // burn rate-limiter quota; this is shape-not-security, but the failure mode
+  // shouldn't be "SxT 413 mid-batch" — fail loud here instead.
+  if (aggregateId.length > 256) {
+    throw new Error(
+      `outbox-settlement-worker: aggregateId length ${aggregateId.length} exceeds 256-char cap`,
+    )
+  }
   const sql = `SELECT * FROM ${sxtTable} WHERE ID = '${aggregateId.replace(/'/g, "''")}' LIMIT 1`;
   const result = await sxtExecute(jwt, biscuit, sql, refreshJwt);
   if (!Array.isArray(result) || result.length === 0) return null
-  return Object.fromEntries(
-    Object.entries(result[0]).map(([k, v]) => [k.toLowerCase(), v]),
-  )
+  return normalizeSxtRowToLowercase(result[0])
 }
 
 /**
@@ -27486,39 +27504,81 @@ async function fetchExistingSxtRow(jwt, biscuit, aggregate, aggregateId, refresh
  * Added 2026-05-27 per Story 0.1 Task 7. See fetchExistingSxtRow docstring
  * for the SxT NOT NULL motivation.
  *
+ * Both branches behave identically w.r.t. 'id': stripped from existingRow
+ * (so the canonical ID is row.aggregate_id), and NOT stripped from
+ * payload — if a payload ever legitimately carries an `id` column, that's
+ * surfaced via `assertValidSqlIdent` in buildSxtUpsert (and is currently
+ * rejected since 'id' isn't a typical business-row column). Phase 0 / 0.1
+ * Task 7 cleanup (2026-05-27 review).
+ *
  * @param {object|null} existingRow  Lowercase-keyed row from fetchExistingSxtRow, or null
  * @param {object} payload           Outbox row's patch payload (lowercase keys)
  * @returns {object}                  Merged payload suitable for buildSxtUpsert
  */
 function mergeExistingRowWithPayload(existingRow, payload) {
   const safePayload = payload || {};
-  if (!existingRow) return { ...safePayload }
-  const merged = { ...existingRow, ...safePayload };
-  delete merged.id;
-  return merged
+  // Strip 'id' from existingRow consistently in BOTH branches so behavior
+  // is the same regardless of whether the SxT row exists. Pre-cleanup the
+  // null-existing branch passed payload through without touching it; that
+  // looked harmless but left an inconsistency the next maintainer could
+  // misread as intentional. Now both paths share the same id-stripping rule.
+  const { id: _ignoredExistingId, ...existingMinusId } = existingRow || {};
+  return { ...existingMinusId, ...safePayload }
 }
 
 /**
  * Serialize a JS value for SxT SQL string-interpolation. SxT doesn't
- * support parameterized queries, so this is the safe-form: null → NULL,
- * number → as-is, everything else → single-quote-escaped string.
+ * support parameterized queries, so this is the safe-form:
+ *   null/undefined → NULL
+ *   number         → as-is
+ *   boolean        → TRUE / FALSE (NOT 'true'/'false' — those become
+ *                    string literals on a boolean column, producing
+ *                    type-mismatch in typed engines)
+ *   string         → single-quote-escaped string
+ *   anything else  → THROW (silently emitting `'[object Object]'` or
+ *                    `'1,2,3'` for arrays would be data corruption.
+ *                    BigInts, Dates, etc. — callers are responsible for
+ *                    pre-converting to a supported type.)
+ * Phase 0 / 0.1 Task 7 cleanup (2026-05-27 review).
  */
 function serializeSqlValue(v) {
   if (v === null || v === undefined) return 'NULL'
-  if (typeof v === 'number') return String(v)
-  return `'${String(v).replace(/'/g, "''")}'`
+  const t = typeof v;
+  if (t === 'number') {
+    if (!Number.isFinite(v)) {
+      throw new Error(
+        `outbox-settlement-worker: cannot serialize non-finite number (${v}) — SxT has no equivalent for NaN/Infinity`,
+      )
+    }
+    return String(v)
+  }
+  if (t === 'boolean') return v ? 'TRUE' : 'FALSE'
+  if (t === 'string') return `'${v.replace(/'/g, "''")}'`
+  throw new Error(
+    `outbox-settlement-worker: cannot serialize value of unsupported type "${t}" for SxT — supported: null, number, boolean, string. Pre-convert before placing in outbox payload.`,
+  )
 }
 
 /**
  * Validate identifier-shape on a payload key. Payload keys interpolate
  * into SQL positionally as column identifiers; SxT doesn't support
  * identifier-quoting on the producer side, so we reject anything that
- * isn't a strict SQL identifier.
+ * isn't a strict SQL identifier. Also explicitly rejects keys that
+ * uppercase to `ID` — `buildSxtUpsert` adds an `ID` column derived from
+ * `row.aggregate_id`, so a payload `id` (or `Id`/`ID`) would produce a
+ * duplicate `ID` column in the INSERT clause and either invalid SQL or
+ * a confusing runtime SxT error. Fail loud with a clear message instead.
+ * (Copilot review on PR #25.)
  */
 function assertValidSqlIdent(k, outboxId) {
   if (!SQL_IDENT_RE.test(k)) {
     throw new Error(
       `outbox-settlement-worker: payload key "${k}" is not a valid SQL identifier (must match ${SQL_IDENT_RE}); cannot build UPSERT for outbox_id=${outboxId}`,
+    )
+  }
+  if (k.toUpperCase() === 'ID') {
+    throw new Error(
+      `outbox-settlement-worker: payload key "${k}" collides with the canonical ID column (derived from row.aggregate_id) for outbox_id=${outboxId} — do not include an "id" column in the outbox payload`,
     )
   }
 }
@@ -27587,6 +27647,26 @@ ON CONFLICT (ID) DO UPDATE SET ${updateClause}`
  * write contract — the merged payload exists *purely* to make the INSERT
  * branch pass NOT NULL when the row doesn't exist (or to keep `EXCLUDED.X`
  * well-defined for the UPDATE clause).
+ *
+ * Scope clarification (Story 0.1 Task 7 close-out review 2026-05-27):
+ *   - The race-safety guarantee here is ONLY for the UPDATE branch — i.e.
+ *     when the SxT row exists at write time. Out-of-order processing of
+ *     two outbox rows whose patches touch DIFFERENT columns is safe.
+ *     Two outbox rows touching the SAME column still last-writer-wins
+ *     on SxT serialization order — that's expected delta-overwrite, not
+ *     a clobber.
+ *   - On the FIRST-WRITE branch (no row in SxT yet, existingRow=null),
+ *     the merged payload equals the patch payload alone. If the patch
+ *     omits a NOT NULL column, the INSERT still fails — this function
+ *     only fixes the previously-failing UPDATE-branch case where the
+ *     row exists but the patch is partial. First-write rows still
+ *     require the patch to include all required columns; this is
+ *     Phase 0 spike-scope behavior, Phase 1 Story 3.2 hardens it.
+ *
+ * Conflict-key contract: `ON CONFLICT (ID)` is the canonical Dealsync 2.0
+ * outbox path per Architecture §"Idempotency contract with SxT" item 1
+ * (NOT the legacy dealsync-action prod pipeline's `ON CONFLICT (THREAD_ID)`).
+ * `ID` here refers to the SxT row's surrogate ID, matching `row.aggregate_id`.
  *
  * Added 2026-05-27 per Story 0.1 Task 7.
  */
@@ -27738,6 +27818,47 @@ async function run(inputs) {
           row.aggregate_id,
           refreshJwt,
         );
+        // Second lease renewal before the UPSERT. Read-merge-upsert added
+        // a SELECT round-trip per row (Story 0.1 Task 7); the pre-PR-24
+        // worker did only one SxT call per row, so the static 60s default
+        // had ~60s margin. Now each row consumes ~2 round-trips of that
+        // margin; if a batch of 100 rows hits even one slow SELECT (network
+        // hiccup, JWT refresh, etc.) the lease can expire mid-batch and
+        // `mark_settled` in the finalizer rejects on lease-ownership.
+        // Renewing here gives the UPSERT its own fresh window. Lease loss
+        // here is benign — skip this row; the next worker pass picks it
+        // up cleanly.
+        const renewedPreWrite = await supabaseRpc(
+          supabaseUrl,
+          supabaseKey,
+          'renew_outbox_lease',
+          {
+            p_row_id: row.id,
+            p_expected_claimed_by: workerId,
+            p_lease_seconds: leaseSeconds,
+          },
+        );
+        if (renewedPreWrite !== true) {
+          emitEvent('settlement.lease_lost', {
+            outbox_id: row.id,
+            on: 'between_select_and_upsert',
+            run_id: workerId,
+          });
+          // Lease-loss is benign here — the next worker pass picks the row
+          // back up cleanly. We can't `continue` from inside the try/catch
+          // since results.push happens after the for-body, so jump straight
+          // to writing a `lease_lost` results entry and skip the UPSERT.
+          // Throwing into the outer catch would mask this as `failed` which
+          // looks like a hard error to the finalizer (Copilot review on #25).
+          results.push({
+            outbox_id: row.id,
+            aggregate: row.aggregate,
+            status: 'lease_lost',
+            error: null,
+            latency_ms: Date.now() - t0,
+          });
+          continue
+        }
         const fullPayload = mergeExistingRowWithPayload(existingRow, row.payload);
         // Build the UPSERT with: INSERT/VALUES from the merged full row
         // (so SxT's NOT NULL validation passes on the INSERT branch), but
@@ -27788,9 +27909,20 @@ async function main() {
     const sxtAuthSecret = coreExports.getInput('sxt-auth-secret');
     if (sxtAuthSecret) process.env.SXT_AUTH_SECRET = sxtAuthSecret;
     const sxtBiscuit = coreExports.getInput('sxt-biscuit');
-    if (sxtBiscuit) process.env.SXT_BISCUIT = sxtBiscuit;
+    if (sxtBiscuit && sxtBiscuit.trim()) process.env.SXT_BISCUIT = sxtBiscuit.trim();
     const sxtApiUrl = coreExports.getInput('sxt-api-url');
     if (sxtApiUrl) process.env.SXT_API_URL = sxtApiUrl;
+
+    // Hard-fail under W3 / GHA dispatch when the biscuit is missing or empty.
+    // Without this guard the worker silently dry-runs and the finalizer marks
+    // rows `settled` anyway — a silent data-loss path. The local-runner uses
+    // this same module via `run()` directly (no @actions/core inputs), so the
+    // guard only fires in CI/W3 where GITHUB_ACTIONS is set by the runner.
+    if (process.env.GITHUB_ACTIONS === 'true' && !process.env.SXT_BISCUIT) {
+      throw new Error(
+        'outbox-settlement-worker: SXT_BISCUIT input is empty under W3/GHA dispatch — would silently dry-run while the finalizer marks rows settled. Provision the W3_SECRET_SXT_BISCUIT secret and pass it as sxt-biscuit in the workflow.',
+      )
+    }
 
     const claimedBatchRaw = coreExports.getInput('claimed-batch', { required: true });
     let claimedBatch;
