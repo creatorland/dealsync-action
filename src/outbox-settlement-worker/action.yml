@@ -1,0 +1,45 @@
+name: 'Outbox Settlement Worker'
+description: 'Per-row SxT UPSERT for a claimed settlement_outbox batch (Phase 0 spike / Story 0.6).'
+author: 'creatorland'
+
+inputs:
+  claimed-batch:
+    description: 'JSON-encoded array of claimed settlement_outbox rows from the guard.'
+    required: true
+  worker-id:
+    description: 'Identifier (must match the guard, typically ${{ github.run_id }}) — checked by renew_outbox_lease.'
+    required: true
+  lease-seconds:
+    description: 'Lease window (seconds) renewed before each SxT call.'
+    required: false
+    default: '60'
+  supabase-url:
+    description: 'Supabase project URL.'
+    required: true
+  supabase-service-role-key:
+    description: 'Supabase service-role key.'
+    required: true
+  sxt-auth-url:
+    description: 'Backend SxT JWT proxy URL (e.g. <backend>/api/v1/dealsync-v2/sync/sxt/auth).'
+    required: false
+    default: ''
+  sxt-auth-secret:
+    description: 'Shared secret for the SxT JWT proxy (= DEALSYNC_V2_SHARED_SECRET).'
+    required: false
+    default: ''
+  sxt-biscuit:
+    description: 'Optional pre-generated SxT biscuit. If absent, the worker runs in dry-run mode (logs SQL without executing).'
+    required: false
+    default: ''
+  sxt-api-url:
+    description: 'SxT API base URL. Defaults to https://api.makeinfinite.dev.'
+    required: false
+    default: 'https://api.makeinfinite.dev'
+
+outputs:
+  results:
+    description: 'JSON-encoded array of per-row outcomes (status: settled/failed/lease-lost, with outbox_id + aggregate + traceId + latency_ms).'
+
+runs:
+  using: 'node24'
+  main: 'dist/index.js'
