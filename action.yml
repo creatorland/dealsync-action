@@ -6,6 +6,13 @@ inputs:
   command:
     description: 'Operation: run-filter-pipeline, run-classify-pipeline, run-recovery-pipeline, run-brand-contacts-backfill, sync-deal-states, emit-scan-complete-webhooks, run-fallback-reattempt-pipeline, eval, eval-compare'
     required: true
+  ingest-write-target:
+    description: 'Write target for classify pipeline: sxt | supabase | both. Default sxt. Flip to supabase at cutover.'
+    default: 'sxt'
+  supabase-url:
+    description: 'Supabase project URL (required when ingest-write-target=supabase|both)'
+  supabase-service-role-key:
+    description: 'Supabase service-role key — server-side only, never NEXT_PUBLIC_* (required when ingest-write-target=supabase|both)'
   sxt-auth-url:
     description: 'SxT auth proxy URL'
   sxt-auth-secret:

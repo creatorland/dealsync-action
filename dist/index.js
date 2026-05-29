@@ -39341,6 +39341,242 @@ class WriteBatcher {
 }
 
 /**
+ * Supabase service-role writer for the four ingestion business tables.
+ *
+ * Uses direct fetch() against the Supabase PostgREST REST API — no
+ * @supabase/supabase-js dependency. The service-role key bypasses RLS
+ * by design; this module is a system actor only (never called from
+ * user-facing paths).
+ *
+ * Column-ownership contract (AC2): only ingestion-owned columns appear
+ * in the request body. PostgREST generates ON CONFLICT DO UPDATE SET
+ * from the body columns, so user-owned columns (category, is_deleted,
+ * updated_at) are never touched on re-ingest.
+ *
+ * Idempotency contract (AC2, AC4):
+ *   ai_evaluation_audits  — ON CONFLICT (id) DO NOTHING  (append-only; id=batchId)
+ *   email_thread_evaluations — ON CONFLICT (id) DO UPDATE (id=threadId, stable)
+ *   deals                 — ON CONFLICT (id) DO UPDATE  (id=threadId, stable)
+ *   contacts              — ON CONFLICT (user_id,email) DO UPDATE
+ */
+
+
+let _config = null;
+
+function getConfig() {
+  if (_config) return _config
+  const url = (coreExports.getInput('supabase-url') || '').replace(/\/$/, '');
+  const key = coreExports.getInput('supabase-service-role-key');
+  if (!url || !key) {
+    throw new Error('supabase-url and supabase-service-role-key are required for Supabase writes')
+  }
+  _config = { url, key };
+  return _config
+}
+
+/**
+ * POST rows to a Supabase table via PostgREST.
+ *
+ * @param {string} table — unquoted Supabase table name
+ * @param {object[]} rows — array of plain objects; only included keys appear in DO UPDATE SET
+ * @param {string} onConflict — comma-separated conflict column(s) for ON CONFLICT target
+ * @param {boolean} ignoreDuplicates — true → DO NOTHING; false → DO UPDATE SET (merge)
+ */
+async function upsert(table, rows, onConflict, ignoreDuplicates = false) {
+  if (!rows || rows.length === 0) return
+  const { url, key } = getConfig();
+  const resolution = ignoreDuplicates ? 'ignore-duplicates' : 'merge-duplicates';
+  const conflictParam = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
+  const resp = await fetch(`${url}/rest/v1/${table}${conflictParam}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${key}`,
+      apikey: key,
+      'Content-Type': 'application/json',
+      Prefer: `return=minimal,resolution=${resolution}`,
+    },
+    body: JSON.stringify(rows),
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Supabase ${table} upsert failed: ${resp.status} ${body}`)
+  }
+}
+
+/**
+ * DELETE rows from a Supabase table via PostgREST.
+ *
+ * @param {string} table
+ * @param {string} column — column to match on
+ * @param {string[]} values — values to match (OR'd with `in.(...)`)
+ */
+async function deleteWhere(table, column, values) {
+  if (!values || values.length === 0) return
+  const { url, key } = getConfig();
+  const inList = values.map((v) => encodeURIComponent(v)).join(',');
+  const resp = await fetch(`${url}/rest/v1/${table}?${column}=in.(${inList})`, {
+    method: 'DELETE',
+    headers: {
+      Authorization: `Bearer ${key}`,
+      apikey: key,
+      Prefer: 'return=minimal',
+    },
+  });
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Supabase ${table} delete failed: ${resp.status} ${body}`)
+  }
+}
+
+/**
+ * Write one ai_evaluation_audits row. id=batchId for stable idempotency.
+ * Append-only: ON CONFLICT (id) DO NOTHING — a re-run of the same batch
+ * sees the existing audit row and skips, matching the SxT try/catch behaviour.
+ *
+ * @param {object} p
+ * @param {string} p.batchId
+ * @param {string} p.subjectUserId — owning user (REQUIRED for account-delete cascade)
+ * @param {number} p.threadCount
+ * @param {number} p.emailCount
+ * @param {number} p.cost
+ * @param {number} p.inputTokens
+ * @param {number} p.outputTokens
+ * @param {string} p.model
+ * @param {string} p.evaluation — JSON-stringified AI output
+ */
+async function writeAudit({
+  batchId,
+  subjectUserId,
+  threadCount,
+  emailCount,
+  cost,
+  inputTokens,
+  outputTokens,
+  model,
+  evaluation,
+}) {
+  await upsert(
+    'ai_evaluation_audits',
+    [
+      {
+        id: batchId,
+        subject_user_id: subjectUserId,
+        batch_id: batchId,
+        thread_count: threadCount,
+        email_count: emailCount,
+        inference_cost: cost,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        model_used: model,
+        ai_evaluation: evaluation,
+      },
+    ],
+    'id',
+    true,
+  );
+}
+
+/**
+ * Upsert email_thread_evaluations rows. id=threadId for stable idempotency.
+ * ON CONFLICT (id) DO UPDATE SET ingestion-owned columns only.
+ * (updated_at is a server-side trigger — not included here.)
+ *
+ * @param {Array<{threadId: string, subjectUserId: string, auditId: string|null, aiInsight: string|null, aiSummary: string|null, isDeal: boolean, likelyScam: boolean, aiScore: number}>} evals
+ */
+async function writeEvals(evals) {
+  if (!evals || evals.length === 0) return
+  await upsert(
+    'email_thread_evaluations',
+    evals.map(({ threadId, subjectUserId, auditId, aiInsight, aiSummary, isDeal, likelyScam, aiScore }) => ({
+      id: threadId,
+      subject_user_id: subjectUserId,
+      thread_id: threadId,
+      ai_evaluation_audit_id: auditId || null,
+      ai_insight: aiInsight || null,
+      ai_summary: aiSummary || null,
+      is_deal: isDeal,
+      likely_scam: likelyScam,
+      ai_score: typeof aiScore === 'number' ? aiScore : 0,
+    })),
+    'id',
+    false,
+  );
+}
+
+/**
+ * Upsert deals rows. id=threadId for stable idempotency.
+ * ON CONFLICT (id) DO UPDATE SET ingestion-owned columns only.
+ * User-owned columns (category, is_deleted, updated_at) are NOT included —
+ * they are absent from the request body and therefore absent from the
+ * PostgREST-generated DO UPDATE SET clause.
+ *
+ * main_contact_* columns are extracted from the thread's main_contact object
+ * (the logic originally owned by cancelled Story 4.3).
+ *
+ * @param {Array<{threadId: string, subjectUserId: string, dealName: string, dealType: string, value: number, currency: string, isAiSorted: boolean, mainContact: object|null}>} deals
+ */
+async function writeDeals(deals) {
+  if (!deals || deals.length === 0) return
+  await upsert(
+    'deals',
+    deals.map(({ threadId, subjectUserId, dealName, dealType, value, currency, isAiSorted, mainContact }) => ({
+      id: threadId,
+      subject_user_id: subjectUserId,
+      thread_id: threadId,
+      email_thread_evaluation_id: threadId,
+      deal_name: dealName || null,
+      deal_type: dealType || null,
+      value: typeof value === 'number' ? value : 0,
+      currency: currency || 'USD',
+      brand: mainContact?.company || null,
+      is_ai_sorted: isAiSorted !== false,
+      main_contact_email: mainContact?.email || null,
+      main_contact_name: mainContact?.name || null,
+      main_contact_company: mainContact?.company || null,
+      main_contact_title: mainContact?.title || null,
+      main_contact_phone_number: mainContact?.phone_number || null,
+    })),
+    'id',
+    false,
+  );
+}
+
+/**
+ * Delete deals rows for threads re-classified as non-deal.
+ * Service-role bypasses RLS — correct for a system actor.
+ *
+ * @param {string[]} threadIds
+ */
+async function deleteDeals(threadIds) {
+  await deleteWhere('deals', 'id', threadIds);
+}
+
+/**
+ * Upsert contacts rows.
+ * ON CONFLICT (user_id, email) DO UPDATE SET ingestion-owned columns only.
+ * (updated_at is a server-side trigger — not included here.)
+ *
+ * @param {Array<{userId: string, email: string, name: string|null, company: string|null, title: string|null, phone: string|null}>} contacts
+ */
+async function writeContacts(contacts) {
+  if (!contacts || contacts.length === 0) return
+  await upsert(
+    'contacts',
+    contacts.map(({ userId, email, name, company, title, phone }) => ({
+      subject_user_id: userId,
+      user_id: userId,
+      email,
+      name: name || null,
+      company_name: company || null,
+      title: title || null,
+      phone_number: phone || null,
+    })),
+    'user_id,email',
+    false,
+  );
+}
+
+/**
  * Orchestrator that claims and processes classify batches concurrently,
  * with in-memory audit passing through eval upserts, deal upserts,
  * contact inserts, and terminal state updates.
@@ -39372,22 +39608,25 @@ async function runClassifyPipeline() {
   const fetchTimeoutMs = parseInt(coreExports.getInput('pipeline-fetch-timeout-ms') || '120000', 10);
   const flushIntervalMs = parseInt(coreExports.getInput('pipeline-flush-interval-ms') || '5000', 10);
   const flushThreshold = parseInt(coreExports.getInput('pipeline-flush-threshold') || '5', 10);
+  const writeTarget = coreExports.getInput('ingest-write-target') || 'sxt';
+  const writeSxt = writeTarget === 'sxt' || writeTarget === 'both';
+  const writeSupabase = writeTarget === 'supabase' || writeTarget === 'both';
 
   console.log(
-    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
+    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs}, writeTarget=${writeTarget})`,
   );
   console.log(
     `[run-classify-pipeline] config: primaryModel=${primaryModel}, fallbackModel=${fallbackModel}, aiApiUrl=${aiApiUrl ? aiApiUrl.substring(0, 40) : '(empty)'}, schema=${schema}, emailProvider=${emailProvider || '(empty)'}, apiKey=${hyperbolicKey ? hyperbolicKey.substring(0, 10) + '...' : '(empty)'}`,
   );
 
-  // 1. Authenticate to SxT once at start
+  // 1. Authenticate to SxT once at start (always needed — pipeline reads deal_states from SxT)
   const jwt = await authenticate(authUrl, authSecret);
 
   // 2. Create bound exec helpers
   const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
   const execNoRL = (sql) => executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit: true });
 
-  // 3. Create write batcher (uses execNoRL — tokens acquired in bulk by workers)
+  // 3. Create write batcher (pipeline machinery: stateUpdates + batchEvents always go to SxT)
   const batcher = new WriteBatcher(execNoRL, schema, {
     flushIntervalMs,
     flushThreshold,
@@ -39578,6 +39817,8 @@ async function runClassifyPipeline() {
     // latest external sender when the AI did not return one. Remains null on
     // cached-audit retries — Step 6 falls back to a DB lookup in that case.
     let allEmails = null;
+    // Hoisted so Step 4 can link evals to the audit id even on the fresh-classification path.
+    let auditId = null;
 
     t0 = Date.now();
     const existingAudit = await execNoRL(audits.selectByBatch(schema, batchId));
@@ -39854,53 +40095,87 @@ async function runClassifyPipeline() {
 
       // d. Save audit checkpoint
       t0 = Date.now();
-      const auditId = v7();
+      auditId = v7();
       const aiOutput = { threads };
       const evaluation = sanitizeString(JSON.stringify(aiOutput));
-      try {
-        await execNoRL(
-          audits.insert(schema, {
-            id: auditId,
-            batchId,
-            threadCount: threads.length,
-            emailCount: rows.length,
-            cost: 0,
-            inputTokens: 0,
-            outputTokens: 0,
-            model: modelUsed,
-            evaluation,
-          }),
-        );
-        timings.auditSave = Date.now() - t0;
-        console.log(
-          `[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`,
-        );
-      } catch (err) {
-        if (
-          err.message.includes('integrity constraint') ||
-          err.message.includes('unique') ||
-          err.message.includes('duplicate')
-        ) {
-          console.log(
-            `[run-classify-pipeline] audit already exists for batch (concurrent run), continuing`,
+      if (writeSxt) {
+        try {
+          await execNoRL(
+            audits.insert(schema, {
+              id: auditId,
+              batchId,
+              threadCount: threads.length,
+              emailCount: rows.length,
+              cost: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              model: modelUsed,
+              evaluation,
+            }),
           );
-        } else {
-          throw err
+        } catch (err) {
+          if (
+            err.message.includes('integrity constraint') ||
+            err.message.includes('unique') ||
+            err.message.includes('duplicate')
+          ) {
+            console.log(
+              `[run-classify-pipeline] audit already exists for batch (concurrent run), continuing`,
+            );
+          } else {
+            throw err
+          }
         }
       }
+      if (writeSupabase) {
+        await writeAudit({
+          batchId,
+          subjectUserId: userId,
+          threadCount: threads.length,
+          emailCount: rows.length,
+          cost: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          model: modelUsed,
+          evaluation,
+        });
+      }
+      timings.auditSave = Date.now() - t0;
+      console.log(
+        `[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`,
+      );
     }
 
     // -----------------------------------------------------------------------
-    // Step 4: Save evals via batcher
+    // Step 4: Save evals via batcher (SxT) and/or Supabase writer
     // -----------------------------------------------------------------------
 
     t0 = Date.now();
-    const evalValues = threads.map((thread) => {
-      const threadId = sanitizeId(thread.thread_id);
-      return `('${v7()}', '${threadId}', '', '${sanitizeString(thread.category || '')}', '${sanitizeString(thread.ai_summary || '')}', ${thread.is_deal ? 'true' : 'false'}, ${(thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'}, ${typeof thread.ai_score === 'number' ? thread.ai_score : 0}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-    });
+    const batchUserId = rows[0].USER_ID || '';
+    // auditId is set in Step 3d for fresh classifications; null on cached-audit retries.
+    const evalAuditId = auditId;
 
-    await batcher.pushEvals(evalValues);
+    if (writeSxt) {
+      const evalValues = threads.map((thread) => {
+        const threadId = sanitizeId(thread.thread_id);
+        return `('${v7()}', '${threadId}', '', '${sanitizeString(thread.category || '')}', '${sanitizeString(thread.ai_summary || '')}', ${thread.is_deal ? 'true' : 'false'}, ${(thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'}, ${typeof thread.ai_score === 'number' ? thread.ai_score : 0}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      });
+      await batcher.pushEvals(evalValues);
+    }
+
+    if (writeSupabase) {
+      const supabaseEvals = threads.map((thread) => ({
+        threadId: sanitizeId(thread.thread_id),
+        subjectUserId: batchUserId,
+        auditId: evalAuditId,
+        aiInsight: thread.category || null,
+        aiSummary: thread.ai_summary || null,
+        isDeal: !!thread.is_deal,
+        likelyScam: (thread.category || '').toLowerCase() === 'likely_scam',
+        aiScore: typeof thread.ai_score === 'number' ? thread.ai_score : 0,
+      }));
+      await writeEvals(supabaseEvals);
+    }
 
     console.log(`[run-classify-pipeline] upserted ${threads.length} thread evaluations`);
 
@@ -39926,30 +40201,54 @@ async function runClassifyPipeline() {
       }
     }
 
-    // Batch DELETE non-deal threads via batcher
+    // DELETE non-deal threads (SxT batcher and/or Supabase)
     if (notDealThreadIds.length > 0) {
-      const quoted = notDealThreadIds.map((id) => `'${id}'`);
-      await batcher.pushDealDeletes(quoted);
+      if (writeSxt) {
+        const quoted = notDealThreadIds.map((id) => `'${id}'`);
+        await batcher.pushDealDeletes(quoted);
+      }
+      if (writeSupabase) {
+        await deleteDeals(notDealThreadIds);
+      }
       console.log(`[run-classify-pipeline] deleted ${notDealThreadIds.length} non-deal threads`);
     }
 
-    // Batch upsert deals via batcher
+    // Upsert deals (SxT batcher and/or Supabase)
     if (dealThreads.length > 0) {
-      const dealValues = dealThreads.map((thread) => {
-        const threadId = sanitizeId(thread.thread_id);
-        const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
-        const dealId = threadId;
-        const dealName = sanitizeString(thread.deal_name || '');
-        const dealType = sanitizeString(thread.deal_type || '');
-        const dealValue =
-          typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
-        const currency = sanitizeString(thread.currency || 'USD');
-        const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
-        const category = sanitizeString(thread.category || '');
-        return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-      });
+      if (writeSxt) {
+        const dealValues = dealThreads.map((thread) => {
+          const threadId = sanitizeId(thread.thread_id);
+          const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
+          const dealId = threadId;
+          const dealName = sanitizeString(thread.deal_name || '');
+          const dealType = sanitizeString(thread.deal_type || '');
+          const dealValue =
+            typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
+          const currency = sanitizeString(thread.currency || 'USD');
+          const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
+          const category = sanitizeString(thread.category || '');
+          return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+        });
+        await batcher.pushDeals(dealValues);
+      }
 
-      await batcher.pushDeals(dealValues);
+      if (writeSupabase) {
+        const supabaseDeals = dealThreads.map((thread) => {
+          const threadId = sanitizeId(thread.thread_id);
+          const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
+          return {
+            threadId,
+            subjectUserId: userId,
+            dealName: thread.deal_name || null,
+            dealType: thread.deal_type || null,
+            value: typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0,
+            currency: thread.currency || 'USD',
+            isAiSorted: true,
+            mainContact: thread.main_contact || null,
+          }
+        });
+        await writeDeals(supabaseDeals);
+      }
 
       console.log(`[run-classify-pipeline] ${dealThreads.length} deals upserted`);
     }
@@ -40049,6 +40348,7 @@ async function runClassifyPipeline() {
 
       const coreContactValues = [];
       const dealContactValues = [];
+      const supabaseContactRows = [];
 
       for (const thread of dealThreads) {
         const mc = thread.main_contact;
@@ -40065,15 +40365,28 @@ async function runClassifyPipeline() {
         const titleVal = toSqlNullable(mc.title);
         const phoneVal = toSqlNullable(mc.phone_number);
 
-        // Core contacts — COALESCE preserves existing non-null values
-        coreContactValues.push(
-          `('${userId}', '${contactEmail}', ${nameVal}, ${companyVal}, ${titleVal}, ${phoneVal}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        );
+        if (writeSxt) {
+          // Core contacts — COALESCE preserves existing non-null values
+          coreContactValues.push(
+            `('${userId}', '${contactEmail}', ${nameVal}, ${companyVal}, ${titleVal}, ${phoneVal}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          );
 
-        // Deal contacts — simplified 4-column relationship upsert
-        dealContactValues.push(
-          `('${threadId}', '${userId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        );
+          // Deal contacts — simplified 4-column relationship upsert
+          dealContactValues.push(
+            `('${threadId}', '${userId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          );
+        }
+
+        if (writeSupabase) {
+          supabaseContactRows.push({
+            userId,
+            email,
+            name: mc.name || null,
+            company: mc.company || null,
+            title: mc.title || null,
+            phone: mc.phone_number || null,
+          });
+        }
       }
 
       if (coreContactValues.length > 0) {
@@ -40090,8 +40403,18 @@ async function runClassifyPipeline() {
         await batcher.pushContacts(dealContactValues);
       }
 
+      if (supabaseContactRows.length > 0) {
+        try {
+          await writeContacts(supabaseContactRows);
+        } catch (err) {
+          console.error(
+            `[run-classify-pipeline] supabase contacts write failed (non-fatal): ${err.message}`,
+          );
+        }
+      }
+
       console.log(
-        `[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`,
+        `[run-classify-pipeline] ${writeSxt ? dealContactValues.length : supabaseContactRows.length} contacts saved`,
       );
     }
 
