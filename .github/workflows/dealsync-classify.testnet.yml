@@ -21,6 +21,9 @@ jobs:
         uses: creatorland/dealsync-action@main
         with:
           command: run-classify-pipeline
+          ingest-write-target: ${{ secrets.INGEST_WRITE_TARGET || 'supabase' }}
+          supabase-url: ${{ secrets.SUPABASE_URL }}
+          supabase-service-role-key: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
           sxt-auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
           sxt-api-url: ${{ secrets.SXT_API_URL }}
