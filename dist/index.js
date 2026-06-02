@@ -39407,6 +39407,24 @@ function withTimeout(ms = REQUEST_TIMEOUT_MS) {
   return { signal: controller.signal, clear: () => clearTimeout(timeout) }
 }
 
+// PostgREST error bodies can echo the failing row (e.g. "Key (user_id, email)=
+// (..., alice@co.com) already exists"), and the caller logs the thrown message
+// into the Action log — so the raw body must never reach it. Keep only the
+// schema-level `code` + `message` (no row data) and drop `details`/`hint`; for a
+// non-JSON body, cap the length defensively.
+function summarizeError(body) {
+  if (!body) return ''
+  try {
+    const e = JSON.parse(body);
+    const parts = [];
+    if (e.code) parts.push(`[${e.code}]`);
+    if (e.message) parts.push(e.message);
+    return parts.join(' ') || `(${body.length} bytes)`
+  } catch {
+    return body.length > 120 ? `${body.slice(0, 120)}… (${body.length} bytes)` : body
+  }
+}
+
 /**
  * POST rows to a Supabase table via PostgREST.
  *
@@ -39439,7 +39457,7 @@ async function upsert(table, rows, onConflict, ignoreDuplicates = false) {
   }
   if (!resp.ok) {
     const body = await resp.text();
-    throw new Error(`Supabase ${table} upsert failed: ${resp.status} ${body}`)
+    throw new Error(`Supabase ${table} upsert failed: ${resp.status} ${summarizeError(body)}`)
   }
 }
 
@@ -39471,7 +39489,7 @@ async function deleteWhere(table, column, values) {
   }
   if (!resp.ok) {
     const body = await resp.text();
-    throw new Error(`Supabase ${table} delete failed: ${resp.status} ${body}`)
+    throw new Error(`Supabase ${table} delete failed: ${resp.status} ${summarizeError(body)}`)
   }
 }
 

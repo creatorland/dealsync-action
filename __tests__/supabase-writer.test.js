@@ -153,6 +153,39 @@ describe('writeAudit', () => {
       }),
     ).rejects.toThrow('Supabase ai_evaluation_audits upsert failed: 422')
   })
+
+  it('sanitizes PostgREST error bodies so row PII never reaches the thrown message', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: false,
+      status: 409,
+      text: async () =>
+        JSON.stringify({
+          code: '23505',
+          message: 'duplicate key value violates unique constraint "contacts_pkey"',
+          // PostgREST embeds the failing row here — must NOT be surfaced.
+          details: 'Key (user_id, email)=(u1, alice@secret.com) already exists.',
+        }),
+    }))
+    let msg = ''
+    try {
+      await writer.writeContacts([
+        {
+          userId: 'u1',
+          email: 'alice@secret.com',
+          name: null,
+          company: null,
+          title: null,
+          phone: null,
+        },
+      ])
+    } catch (e) {
+      msg = e.message
+    }
+    expect(msg).toContain('409')
+    expect(msg).toContain('23505')
+    expect(msg).toContain('duplicate key value')
+    expect(msg).not.toContain('alice@secret.com')
+  })
 })
 
 // ===========================================================================
