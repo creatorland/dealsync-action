@@ -202,7 +202,7 @@ const THREADS = [
 ]
 
 /** Drives one fresh-classification batch through runPool with the given write target. */
-function driveFreshBatch() {
+function driveFreshBatch(threadsOverride = THREADS) {
   mockRunPool.mockImplementation(async (claimFn, workerFn) => {
     mockExecuteSql
       .mockResolvedValueOnce([]) // claim UPDATE
@@ -222,7 +222,7 @@ function driveFreshBatch() {
     ])
     mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 's', userPrompt: 'u', threadOrder: [] })
     mockCallModel.mockResolvedValueOnce({ content: '[]' })
-    mockParseAndValidate.mockReturnValueOnce(THREADS)
+    mockParseAndValidate.mockReturnValueOnce(threadsOverride)
 
     await workerFn(batch, { attempt: 0 })
     return { processed: 1, failed: 0 }
@@ -395,5 +395,36 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     // deal_card_v on its own, whereas an orphan eval would be RLS-invisible.
     expect(mockWriteDeals).toHaveBeenCalledTimes(1)
     expect(mockWriteContacts).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips AI threads not present in the claimed batch (no deal under a fallback user)', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    // A deal-shaped result whose thread_id maps to no claimed row (hallucination).
+    // Without the owner guard it would be written under rows[0].USER_ID.
+    const hallucinated = {
+      ...THREADS[0],
+      thread_id: 'thread-HALLUCINATED',
+      main_contact: {
+        name: 'Ghost',
+        email: 'ghost@nowhere.com',
+        company: 'Ghost Co',
+        title: null,
+        phone_number: null,
+      },
+    }
+    driveFreshBatch([...THREADS, hallucinated])
+    await runClassifyPipeline()
+
+    // Only the genuinely-claimed deal thread is written, never the hallucination.
+    const deals = mockWriteDeals.mock.calls[0][0]
+    expect(deals.map((d) => d.threadId)).toEqual(['thread-1'])
+
+    // Evals cover the two claimed threads only; the hallucinated thread is dropped.
+    const evals = mockWriteEvals.mock.calls[0][0]
+    expect(evals.map((e) => e.threadId).sort()).toEqual(['thread-1', 'thread-2'])
+
+    // Its contact never leaks in under the batch's first user.
+    const contacts = mockWriteContacts.mock.calls[0][0]
+    expect(contacts.map((c) => c.email)).toEqual(['Alice@CO.com'])
   })
 })

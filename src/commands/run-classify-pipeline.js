@@ -604,9 +604,11 @@ export async function runClassifyPipeline() {
         }
       }
       timings.auditSave = Date.now() - t0
-      console.log(
-        `[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`,
-      )
+      if (writeSxt) {
+        console.log(
+          `[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`,
+        )
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -625,7 +627,9 @@ export async function runClassifyPipeline() {
       await batcher.pushEvals(evalValues)
     }
 
-    console.log(`[run-classify-pipeline] upserted ${threads.length} thread evaluations`)
+    if (writeSxt) {
+      console.log(`[run-classify-pipeline] upserted ${threads.length} thread evaluations`)
+    }
 
     // -----------------------------------------------------------------------
     // Step 5: Save deals via batcher
@@ -655,8 +659,8 @@ export async function runClassifyPipeline() {
       if (writeSxt) {
         const quoted = notDealThreadIds.map((id) => `'${id}'`)
         await batcher.pushDealDeletes(quoted)
+        console.log(`[run-classify-pipeline] deleted ${notDealThreadIds.length} non-deal threads`)
       }
-      console.log(`[run-classify-pipeline] deleted ${notDealThreadIds.length} non-deal threads`)
     }
 
     // Batch upsert deals via batcher (SxT). Supabase deal upserts happen in the
@@ -828,9 +832,13 @@ export async function runClassifyPipeline() {
     // deal-state progression (mirrors the non-fatal contacts handling above).
     if (writeSupabase) {
       const t0Supa = Date.now()
-      const batchUserId = rows[0]?.USER_ID ? sanitizeId(rows[0].USER_ID) : ''
+      // Owner of a thread, or null when the thread is not in the claimed batch.
+      // A null owner means the AI returned a thread_id/index that maps to no
+      // claimed row (hallucination / coercion artifact); such threads are SKIPPED
+      // from every Supabase write rather than attributed to a fallback user —
+      // writing them under rows[0].USER_ID would create a deal for the wrong user.
       const userIdFor = (threadId) =>
-        userByThread[threadId] ? sanitizeId(userByThread[threadId]) : batchUserId
+        userByThread[threadId] ? sanitizeId(userByThread[threadId]) : null
 
       // Resolved usable main_contact per deal thread (set during Step 6a).
       const mcByThread = new Map()
@@ -859,88 +867,80 @@ export async function runClassifyPipeline() {
         }
 
         // 3. Upsert deal rows + contacts BEFORE evals. A deal renders on its own
-        //    through deal_card_v (LEFT JOIN ete), so if a partial failure stops
-        //    the sequence before the evals write, the user still sees a (detail-
-        //    degraded) deal rather than an RLS-invisible eval — the eval read
-        //    policy requires an owning deal row. Deals-first = partial-write safe.
-        if (dealThreads.length > 0) {
-          await writeDeals(
-            dealThreads.map((thread) => {
-              const threadId = sanitizeId(thread.thread_id)
-              const mc = mcByThread.get(threadId) || null
-              return {
-                threadId,
-                userId: userIdFor(threadId),
-                category: thread.category || null,
-                dealName: thread.deal_name || null,
-                dealType: thread.deal_type || null,
-                // parseAndValidate emits deal_value (Number(), may be NaN) and
-                // deal_currency — NOT `currency`. Guard NaN/Infinity with
-                // Number.isFinite, and read the correct currency field (the old
-                // thread.currency was always undefined → every deal forced to USD).
-                value: Number.isFinite(thread.deal_value) ? thread.deal_value : 0,
-                currency: thread.deal_currency || 'USD',
-                brand: mc?.company || null,
-                isAiSorted: true,
-              }
-            }),
-          )
-
-          // Upsert contacts (one per deal thread with a usable contact), deduped
-          // by (userId, lowercased email) to match the contacts ON CONFLICT
-          // (user_id, email) target and avoid an intra-statement cardinality
-          // violation when two threads in the batch share a contact.
-          const contactRowsMap = new Map()
-          for (const thread of dealThreads) {
-            const threadId = sanitizeId(thread.thread_id)
-            const mc = mcByThread.get(threadId)
-            if (!mc) continue
-            const email = (mc.email || '').trim().toLowerCase()
-            if (!email) continue
-            const key = `${userIdFor(threadId)}::${email}`
-            contactRowsMap.set(key, {
-              userId: userIdFor(threadId),
-              email: mc.email,
-              name: mc.name || null,
-              company: mc.company || null,
-              title: mc.title || null,
-              phone: mc.phone_number || null,
-            })
-          }
-          await writeContacts([...contactRowsMap.values()])
+        //    through deal_card_v (LEFT JOIN ete), so if a partial failure stops the
+        //    sequence before the evals write the user still sees a (detail-degraded)
+        //    deal rather than an RLS-invisible eval. Built in one pass that skips any
+        //    thread with no claimed owner (never attribute a deal to a fallback user)
+        //    and dedupes contacts by (userId, lowercased email) to match the contacts
+        //    ON CONFLICT (user_id, email) target.
+        const dealRows = []
+        const contactRowsMap = new Map()
+        for (const thread of dealThreads) {
+          const threadId = sanitizeId(thread.thread_id)
+          const userId = userIdFor(threadId)
+          if (!userId) continue
+          const mc = mcByThread.get(threadId) || null
+          dealRows.push({
+            threadId,
+            userId,
+            category: thread.category || null,
+            dealName: thread.deal_name || null,
+            dealType: thread.deal_type || null,
+            // parseAndValidate emits deal_value (Number(), may be NaN) and
+            // deal_currency — NOT `currency`. Guard NaN/Infinity with
+            // Number.isFinite, and read the correct currency field (the old
+            // thread.currency was always undefined → every deal forced to USD).
+            value: Number.isFinite(thread.deal_value) ? thread.deal_value : 0,
+            currency: thread.deal_currency || 'USD',
+            brand: mc?.company || null,
+            isAiSorted: true,
+          })
+          if (!mc) continue
+          const email = (mc.email || '').trim().toLowerCase()
+          if (!email) continue
+          contactRowsMap.set(`${userId}::${email}`, {
+            userId,
+            email: mc.email,
+            name: mc.name || null,
+            company: mc.company || null,
+            title: mc.title || null,
+            phone: mc.phone_number || null,
+          })
         }
+        await writeDeals(dealRows)
+        await writeContacts([...contactRowsMap.values()])
 
-        // 4. Evals for ALL threads (deal + non-deal), written LAST so a partial
-        //    failure leaves a renderable deal rather than an orphan eval. Carries
-        //    the denormalized main_contact_* (deal threads with a resolved usable
-        //    contact only) and the audit linkage (ai_evaluation_audit_id = batchId).
-        await writeEvals(
-          threads.map((thread) => {
-            const threadId = sanitizeId(thread.thread_id)
-            return {
-              threadId,
-              auditId: batchId,
-              // Write the AI's insight text. parseAndValidate emits ai_insight and
-              // category as separate fields; category already lives on deals.category
-              // (ETE has no category column), so storing it here would needlessly
-              // drop the insight. Carry the real insight.
-              aiInsight: thread.ai_insight || null,
-              aiSummary: thread.ai_summary || null,
-              isDeal: !!thread.is_deal,
-              // parseAndValidate already folds the category check into the
-              // likely_scam boolean (Boolean(r.likely_scam) || category===scam),
-              // so carry that field directly instead of recomputing category-only
-              // (which dropped the AI's standalone scam flag).
-              likelyScam: !!thread.likely_scam,
-              aiScore: typeof thread.ai_score === 'number' ? thread.ai_score : 0,
-              mainContact: mcByThread.get(threadId) || null,
-            }
-          }),
-        )
+        // 4. Evals for all CLAIMED threads (deal + non-deal), written LAST so a
+        //    partial failure leaves a renderable deal rather than an orphan eval.
+        //    Threads not in the claimed batch are skipped (same reason as deals);
+        //    carries the denormalized main_contact_* (deal threads with a resolved
+        //    usable contact only) and the audit linkage (ai_evaluation_audit_id).
+        const evalRows = []
+        for (const thread of threads) {
+          const threadId = sanitizeId(thread.thread_id)
+          if (!userIdFor(threadId)) continue
+          evalRows.push({
+            threadId,
+            auditId: batchId,
+            // Write the AI's insight text. parseAndValidate emits ai_insight and
+            // category separately; category already lives on deals.category (ETE
+            // has no category column), so storing it here would drop the insight.
+            aiInsight: thread.ai_insight || null,
+            aiSummary: thread.ai_summary || null,
+            isDeal: !!thread.is_deal,
+            // parseAndValidate already folds the category check into the
+            // likely_scam boolean (Boolean(r.likely_scam) || category===scam),
+            // so carry that field directly instead of recomputing category-only.
+            likelyScam: !!thread.likely_scam,
+            aiScore: typeof thread.ai_score === 'number' ? thread.ai_score : 0,
+            mainContact: mcByThread.get(threadId) || null,
+          })
+        }
+        await writeEvals(evalRows)
 
         console.log(
           `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
-            `(${threads.length} evals, ${dealThreads.length} deals, ${notDealThreadIds.length} deletes)`,
+            `(${evalRows.length} evals, ${dealRows.length} deals, ${notDealThreadIds.length} deletes)`,
         )
       } catch (err) {
         console.error(
