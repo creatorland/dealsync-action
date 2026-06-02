@@ -40535,13 +40535,18 @@ async function runClassifyPipeline() {
           if (!mc) continue
           const email = (mc.email || '').trim().toLowerCase();
           if (!email) continue
-          contactRowsMap.set(`${userId}::${email}`, {
+          // Merge, don't overwrite: when two threads in the batch share a contact
+          // and the later one is sparser, keep each field's non-null value from
+          // either thread so the contact card isn't created with less data.
+          const ckey = `${userId}::${email}`;
+          const prevContact = contactRowsMap.get(ckey);
+          contactRowsMap.set(ckey, {
             userId,
             email: mc.email,
-            name: mc.name || null,
-            company: mc.company || null,
-            title: mc.title || null,
-            phone: mc.phone_number || null,
+            name: mc.name || prevContact?.name || null,
+            company: mc.company || prevContact?.company || null,
+            title: mc.title || prevContact?.title || null,
+            phone: mc.phone_number || prevContact?.phone || null,
           });
         }
         await writeDeals([...dealRowsMap.values()]);

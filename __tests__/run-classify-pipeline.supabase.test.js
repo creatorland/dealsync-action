@@ -367,6 +367,48 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     expect(mockDeleteDeals).toHaveBeenCalledWith(['thread-2'])
   })
 
+  it('merges duplicate (userId, email) contacts across threads instead of overwriting', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    // Two claimed deal threads (thread-1, thread-2 are both in ROWS, user-1) that
+    // resolve to the same contact email but carry complementary fields.
+    const t1 = {
+      ...THREADS[0],
+      thread_id: 'thread-1',
+      is_deal: true,
+      main_contact: {
+        name: 'Alice',
+        email: 'shared@co.com',
+        company: 'TestCo',
+        title: null,
+        phone_number: null,
+      },
+    }
+    const t2 = {
+      ...THREADS[0],
+      thread_id: 'thread-2',
+      is_deal: true,
+      main_contact: {
+        name: null,
+        email: 'shared@co.com',
+        company: null,
+        title: 'CEO',
+        phone_number: '555',
+      },
+    }
+    driveFreshBatch([t1, t2])
+    await runClassifyPipeline()
+
+    const contacts = mockWriteContacts.mock.calls[0][0]
+    expect(contacts).toHaveLength(1)
+    expect(contacts[0]).toMatchObject({
+      email: 'shared@co.com',
+      name: 'Alice',
+      company: 'TestCo',
+      title: 'CEO',
+      phone: '555',
+    })
+  })
+
   it('dedupes duplicate AI thread_ids so one echoed thread does not fail the whole batch', async () => {
     mockInputs({ 'ingest-write-target': 'supabase' })
     // The model echoes thread-1 twice; both map to the same claimed owner. A
