@@ -296,21 +296,23 @@ export async function deleteDeals(threadIds) {
  * email is lowercased so it matches email_thread_evaluations.main_contact_email
  * (the contact_card_v join key). updated_at is trigger-managed (omitted).
  *
+ * Upserts ONE row at a time so null/absent optional fields can be OMITTED from
+ * the body. With merge-duplicates PostgREST only updates the columns present in
+ * the payload, so an omitted name/company/title/phone is left intact on conflict
+ * (the SxT COALESCE behaviour) instead of blanking a previously-populated value
+ * on a later sparse re-ingestion. A bulk insert can't do this — PostgREST
+ * requires a uniform key set across every row in the batch.
+ *
  * @param {Array<{userId: string, email: string, name: string|null, company: string|null, title: string|null, phone: string|null}>} contacts
  */
 export async function writeContacts(contacts) {
   if (!contacts || contacts.length === 0) return
-  await upsert(
-    'contacts',
-    contacts.map(({ userId, email, name, company, title, phone }) => ({
-      user_id: userId,
-      email: normEmail(email),
-      name: name || null,
-      company_name: company || null,
-      title: title || null,
-      phone_number: phone || null,
-    })),
-    'user_id,email',
-    false,
-  )
+  for (const { userId, email, name, company, title, phone } of contacts) {
+    const row = { user_id: userId, email: normEmail(email) }
+    if (name) row.name = name
+    if (company) row.company_name = company
+    if (title) row.title = title
+    if (phone) row.phone_number = phone
+    await upsert('contacts', [row], 'user_id,email', false)
+  }
 }

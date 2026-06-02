@@ -367,6 +367,18 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     expect(mockDeleteDeals).toHaveBeenCalledWith(['thread-2'])
   })
 
+  it('deleteDeals never targets an unclaimed (hallucinated) non-deal thread_id', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    // A non-deal result whose thread_id maps to no claimed row. deleteDeals
+    // bypasses RLS, so deleting by an unclaimed id could remove another user's
+    // deal — it must be filtered out.
+    const hallucinatedNonDeal = { ...THREADS[1], thread_id: 'thread-GHOST-DELETE' }
+    driveFreshBatch([...THREADS, hallucinatedNonDeal])
+    await runClassifyPipeline()
+
+    expect(mockDeleteDeals).toHaveBeenCalledWith(['thread-2'])
+  })
+
   it('Supabase contacts: one row for the deal thread with its resolved contact', async () => {
     mockInputs({ 'ingest-write-target': 'supabase' })
     driveFreshBatch()

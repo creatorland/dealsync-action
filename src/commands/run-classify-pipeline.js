@@ -861,9 +861,13 @@ export async function runClassifyPipeline() {
           aiEvaluation: { threads },
         })
 
-        // 2. Delete deal rows for threads re-classified as non-deal.
-        if (notDealThreadIds.length > 0) {
-          await deleteDeals(notDealThreadIds)
+        // 2. Delete deal rows for threads re-classified as non-deal, but only for
+        //    threads actually in this claimed batch. deleteDeals matches by id and
+        //    bypasses RLS (service-role), so an unclaimed/hallucinated thread_id
+        //    that happens to match an existing deal could remove another user's row.
+        const claimedNonDealIds = notDealThreadIds.filter((tid) => userByThread[tid])
+        if (claimedNonDealIds.length > 0) {
+          await deleteDeals(claimedNonDealIds)
         }
 
         // 3. Upsert deal rows + contacts BEFORE evals. A deal renders on its own
@@ -940,7 +944,7 @@ export async function runClassifyPipeline() {
 
         console.log(
           `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
-            `(${evalRows.length} evals, ${dealRows.length} deals, ${notDealThreadIds.length} deletes)`,
+            `(${evalRows.length} evals, ${dealRows.length} deals, ${claimedNonDealIds.length} deletes)`,
         )
       } catch (err) {
         console.error(

@@ -513,6 +513,27 @@ describe('writeContacts', () => {
     await writer.writeContacts([])
     expect(capturedFetches).toHaveLength(0)
   })
+
+  it('omits null optional fields so a sparse re-upsert cannot blank existing values', async () => {
+    await writer.writeContacts([
+      { userId: 'u1', email: 'a@b.com', name: null, company: null, title: null, phone: null },
+    ])
+    // Only PK columns are sent; PostgREST leaves name/company/title/phone intact
+    // on conflict because they are absent from the DO UPDATE SET column list.
+    expect(parsedBody(lastFetch())[0]).toEqual({ user_id: 'u1', email: 'a@b.com' })
+  })
+
+  it('includes only the populated optional fields', async () => {
+    await writer.writeContacts([
+      { userId: 'u1', email: 'A@B.com', name: 'Alice', company: null, title: 'CEO', phone: null },
+    ])
+    expect(parsedBody(lastFetch())[0]).toEqual({
+      user_id: 'u1',
+      email: 'a@b.com',
+      name: 'Alice',
+      title: 'CEO',
+    })
+  })
 })
 
 // ===========================================================================
