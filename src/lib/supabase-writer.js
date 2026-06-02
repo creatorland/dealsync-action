@@ -6,12 +6,30 @@
  * by design; this module is a system actor only (never called from
  * user-facing paths).
  *
- * Column-ownership contract (AC2): only ingestion-owned columns appear
- * in the request body. PostgREST generates ON CONFLICT DO UPDATE SET
- * from the body columns, so user-owned columns (category, is_deleted,
- * updated_at) are never touched on re-ingest.
+ * SCHEMA SOURCE OF TRUTH: dealsync-v2 scheduler-service/migrations/
+ *   0001_business_tables.sql (columns), 0008_rls_policies.sql (ownership),
+ *   0009_read_views.sql (deal_card_v / contact_card_v).
  *
- * Idempotency contract (AC2, AC4):
+ * Ownership model (NO subject_user_id column exists on any business table):
+ *   deals                 — direct user_id; RLS: user_id = auth.jwt()->>'sub'
+ *   contacts              — direct user_id (composite PK user_id,email)
+ *   email_thread_evaluations — NO user column; ownership transitive via
+ *                           deals.email_thread_evaluation_id = ete.id
+ *   ai_evaluation_audits  — NO user column; two-hop via ete.ai_evaluation_audit_id
+ *                           = audits.id then deals.email_thread_evaluation_id = ete.id
+ *
+ * Linkage keys (load-bearing for RLS + read views):
+ *   ete.id = deals.email_thread_evaluation_id = threadId
+ *   audits.id = ete.ai_evaluation_audit_id = batchId
+ *   contacts.email = ete.main_contact_email (lowercased) — contact_card_v join
+ *
+ * Column ownership: business tables are 100% ingestion-owned (authenticated
+ * clients are SELECT-only per 0008). User-mutable state lives in separate
+ * tables (deal_user_overrides, thread_user_state). Timestamps (created_at,
+ * updated_at) are DB-managed (defaults + touch_updated_at triggers) and are
+ * never sent in the request body.
+ *
+ * Idempotency:
  *   ai_evaluation_audits  — ON CONFLICT (id) DO NOTHING  (append-only; id=batchId)
  *   email_thread_evaluations — ON CONFLICT (id) DO UPDATE (id=threadId, stable)
  *   deals                 — ON CONFLICT (id) DO UPDATE  (id=threadId, stable)
@@ -36,6 +54,10 @@ function getConfig() {
 /** Reset cached config — test-only. */
 export function _resetConfig() {
   _config = null
+}
+
+function normEmail(email) {
+  return (email || '').trim().toLowerCase() || null
 }
 
 /**
@@ -95,36 +117,35 @@ async function deleteWhere(table, column, values) {
 /**
  * Write one ai_evaluation_audits row. id=batchId for stable idempotency.
  * Append-only: ON CONFLICT (id) DO NOTHING — a re-run of the same batch
- * sees the existing audit row and skips, matching the SxT try/catch behaviour.
+ * sees the existing audit row and skips, matching the SxT behaviour.
+ * `aiEvaluation` is written to a jsonb column — pass the raw object/array,
+ * NOT a stringified/escaped value.
  *
  * @param {object} p
  * @param {string} p.batchId
- * @param {string} p.subjectUserId — owning user (REQUIRED for account-delete cascade)
  * @param {number} p.threadCount
  * @param {number} p.emailCount
  * @param {number} p.cost
  * @param {number} p.inputTokens
  * @param {number} p.outputTokens
  * @param {string} p.model
- * @param {string} p.evaluation — JSON-stringified AI output
+ * @param {object|Array} p.aiEvaluation — parsed AI output (jsonb), e.g. { threads: [...] }
  */
 export async function writeAudit({
   batchId,
-  subjectUserId,
   threadCount,
   emailCount,
   cost,
   inputTokens,
   outputTokens,
   model,
-  evaluation,
+  aiEvaluation,
 }) {
   await upsert(
     'ai_evaluation_audits',
     [
       {
         id: batchId,
-        subject_user_id: subjectUserId,
         batch_id: batchId,
         thread_count: threadCount,
         email_count: emailCount,
@@ -132,7 +153,7 @@ export async function writeAudit({
         input_tokens: inputTokens,
         output_tokens: outputTokens,
         model_used: model,
-        ai_evaluation: evaluation,
+        ai_evaluation: aiEvaluation,
       },
     ],
     'id',
@@ -142,26 +163,34 @@ export async function writeAudit({
 
 /**
  * Upsert email_thread_evaluations rows. id=threadId for stable idempotency.
- * ON CONFLICT (id) DO UPDATE SET ingestion-owned columns only.
- * (updated_at is a server-side trigger — not included here.)
+ * Carries the AI-eval result columns AND the denormalized main_contact_*
+ * columns (which live on THIS table, not on deals — per 0001 + 0009).
+ * ai_evaluation_audit_id links to ai_evaluation_audits.id (= batchId) for the
+ * two-hop ownership RLS policy. updated_at is trigger-managed (omitted).
  *
- * @param {Array<{threadId: string, subjectUserId: string, auditId: string|null, aiInsight: string|null, aiSummary: string|null, isDeal: boolean, likelyScam: boolean, aiScore: number}>} evals
+ * @param {Array<{threadId: string, auditId: string|null, aiInsight: string|null, aiSummary: string|null, isDeal: boolean, likelyScam: boolean, aiScore: number, mainContact: object|null}>} evals
  */
 export async function writeEvals(evals) {
   if (!evals || evals.length === 0) return
   await upsert(
     'email_thread_evaluations',
-    evals.map(({ threadId, subjectUserId, auditId, aiInsight, aiSummary, isDeal, likelyScam, aiScore }) => ({
-      id: threadId,
-      subject_user_id: subjectUserId,
-      thread_id: threadId,
-      ai_evaluation_audit_id: auditId || null,
-      ai_insight: aiInsight || null,
-      ai_summary: aiSummary || null,
-      is_deal: isDeal,
-      likely_scam: likelyScam,
-      ai_score: typeof aiScore === 'number' ? aiScore : 0,
-    })),
+    evals.map(
+      ({ threadId, auditId, aiInsight, aiSummary, isDeal, likelyScam, aiScore, mainContact }) => ({
+        id: threadId,
+        thread_id: threadId,
+        ai_evaluation_audit_id: auditId || null,
+        ai_insight: aiInsight || null,
+        ai_summary: aiSummary || null,
+        is_deal: isDeal,
+        likely_scam: likelyScam,
+        ai_score: typeof aiScore === 'number' ? aiScore : 0,
+        main_contact_name: mainContact?.name || null,
+        main_contact_email: normEmail(mainContact?.email),
+        main_contact_title: mainContact?.title || null,
+        main_contact_company: mainContact?.company || null,
+        main_contact_phone_number: mainContact?.phone_number || null,
+      }),
+    ),
     'id',
     false,
   )
@@ -169,37 +198,35 @@ export async function writeEvals(evals) {
 
 /**
  * Upsert deals rows. id=threadId for stable idempotency.
- * ON CONFLICT (id) DO UPDATE SET ingestion-owned columns only.
- * User-owned columns (category, is_deleted, updated_at) are NOT included —
- * they are absent from the request body and therefore absent from the
- * PostgREST-generated DO UPDATE SET clause.
+ * email_thread_evaluation_id=threadId links to email_thread_evaluations.id
+ * (the join key deal_card_v + the transitive-ownership RLS policies depend on).
+ * Business tables are fully ingestion-owned (authenticated clients are
+ * SELECT-only on deals per 0008); category is the AI category here, distinct
+ * from the user's deal_user_overrides.manual_category. main_contact_* are NOT
+ * on deals (they live on email_thread_evaluations); only `brand` (= contact
+ * company) is denormalized onto deals. created_at/updated_at are DB-managed.
  *
- * main_contact_* columns are extracted from the thread's main_contact object
- * (the logic originally owned by cancelled Story 4.3).
- *
- * @param {Array<{threadId: string, subjectUserId: string, dealName: string, dealType: string, value: number, currency: string, isAiSorted: boolean, mainContact: object|null}>} deals
+ * @param {Array<{threadId: string, userId: string, category: string|null, dealName: string|null, dealType: string|null, value: number, currency: string, brand: string|null, isAiSorted: boolean}>} deals
  */
 export async function writeDeals(deals) {
   if (!deals || deals.length === 0) return
   await upsert(
     'deals',
-    deals.map(({ threadId, subjectUserId, dealName, dealType, value, currency, isAiSorted, mainContact }) => ({
-      id: threadId,
-      subject_user_id: subjectUserId,
-      thread_id: threadId,
-      email_thread_evaluation_id: threadId,
-      deal_name: dealName || null,
-      deal_type: dealType || null,
-      value: typeof value === 'number' ? value : 0,
-      currency: currency || 'USD',
-      brand: mainContact?.company || null,
-      is_ai_sorted: isAiSorted !== false,
-      main_contact_email: mainContact?.email || null,
-      main_contact_name: mainContact?.name || null,
-      main_contact_company: mainContact?.company || null,
-      main_contact_title: mainContact?.title || null,
-      main_contact_phone_number: mainContact?.phone_number || null,
-    })),
+    deals.map(
+      ({ threadId, userId, category, dealName, dealType, value, currency, brand, isAiSorted }) => ({
+        id: threadId,
+        user_id: userId,
+        thread_id: threadId,
+        email_thread_evaluation_id: threadId,
+        deal_name: dealName || null,
+        deal_type: dealType || null,
+        category: category || null,
+        value: typeof value === 'number' ? value : 0,
+        currency: currency || 'USD',
+        brand: brand || null,
+        is_ai_sorted: isAiSorted !== false,
+      }),
+    ),
     'id',
     false,
   )
@@ -216,9 +243,10 @@ export async function deleteDeals(threadIds) {
 }
 
 /**
- * Upsert contacts rows.
+ * Upsert contacts rows. Composite PK (user_id, email) — no surrogate id.
  * ON CONFLICT (user_id, email) DO UPDATE SET ingestion-owned columns only.
- * (updated_at is a server-side trigger — not included here.)
+ * email is lowercased so it matches email_thread_evaluations.main_contact_email
+ * (the contact_card_v join key). updated_at is trigger-managed (omitted).
  *
  * @param {Array<{userId: string, email: string, name: string|null, company: string|null, title: string|null, phone: string|null}>} contacts
  */
@@ -227,9 +255,8 @@ export async function writeContacts(contacts) {
   await upsert(
     'contacts',
     contacts.map(({ userId, email, name, company, title, phone }) => ({
-      subject_user_id: userId,
       user_id: userId,
-      email,
+      email: normEmail(email),
       name: name || null,
       company_name: company || null,
       title: title || null,

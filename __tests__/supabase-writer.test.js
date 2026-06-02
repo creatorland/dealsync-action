@@ -59,22 +59,34 @@ function parsedBody(fetchCall) {
   return JSON.parse(fetchCall.opts.body)
 }
 
+// The four business tables have NO subject_user_id column (RLS keys on user_id
+// for deals/contacts and transitive joins for evals/audits). This guard asserts
+// the writer never sends a column the canonical schema does not have.
+function assertNoSubjectUserId(row) {
+  expect(row).not.toHaveProperty('subject_user_id')
+}
+
+// created_at / updated_at are DB-managed (defaults + touch_updated_at triggers).
+function assertNoManagedTimestamps(row) {
+  expect(row).not.toHaveProperty('created_at')
+  expect(row).not.toHaveProperty('updated_at')
+}
+
 // ===========================================================================
 // writeAudit
 // ===========================================================================
 
 describe('writeAudit', () => {
-  it('POSTs to ai_evaluation_audits with ON CONFLICT (id) DO NOTHING', async () => {
+  it('POSTs to ai_evaluation_audits with ON CONFLICT (id) DO NOTHING, id=batchId', async () => {
     await writer.writeAudit({
       batchId: 'batch-1',
-      subjectUserId: 'user-1',
       threadCount: 3,
       emailCount: 10,
       cost: 0,
       inputTokens: 0,
       outputTokens: 0,
       model: 'gpt-4',
-      evaluation: '{"threads":[]}',
+      aiEvaluation: { threads: [] },
     })
 
     const { url, opts } = lastFetch()
@@ -85,42 +97,59 @@ describe('writeAudit', () => {
     expect(body).toHaveLength(1)
     expect(body[0].id).toBe('batch-1')
     expect(body[0].batch_id).toBe('batch-1')
-    expect(body[0].subject_user_id).toBe('user-1')
     expect(body[0].thread_count).toBe(3)
     expect(body[0].model_used).toBe('gpt-4')
+    assertNoSubjectUserId(body[0])
   })
 
-  it('does not include user-owned columns', async () => {
+  it('writes ai_evaluation as a jsonb object, not a string', async () => {
     await writer.writeAudit({
       batchId: 'b1',
-      subjectUserId: 'u1',
       threadCount: 1,
       emailCount: 1,
       cost: 0,
       inputTokens: 0,
       outputTokens: 0,
       model: 'm',
-      evaluation: '{}',
+      aiEvaluation: { threads: [{ thread_id: 't1', is_deal: true }] },
     })
     const body = parsedBody(lastFetch())
-    expect(body[0]).not.toHaveProperty('category')
-    expect(body[0]).not.toHaveProperty('is_deleted')
+    expect(typeof body[0].ai_evaluation).toBe('object')
+    expect(body[0].ai_evaluation.threads[0].thread_id).toBe('t1')
+  })
+
+  it('does not include user-owned / managed columns', async () => {
+    await writer.writeAudit({
+      batchId: 'b1',
+      threadCount: 1,
+      emailCount: 1,
+      cost: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      model: 'm',
+      aiEvaluation: {},
+    })
+    const body = parsedBody(lastFetch())
+    assertNoSubjectUserId(body[0])
     expect(body[0]).not.toHaveProperty('updated_at')
   })
 
   it('throws on non-ok response', async () => {
-    global.fetch = jest.fn(async () => ({ ok: false, status: 422, text: async () => 'bad request' }))
+    global.fetch = jest.fn(async () => ({
+      ok: false,
+      status: 422,
+      text: async () => 'bad request',
+    }))
     await expect(
       writer.writeAudit({
         batchId: 'b1',
-        subjectUserId: 'u1',
         threadCount: 0,
         emailCount: 0,
         cost: 0,
         inputTokens: 0,
         outputTokens: 0,
         model: 'm',
-        evaluation: '{}',
+        aiEvaluation: {},
       }),
     ).rejects.toThrow('Supabase ai_evaluation_audits upsert failed: 422')
   })
@@ -131,17 +160,23 @@ describe('writeAudit', () => {
 // ===========================================================================
 
 describe('writeEvals', () => {
-  it('POSTs to email_thread_evaluations with ON CONFLICT (id) DO UPDATE', async () => {
+  it('POSTs to email_thread_evaluations with ON CONFLICT (id) DO UPDATE, id=threadId', async () => {
     await writer.writeEvals([
       {
         threadId: 'th-1',
-        subjectUserId: 'user-1',
-        auditId: 'audit-1',
+        auditId: 'batch-1',
         aiInsight: 'brand_deal',
         aiSummary: 'summary',
         isDeal: true,
         likelyScam: false,
         aiScore: 8,
+        mainContact: {
+          email: 'Alice@CO.com',
+          name: 'Alice',
+          company: 'Co Inc',
+          title: 'CEO',
+          phone_number: '+123',
+        },
       },
     ])
 
@@ -153,52 +188,94 @@ describe('writeEvals', () => {
     expect(body).toHaveLength(1)
     expect(body[0].id).toBe('th-1')
     expect(body[0].thread_id).toBe('th-1')
-    expect(body[0].subject_user_id).toBe('user-1')
-    expect(body[0].ai_evaluation_audit_id).toBe('audit-1')
+    expect(body[0].ai_evaluation_audit_id).toBe('batch-1')
     expect(body[0].is_deal).toBe(true)
     expect(body[0].ai_score).toBe(8)
+    assertNoSubjectUserId(body[0])
+  })
+
+  it('carries the denormalized main_contact_* columns (they live on ETE, not deals)', async () => {
+    await writer.writeEvals([
+      {
+        threadId: 'th-1',
+        auditId: 'b1',
+        aiInsight: null,
+        aiSummary: null,
+        isDeal: true,
+        likelyScam: false,
+        aiScore: 5,
+        mainContact: {
+          email: 'Bob@Example.COM',
+          name: 'Bob',
+          company: 'Acme',
+          title: 'Mgr',
+          phone_number: '555',
+        },
+      },
+    ])
+    const body = parsedBody(lastFetch())
+    expect(body[0].main_contact_name).toBe('Bob')
+    // lowercased to match contacts.email (contact_card_v join key)
+    expect(body[0].main_contact_email).toBe('bob@example.com')
+    expect(body[0].main_contact_company).toBe('Acme')
+    expect(body[0].main_contact_title).toBe('Mgr')
+    expect(body[0].main_contact_phone_number).toBe('555')
+  })
+
+  it('null main_contact yields null main_contact_* columns (non-deal threads)', async () => {
+    await writer.writeEvals([
+      {
+        threadId: 'th-nd',
+        auditId: 'b1',
+        aiInsight: null,
+        aiSummary: null,
+        isDeal: false,
+        likelyScam: false,
+        aiScore: 2,
+        mainContact: null,
+      },
+    ])
+    const body = parsedBody(lastFetch())
+    expect(body[0].is_deal).toBe(false)
+    expect(body[0].main_contact_email).toBeNull()
+    expect(body[0].main_contact_name).toBeNull()
   })
 
   it('uses thread_id as the stable id for idempotent re-ingest', async () => {
     const evals = [
       {
         threadId: 'th-stable',
-        subjectUserId: 'u1',
         auditId: null,
         aiInsight: null,
         aiSummary: null,
         isDeal: false,
         likelyScam: false,
         aiScore: 3,
+        mainContact: null,
       },
     ]
     await writer.writeEvals(evals)
     await writer.writeEvals(evals)
-
-    expect(capturedFetches).toHaveLength(2)
-    const body1 = parsedBody(capturedFetches[0])
-    const body2 = parsedBody(capturedFetches[1])
-    expect(body1[0].id).toBe('th-stable')
-    expect(body2[0].id).toBe('th-stable')
+    expect(parsedBody(capturedFetches[0])[0].id).toBe('th-stable')
+    expect(parsedBody(capturedFetches[1])[0].id).toBe('th-stable')
   })
 
-  it('does not include user-owned columns (updated_at)', async () => {
+  it('does not include subject_user_id or managed timestamps', async () => {
     await writer.writeEvals([
       {
         threadId: 'th-1',
-        subjectUserId: 'u1',
         auditId: null,
         aiInsight: null,
         aiSummary: null,
         isDeal: false,
         likelyScam: false,
         aiScore: 0,
+        mainContact: null,
       },
     ])
     const body = parsedBody(lastFetch())
-    expect(body[0]).not.toHaveProperty('updated_at')
-    expect(body[0]).not.toHaveProperty('category')
-    expect(body[0]).not.toHaveProperty('is_deleted')
+    assertNoSubjectUserId(body[0])
+    assertNoManagedTimestamps(body[0])
   })
 
   it('is a no-op for empty array', async () => {
@@ -212,23 +289,18 @@ describe('writeEvals', () => {
 // ===========================================================================
 
 describe('writeDeals', () => {
-  it('POSTs to deals with ON CONFLICT (id) DO UPDATE', async () => {
+  it('POSTs to deals with ON CONFLICT (id) DO UPDATE and user_id (not subject_user_id)', async () => {
     await writer.writeDeals([
       {
         threadId: 'th-1',
-        subjectUserId: 'user-1',
+        userId: 'user-1',
+        category: 'brand_deal',
         dealName: 'Brand Deal',
         dealType: 'sponsorship',
         value: 5000,
         currency: 'USD',
+        brand: 'Co Inc',
         isAiSorted: true,
-        mainContact: {
-          email: 'alice@co.com',
-          name: 'Alice',
-          company: 'Co Inc',
-          title: 'CEO',
-          phone_number: null,
-        },
       },
     ])
 
@@ -239,68 +311,88 @@ describe('writeDeals', () => {
     const body = parsedBody(lastFetch())
     expect(body).toHaveLength(1)
     expect(body[0].id).toBe('th-1')
+    expect(body[0].user_id).toBe('user-1')
     expect(body[0].thread_id).toBe('th-1')
-    expect(body[0].subject_user_id).toBe('user-1')
+    // join key to email_thread_evaluations.id (deal_card_v + transitive RLS)
+    expect(body[0].email_thread_evaluation_id).toBe('th-1')
     expect(body[0].deal_name).toBe('Brand Deal')
     expect(body[0].value).toBe(5000)
-    expect(body[0].main_contact_email).toBe('alice@co.com')
-    expect(body[0].main_contact_name).toBe('Alice')
-    expect(body[0].main_contact_company).toBe('Co Inc')
     expect(body[0].brand).toBe('Co Inc')
+    assertNoSubjectUserId(body[0])
   })
 
-  it('does not include user-owned columns (category, is_deleted, updated_at)', async () => {
+  it('does NOT carry main_contact_* columns (those live on email_thread_evaluations)', async () => {
     await writer.writeDeals([
       {
         threadId: 'th-1',
-        subjectUserId: 'u1',
-        dealName: 'test',
+        userId: 'u1',
+        category: null,
+        dealName: 'x',
         dealType: null,
         value: 0,
         currency: 'USD',
+        brand: 'Acme',
         isAiSorted: true,
-        mainContact: null,
       },
     ])
     const body = parsedBody(lastFetch())
-    expect(body[0]).not.toHaveProperty('category')
+    expect(body[0]).not.toHaveProperty('main_contact_email')
+    expect(body[0]).not.toHaveProperty('main_contact_name')
+    expect(body[0]).not.toHaveProperty('main_contact_company')
+  })
+
+  it('writes the AI category (ingestion-owned; users are SELECT-only on deals)', async () => {
+    await writer.writeDeals([
+      {
+        threadId: 'th-1',
+        userId: 'u1',
+        category: 'job_offer',
+        dealName: 'x',
+        dealType: null,
+        value: 0,
+        currency: 'USD',
+        brand: null,
+        isAiSorted: true,
+      },
+    ])
+    expect(parsedBody(lastFetch())[0].category).toBe('job_offer')
+  })
+
+  it('does not include is_deleted (no such column) or managed timestamps', async () => {
+    await writer.writeDeals([
+      {
+        threadId: 'th-1',
+        userId: 'u1',
+        category: null,
+        dealName: 'x',
+        dealType: null,
+        value: 0,
+        currency: 'USD',
+        brand: null,
+        isAiSorted: true,
+      },
+    ])
+    const body = parsedBody(lastFetch())
     expect(body[0]).not.toHaveProperty('is_deleted')
-    expect(body[0]).not.toHaveProperty('updated_at')
+    assertNoManagedTimestamps(body[0])
   })
 
   it('uses threadId as stable id — same thread re-ingested yields same id', async () => {
     const deal = {
       threadId: 'th-stable',
-      subjectUserId: 'u1',
+      userId: 'u1',
+      category: null,
       dealName: 'Deal A',
       dealType: null,
       value: 100,
       currency: 'USD',
+      brand: null,
       isAiSorted: true,
-      mainContact: null,
     }
     await writer.writeDeals([deal])
     await writer.writeDeals([deal])
     expect(parsedBody(capturedFetches[0])[0].id).toBe('th-stable')
     expect(parsedBody(capturedFetches[1])[0].id).toBe('th-stable')
-  })
-
-  it('handles null mainContact gracefully', async () => {
-    await writer.writeDeals([
-      {
-        threadId: 'th-1',
-        subjectUserId: 'u1',
-        dealName: 'No contact',
-        dealType: null,
-        value: 0,
-        currency: 'USD',
-        isAiSorted: true,
-        mainContact: null,
-      },
-    ])
-    const body = parsedBody(lastFetch())
-    expect(body[0].main_contact_email).toBeNull()
-    expect(body[0].brand).toBeNull()
   })
 })
 
@@ -334,7 +426,7 @@ describe('writeContacts', () => {
     await writer.writeContacts([
       {
         userId: 'user-1',
-        email: 'alice@co.com',
+        email: 'Alice@CO.com',
         name: 'Alice',
         company: 'Co Inc',
         title: 'CEO',
@@ -349,19 +441,20 @@ describe('writeContacts', () => {
     const body = parsedBody(lastFetch())
     expect(body).toHaveLength(1)
     expect(body[0].user_id).toBe('user-1')
-    expect(body[0].subject_user_id).toBe('user-1')
+    // lowercased so it matches email_thread_evaluations.main_contact_email
     expect(body[0].email).toBe('alice@co.com')
     expect(body[0].name).toBe('Alice')
     expect(body[0].company_name).toBe('Co Inc')
+    assertNoSubjectUserId(body[0])
   })
 
-  it('does not include user-owned columns (updated_at)', async () => {
+  it('has no surrogate id (composite PK user_id,email) and no managed timestamps', async () => {
     await writer.writeContacts([
       { userId: 'u1', email: 'a@b.com', name: null, company: null, title: null, phone: null },
     ])
     const body = parsedBody(lastFetch())
-    expect(body[0]).not.toHaveProperty('updated_at')
-    expect(body[0]).not.toHaveProperty('is_deleted')
+    expect(body[0]).not.toHaveProperty('id')
+    assertNoManagedTimestamps(body[0])
   })
 
   it('is a no-op for empty array', async () => {
@@ -385,14 +478,13 @@ describe('config validation', () => {
     await expect(
       writer.writeAudit({
         batchId: 'b1',
-        subjectUserId: 'u1',
         threadCount: 0,
         emailCount: 0,
         cost: 0,
         inputTokens: 0,
         outputTokens: 0,
         model: 'm',
-        evaluation: '{}',
+        aiEvaluation: {},
       }),
     ).rejects.toThrow('supabase-url and supabase-service-role-key are required')
   })
