@@ -161,8 +161,8 @@ function makeThreads(rows, { allDeals = false } = {}) {
         category: allDeals || r.THREAD_ID === 'thread-1' ? 'new' : null,
         deal_name: allDeals || r.THREAD_ID === 'thread-1' ? 'Test Deal' : null,
         deal_type: 'brand_collaboration',
-        deal_value: '1000',
-        currency: 'USD',
+        deal_value: 1000,
+        deal_currency: 'USD',
         main_contact:
           allDeals || r.THREAD_ID === 'thread-1'
             ? {
@@ -376,8 +376,8 @@ describe('run-classify-pipeline command', () => {
         category: 'new',
         deal_name: 'Outreach',
         deal_type: 'brand_collaboration',
-        deal_value: '0',
-        currency: 'USD',
+        deal_value: 0,
+        deal_currency: 'USD',
         main_contact: null,
       },
     ]
@@ -445,8 +445,8 @@ describe('run-classify-pipeline command', () => {
         category: 'new',
         deal_name: 'Cached',
         deal_type: 'sponsorship',
-        deal_value: '0',
-        currency: 'USD',
+        deal_value: 0,
+        deal_currency: 'USD',
         main_contact: null,
       },
     ]
@@ -525,8 +525,8 @@ describe('run-classify-pipeline command', () => {
         category: 'new',
         deal_name: 'D1',
         deal_type: 'brand_collaboration',
-        deal_value: '0',
-        currency: 'USD',
+        deal_value: 0,
+        deal_currency: 'USD',
         main_contact: null,
       },
       {
@@ -537,8 +537,8 @@ describe('run-classify-pipeline command', () => {
         category: 'new',
         deal_name: 'D2',
         deal_type: 'brand_collaboration',
-        deal_value: '0',
-        currency: 'USD',
+        deal_value: 0,
+        deal_currency: 'USD',
         main_contact: null,
       },
     ]
@@ -629,8 +629,8 @@ describe('run-classify-pipeline command', () => {
         category: 'new',
         deal_name: 'Cached',
         deal_type: 'sponsorship',
-        deal_value: '0',
-        currency: 'USD',
+        deal_value: 0,
+        deal_currency: 'USD',
         main_contact: null,
       },
     ]
@@ -679,8 +679,8 @@ describe('run-classify-pipeline command', () => {
         category: 'new',
         deal_name: 'Self',
         deal_type: 'sponsorship',
-        deal_value: '0',
-        currency: 'USD',
+        deal_value: 0,
+        deal_currency: 'USD',
         main_contact: null,
       },
     ]
@@ -1126,6 +1126,136 @@ describe('run-classify-pipeline command', () => {
       expect(dealValues).toHaveLength(1)
       expect(dealValues[0]).toContain('thread-1')
       expect(dealValues[0]).toContain('Test Deal')
+      // Real deal value (a number) and currency flow into the SxT row. The old
+      // code forced every deal to value 0 / currency USD; this fixture mirrors
+      // real parseAndValidate output (deal_value: 1000, deal_currency: 'USD').
+      expect(dealValues[0]).toContain(", 1000, 'USD',")
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+  })
+
+  it('writes the real deal value and currency to the SxT deal row (regression: value!=0, currency!=USD)', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(1)
+    // Mirror parseAndValidate output exactly: deal_value is a Number (never a
+    // string) and the currency field is deal_currency (NOT `currency`). The old
+    // mapper read thread.deal_value via `typeof === 'string'` (never true for a
+    // number → always 0) and thread.currency (the field is deal_currency, so
+    // always undefined → always 'USD'), so every SxT deal persisted value 0 /
+    // currency USD regardless of the AI output.
+    const threads = [
+      {
+        thread_id: 'thread-1',
+        is_deal: true,
+        ai_score: 9,
+        ai_summary: 'Summary',
+        category: 'new',
+        deal_name: 'Euro Deal',
+        deal_type: 'sponsorship',
+        deal_value: 2500,
+        deal_currency: 'EUR',
+        main_contact: {
+          name: 'Alice',
+          email: 'alice@co.com',
+          company: 'TestCo',
+          title: 'CEO',
+          phone_number: '555-1234',
+        },
+      },
+    ]
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed
+
+      const batch = await claimFn()
+      mockExecuteSql.mockResolvedValueOnce([{ AI_EVALUATION: JSON.stringify({ threads }) }])
+
+      await workerFn(batch, { attempt: 0 })
+
+      expect(mockBatcherInstance.pushDeals).toHaveBeenCalledTimes(1)
+      const dealValues = mockBatcherInstance.pushDeals.mock.calls[0][0]
+      expect(dealValues).toHaveLength(1)
+      // Value 2500 (not 0) and currency 'EUR' (not 'USD') land in their SQL slots.
+      expect(dealValues[0]).toContain(", 2500, 'EUR',")
+      // The exact old-bug output must not appear.
+      expect(dealValues[0]).not.toContain(", 0, 'USD',")
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+  })
+
+  it('falls back to value 0 / currency USD when deal_value is NaN and deal_currency is null', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(1)
+    // Defense-in-depth at the SQL-write boundary. parseAndValidate now clamps
+    // deal_value to number|null at the source (see ai.test.js), but the mapper
+    // keeps its own Number.isFinite guard — mirroring how the eval write guards
+    // ai_score. This test injects a NaN directly via the mocked parseAndValidate to
+    // prove that guard holds even if the source contract is ever bypassed: a
+    // non-finite value must become 0, never leak "NaN" into the INSERT. (NaN
+    // reaches the mapper only on the fresh path; the cached-audit path serializes
+    // through JSON.stringify, which maps NaN to null.)
+    const threads = [
+      {
+        thread_id: 'thread-1',
+        is_deal: true,
+        ai_score: 7,
+        ai_summary: 'Summary',
+        category: 'new',
+        deal_name: 'Garbled Value Deal',
+        deal_type: 'sponsorship',
+        deal_value: NaN,
+        deal_currency: null,
+        main_contact: {
+          name: 'Alice',
+          email: 'alice@co.com',
+          company: 'TestCo',
+          title: 'CEO',
+          phone_number: '555-1234',
+        },
+      },
+    ]
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed
+
+      const batch = await claimFn()
+
+      // Fresh path: no existing audit, so AI classification runs.
+      mockExecuteSql.mockResolvedValueOnce([]) // audit check -> empty
+      const emails = rows.map((r) => ({
+        messageId: r.MESSAGE_ID,
+        id: r.EMAIL_METADATA_ID,
+        threadId: r.THREAD_ID,
+        body: 'test email body',
+      }))
+      mockFetchEmails.mockResolvedValueOnce(emails)
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
+      mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
+      mockCallModel.mockResolvedValueOnce({ content: '[{"thread_id":"thread-1"}]' })
+      mockParseAndValidate.mockReturnValueOnce(threads)
+      mockExecuteSql.mockResolvedValueOnce([]) // insertAudit
+
+      await workerFn(batch, { attempt: 0 })
+
+      expect(mockBatcherInstance.pushDeals).toHaveBeenCalledTimes(1)
+      const dealValues = mockBatcherInstance.pushDeals.mock.calls[0][0]
+      expect(dealValues).toHaveLength(1)
+      // NaN value -> 0, null currency -> 'USD'.
+      expect(dealValues[0]).toContain(", 0, 'USD',")
+      // NaN must never reach the SQL row.
+      expect(dealValues[0]).not.toContain('NaN')
 
       return { processed: 1, failed: 0 }
     })
@@ -1529,8 +1659,8 @@ describe('run-classify-pipeline command', () => {
         category: 'new',
         deal_name: 'Big Deal',
         deal_type: 'sponsorship',
-        deal_value: '1000',
-        currency: 'USD',
+        deal_value: 1000,
+        deal_currency: 'USD',
         main_contact: {
           name: 'Alice',
           email: 'alice@brand.com',
@@ -1593,8 +1723,8 @@ describe('run-classify-pipeline command', () => {
         category: 'new',
         deal_name: 'Deal',
         deal_type: 'sponsorship',
-        deal_value: '100',
-        currency: 'USD',
+        deal_value: 100,
+        deal_currency: 'USD',
         main_contact: {
           name: '',
           email: 'contact@co.com',
@@ -1701,8 +1831,8 @@ describe('run-classify-pipeline command', () => {
         category: null,
         deal_name: null,
         deal_type: null,
-        deal_value: '0',
-        currency: 'USD',
+        deal_value: 0,
+        deal_currency: 'USD',
         main_contact: null,
       },
       {
@@ -1713,8 +1843,8 @@ describe('run-classify-pipeline command', () => {
         category: 'new',
         deal_name: 'New Deal',
         deal_type: 'brand_collaboration',
-        deal_value: '500',
-        currency: 'USD',
+        deal_value: 500,
+        deal_currency: 'USD',
         main_contact: {
           name: 'Bob',
           email: 'bob@co.com',
@@ -1921,8 +2051,8 @@ describe('run-classify-pipeline command', () => {
         category: 'new',
         deal_name: 'Deal',
         deal_type: 'sponsorship',
-        deal_value: '100',
-        currency: 'USD',
+        deal_value: 100,
+        deal_currency: 'USD',
         main_contact: { name: 'X', email: 'x@co.com', company: '', title: '', phone_number: '' },
       },
     ]

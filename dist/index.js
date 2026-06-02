@@ -35740,6 +35740,19 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
 }
 
 /**
+ * Coerce a raw AI-supplied value to a finite number, or null. This keeps
+ * parseAndValidate's contract honest: deal_value is number|null — never
+ * NaN/Infinity — so consumers can trust it without re-guarding. Examples:
+ * Number('1k') → NaN → null, '1e999' → Infinity → null, null/undefined → null,
+ * 0 → 0 (a real zero is preserved, unlike a `|| null` fallback).
+ */
+function toFiniteNumberOrNull(value) {
+  if (value == null) return null
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null
+}
+
+/**
  * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
  * @param {string} raw — raw AI response
  * @param {string[]} [threadOrder] — maps thread_index (1-based) to thread_id
@@ -35815,7 +35828,7 @@ function parseAndValidate(raw, threadOrder) {
         : 'other_business'
       : null,
     deal_name: r.is_deal ? r.deal_name || null : null,
-    deal_value: r.deal_value != null ? Number(r.deal_value) : null,
+    deal_value: toFiniteNumberOrNull(r.deal_value),
     deal_currency: r.deal_currency || null,
   }))
 }
@@ -39941,9 +39954,14 @@ async function runClassifyPipeline() {
         const dealId = threadId;
         const dealName = sanitizeString(thread.deal_name || '');
         const dealType = sanitizeString(thread.deal_type || '');
-        const dealValue =
-          typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0;
-        const currency = sanitizeString(thread.currency || 'USD');
+        // parseAndValidate now clamps deal_value to number|null (never NaN/Infinity),
+        // so this Number.isFinite check is defense-in-depth at the SQL boundary: a
+        // null (or any non-finite) value becomes 0. Read deal_currency — NOT
+        // `currency`: the old mapper read thread.currency (always undefined → every
+        // deal forced to USD) and a `typeof === 'string'` check that never matched a
+        // number (→ every deal forced to value 0).
+        const dealValue = Number.isFinite(thread.deal_value) ? thread.deal_value : 0;
+        const currency = sanitizeString(thread.deal_currency || 'USD');
         const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
         const category = sanitizeString(thread.category || '');
         return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
