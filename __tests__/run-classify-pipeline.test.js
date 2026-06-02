@@ -1192,6 +1192,76 @@ describe('run-classify-pipeline command', () => {
     await runClassifyPipeline()
   })
 
+  it('falls back to value 0 / currency USD when deal_value is NaN and deal_currency is null', async () => {
+    mockInputs()
+
+    const rows = makeBatchRows(1)
+    // The fresh classification path (not the cached-audit path) is required here:
+    // parseAndValidate does `Number(r.deal_value)`, which yields NaN when the AI
+    // returns a non-numeric value, and `r.deal_currency || null`, which yields null
+    // when the AI omits currency. A NaN only survives to the mapper on the fresh
+    // path — the cached-audit path serializes via JSON.stringify, which maps NaN to
+    // null. This guards the Number.isFinite branch against a naive `?? 0` regression
+    // (NaN ?? 0 === NaN), which would otherwise leak "NaN" into the deal SQL.
+    const threads = [
+      {
+        thread_id: 'thread-1',
+        is_deal: true,
+        ai_score: 7,
+        ai_summary: 'Summary',
+        category: 'new',
+        deal_name: 'Garbled Value Deal',
+        deal_type: 'sponsorship',
+        deal_value: NaN,
+        deal_currency: null,
+        main_contact: {
+          name: 'Alice',
+          email: 'alice@co.com',
+          company: 'TestCo',
+          title: 'CEO',
+          phone_number: '555-1234',
+        },
+      },
+    ]
+
+    mockRunPool.mockImplementation(async (claimFn, workerFn) => {
+      mockExecuteSql
+        .mockResolvedValueOnce([]) // UPDATE claim
+        .mockResolvedValueOnce(rows) // SELECT claimed
+
+      const batch = await claimFn()
+
+      // Fresh path: no existing audit, so AI classification runs.
+      mockExecuteSql.mockResolvedValueOnce([]) // audit check -> empty
+      const emails = rows.map((r) => ({
+        messageId: r.MESSAGE_ID,
+        id: r.EMAIL_METADATA_ID,
+        threadId: r.THREAD_ID,
+        body: 'test email body',
+      }))
+      mockFetchEmails.mockResolvedValueOnce(emails)
+      mockExecuteSql.mockResolvedValueOnce([]) // selectByThreadIds -> no existing deals
+      mockBuildPrompt.mockReturnValueOnce({ systemPrompt: 'sys', userPrompt: 'usr' })
+      mockCallModel.mockResolvedValueOnce({ content: '[{"thread_id":"thread-1"}]' })
+      mockParseAndValidate.mockReturnValueOnce(threads)
+      mockExecuteSql.mockResolvedValueOnce([]) // insertAudit
+
+      await workerFn(batch, { attempt: 0 })
+
+      expect(mockBatcherInstance.pushDeals).toHaveBeenCalledTimes(1)
+      const dealValues = mockBatcherInstance.pushDeals.mock.calls[0][0]
+      expect(dealValues).toHaveLength(1)
+      // NaN value -> 0, null currency -> 'USD'.
+      expect(dealValues[0]).toContain(", 0, 'USD',")
+      // NaN must never reach the SQL row.
+      expect(dealValues[0]).not.toContain('NaN')
+
+      return { processed: 1, failed: 0 }
+    })
+
+    await runClassifyPipeline()
+  })
+
   // ----------------------------------------------------------
   // Save deal contacts uses thread_id as deal_id
   // ----------------------------------------------------------
