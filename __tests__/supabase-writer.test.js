@@ -217,6 +217,8 @@ describe('writeEvals', () => {
     expect(url).toContain('/rest/v1/email_thread_evaluations')
     expect(url).toContain('on_conflict=id')
     expect(opts.headers['Prefer']).toContain('merge-duplicates')
+    // omitted columns (created_at/updated_at) must use DB defaults, not NULL
+    expect(opts.headers['Prefer']).toContain('missing=default')
     const body = parsedBody(lastFetch())
     expect(body).toHaveLength(1)
     expect(body[0].id).toBe('th-1')

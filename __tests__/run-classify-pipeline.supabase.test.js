@@ -367,6 +367,20 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     expect(mockDeleteDeals).toHaveBeenCalledWith(['thread-2'])
   })
 
+  it('dedupes duplicate AI thread_ids so one echoed thread does not fail the whole batch', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    // The model echoes thread-1 twice; both map to the same claimed owner. A
+    // duplicate id in a single upsert would trip an ON CONFLICT cardinality
+    // violation and drop the batch, so they must collapse to one row.
+    driveFreshBatch([THREADS[0], { ...THREADS[0] }, THREADS[1]])
+    await runClassifyPipeline()
+
+    const deals = mockWriteDeals.mock.calls[0][0]
+    expect(deals.filter((d) => d.threadId === 'thread-1')).toHaveLength(1)
+    const evals = mockWriteEvals.mock.calls[0][0]
+    expect(evals.filter((e) => e.threadId === 'thread-1')).toHaveLength(1)
+  })
+
   it('deleteDeals never targets an unclaimed (hallucinated) non-deal thread_id', async () => {
     mockInputs({ 'ingest-write-target': 'supabase' })
     // A non-deal result whose thread_id maps to no claimed row. deleteDeals

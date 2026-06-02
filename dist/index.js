@@ -39447,7 +39447,11 @@ async function upsert(table, rows, onConflict, ignoreDuplicates = false) {
         Authorization: `Bearer ${key}`,
         apikey: key,
         'Content-Type': 'application/json',
-        Prefer: `return=minimal, resolution=${resolution}`,
+        // missing=default: columns omitted from the payload use their DB DEFAULT
+        // (e.g. created_at / updated_at NOT NULL DEFAULT now()) instead of NULL.
+        // Without it, PostgREST (v11+) inserts NULL for missing columns, which
+        // would fail the NOT NULL timestamp defaults on first insert.
+        Prefer: `return=minimal, resolution=${resolution}, missing=default`,
       },
       body: JSON.stringify(rows),
       signal,
@@ -40502,17 +40506,18 @@ async function runClassifyPipeline() {
         //    through deal_card_v (LEFT JOIN ete), so if a partial failure stops the
         //    sequence before the evals write the user still sees a (detail-degraded)
         //    deal rather than an RLS-invisible eval. Built in one pass that skips any
-        //    thread with no claimed owner (never attribute a deal to a fallback user)
-        //    and dedupes contacts by (userId, lowercased email) to match the contacts
-        //    ON CONFLICT (user_id, email) target.
-        const dealRows = [];
+        //    thread with no claimed owner (never attribute a deal to a fallback user),
+        //    dedupes deals by sanitized thread id (a duplicate id would trip the
+        //    ON CONFLICT cardinality violation and drop the whole batch), and dedupes
+        //    contacts by (userId, lowercased email) to match the contacts conflict key.
+        const dealRowsMap = new Map();
         const contactRowsMap = new Map();
         for (const thread of dealThreads) {
           const threadId = sanitizeId(thread.thread_id);
           const userId = userIdFor(threadId);
           if (!userId) continue
           const mc = mcByThread.get(threadId) || null;
-          dealRows.push({
+          dealRowsMap.set(threadId, {
             threadId,
             userId,
             category: thread.category || null,
@@ -40539,7 +40544,7 @@ async function runClassifyPipeline() {
             phone: mc.phone_number || null,
           });
         }
-        await writeDeals(dealRows);
+        await writeDeals([...dealRowsMap.values()]);
         await writeContacts([...contactRowsMap.values()]);
 
         // 4. Evals for all CLAIMED threads (deal + non-deal), written LAST so a
@@ -40547,11 +40552,11 @@ async function runClassifyPipeline() {
         //    Threads not in the claimed batch are skipped (same reason as deals);
         //    carries the denormalized main_contact_* (deal threads with a resolved
         //    usable contact only) and the audit linkage (ai_evaluation_audit_id).
-        const evalRows = [];
+        const evalRowsMap = new Map();
         for (const thread of threads) {
           const threadId = sanitizeId(thread.thread_id);
           if (!userIdFor(threadId)) continue
-          evalRows.push({
+          evalRowsMap.set(threadId, {
             threadId,
             auditId: batchId,
             // Write the AI's insight text. parseAndValidate emits ai_insight and
@@ -40568,11 +40573,11 @@ async function runClassifyPipeline() {
             mainContact: mcByThread.get(threadId) || null,
           });
         }
-        await writeEvals(evalRows);
+        await writeEvals([...evalRowsMap.values()]);
 
         console.log(
           `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
-            `(${evalRows.length} evals, ${dealRows.length} deals, ${claimedNonDealIds.length} deletes)`,
+            `(${evalRowsMap.size} evals, ${dealRowsMap.size} deals, ${claimedNonDealIds.length} deletes)`,
         );
       } catch (err) {
         console.error(

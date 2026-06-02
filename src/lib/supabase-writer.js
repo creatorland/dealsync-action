@@ -111,7 +111,11 @@ async function upsert(table, rows, onConflict, ignoreDuplicates = false) {
         Authorization: `Bearer ${key}`,
         apikey: key,
         'Content-Type': 'application/json',
-        Prefer: `return=minimal, resolution=${resolution}`,
+        // missing=default: columns omitted from the payload use their DB DEFAULT
+        // (e.g. created_at / updated_at NOT NULL DEFAULT now()) instead of NULL.
+        // Without it, PostgREST (v11+) inserts NULL for missing columns, which
+        // would fail the NOT NULL timestamp defaults on first insert.
+        Prefer: `return=minimal, resolution=${resolution}, missing=default`,
       },
       body: JSON.stringify(rows),
       signal,
