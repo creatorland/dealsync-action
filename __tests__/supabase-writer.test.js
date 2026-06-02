@@ -394,6 +394,25 @@ describe('writeDeals', () => {
     expect(parsedBody(capturedFetches[0])[0].id).toBe('th-stable')
     expect(parsedBody(capturedFetches[1])[0].id).toBe('th-stable')
   })
+
+  it('coerces a non-finite value (NaN/Infinity) to 0, not a JSON null', async () => {
+    await writer.writeDeals([
+      {
+        threadId: 'th-1',
+        userId: 'u1',
+        category: null,
+        dealName: 'x',
+        dealType: null,
+        value: NaN,
+        currency: 'USD',
+        brand: null,
+        isAiSorted: true,
+      },
+    ])
+    // typeof NaN === 'number' would have slipped through and JSON.stringify(NaN)
+    // serializes to null; Number.isFinite guards it to a real 0.
+    expect(parsedBody(lastFetch())[0].value).toBe(0)
+  })
 })
 
 // ===========================================================================

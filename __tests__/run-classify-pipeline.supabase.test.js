@@ -152,17 +152,28 @@ const ROWS = [
   },
 ]
 
+// Shapes mirror parseAndValidate() output EXACTLY (ai.js lines 243-266):
+// keys are deal_value (Number, may be NaN), deal_currency (NOT `currency`),
+// a standalone likely_scam boolean, and a separate ai_insight. Fixtures that
+// drift from the real parser shape silently mask field-provenance bugs.
 const THREADS = [
   {
     thread_id: 'thread-1',
     is_deal: true,
+    is_english: true,
+    language: 'en',
     ai_score: 8,
-    ai_summary: 'A real deal',
     category: 'new',
+    // standalone scam flag set true even though category is 'new' — guards that
+    // the eval write carries thread.likely_scam, not a category==='likely_scam' recompute.
+    likely_scam: true,
+    ai_insight: 'High-value brand collaboration',
+    ai_summary: 'A real deal',
+    deal_brand: 'BrandFromAI',
     deal_name: 'Test Deal',
     deal_type: 'brand_collaboration',
-    deal_value: '5000',
-    currency: 'USD',
+    deal_value: 5000,
+    deal_currency: 'EUR', // non-USD — guards the deal_currency vs currency field-name fix
     main_contact: {
       name: 'Alice',
       email: 'Alice@CO.com',
@@ -174,13 +185,18 @@ const THREADS = [
   {
     thread_id: 'thread-2',
     is_deal: false,
+    is_english: true,
+    language: 'en',
     ai_score: 2,
-    ai_summary: 'Not a deal',
     category: 'likely_scam',
+    likely_scam: true,
+    ai_insight: '',
+    ai_summary: 'Not a deal',
+    deal_brand: null,
     deal_name: null,
     deal_type: null,
-    deal_value: '0',
-    currency: 'USD',
+    deal_value: null,
+    deal_currency: null,
     main_contact: null,
   },
 ]
@@ -315,9 +331,14 @@ describe('INGEST_WRITE_TARGET wiring', () => {
 
     expect(e1.isDeal).toBe(true)
     expect(e1.mainContact).toMatchObject({ email: 'Alice@CO.com', company: 'TestCo' })
+    // ai_insight carries the AI insight text, not the category enum.
+    expect(e1.aiInsight).toBe('High-value brand collaboration')
+    // thread-1 category is 'new' but carries a standalone likely_scam flag —
+    // the eval must reflect the AI's boolean, not a category-only recompute.
+    expect(e1.likelyScam).toBe(true)
 
     expect(e2.isDeal).toBe(false)
-    expect(e2.likelyScam).toBe(true) // category 'likely_scam'
+    expect(e2.likelyScam).toBe(true) // both the flag and category agree here
     expect(e2.mainContact).toBeNull()
   })
 
@@ -332,6 +353,9 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     expect(deals[0].userId).toBe('user-1')
     expect(deals[0].category).toBe('new')
     expect(deals[0].value).toBe(5000)
+    // currency must come from deal_currency (the field parseAndValidate emits),
+    // not the never-present thread.currency that silently defaulted to 'USD'.
+    expect(deals[0].currency).toBe('EUR')
     expect(deals[0].brand).toBe('TestCo') // from main_contact.company
   })
 
@@ -360,5 +384,16 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     mockWriteDeals.mockRejectedValueOnce(new Error('supabase 500'))
     driveFreshBatch()
     await expect(runClassifyPipeline()).resolves.toBeDefined()
+  })
+
+  it('writes deals before evals so an eval failure still leaves the deal written', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    mockWriteEvals.mockRejectedValueOnce(new Error('supabase 500'))
+    driveFreshBatch()
+    await runClassifyPipeline()
+    // deal write happened before the eval write that failed — a deal renders via
+    // deal_card_v on its own, whereas an orphan eval would be RLS-invisible.
+    expect(mockWriteDeals).toHaveBeenCalledTimes(1)
+    expect(mockWriteContacts).toHaveBeenCalledTimes(1)
   })
 })

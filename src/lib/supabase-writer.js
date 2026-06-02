@@ -60,6 +60,17 @@ function normEmail(email) {
   return (email || '').trim().toLowerCase() || null
 }
 
+// AbortController + cleared timer (mirrors src/lib/db.js withTimeout). Preferred
+// over AbortSignal.timeout() so the timer is explicitly cleared on the success
+// path — no dangling 30s handle keeping a short-lived Action process (or a Jest
+// worker) alive after the fetch resolves.
+const REQUEST_TIMEOUT_MS = 30000
+function withTimeout(ms = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), ms)
+  return { signal: controller.signal, clear: () => clearTimeout(timeout) }
+}
+
 /**
  * POST rows to a Supabase table via PostgREST.
  *
@@ -73,16 +84,23 @@ async function upsert(table, rows, onConflict, ignoreDuplicates = false) {
   const { url, key } = getConfig()
   const resolution = ignoreDuplicates ? 'ignore-duplicates' : 'merge-duplicates'
   const conflictParam = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : ''
-  const resp = await fetch(`${url}/rest/v1/${table}${conflictParam}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      apikey: key,
-      'Content-Type': 'application/json',
-      Prefer: `return=minimal,resolution=${resolution}`,
-    },
-    body: JSON.stringify(rows),
-  })
+  const { signal, clear } = withTimeout()
+  let resp
+  try {
+    resp = await fetch(`${url}/rest/v1/${table}${conflictParam}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        apikey: key,
+        'Content-Type': 'application/json',
+        Prefer: `return=minimal, resolution=${resolution}`,
+      },
+      body: JSON.stringify(rows),
+      signal,
+    })
+  } finally {
+    clear()
+  }
   if (!resp.ok) {
     const body = await resp.text()
     throw new Error(`Supabase ${table} upsert failed: ${resp.status} ${body}`)
@@ -100,14 +118,21 @@ async function deleteWhere(table, column, values) {
   if (!values || values.length === 0) return
   const { url, key } = getConfig()
   const inList = values.map((v) => encodeURIComponent(v)).join(',')
-  const resp = await fetch(`${url}/rest/v1/${table}?${column}=in.(${inList})`, {
-    method: 'DELETE',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      apikey: key,
-      Prefer: 'return=minimal',
-    },
-  })
+  const { signal, clear } = withTimeout()
+  let resp
+  try {
+    resp = await fetch(`${url}/rest/v1/${table}?${column}=in.(${inList})`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        apikey: key,
+        Prefer: 'return=minimal',
+      },
+      signal,
+    })
+  } finally {
+    clear()
+  }
   if (!resp.ok) {
     const body = await resp.text()
     throw new Error(`Supabase ${table} delete failed: ${resp.status} ${body}`)
@@ -201,10 +226,15 @@ export async function writeEvals(evals) {
  * email_thread_evaluation_id=threadId links to email_thread_evaluations.id
  * (the join key deal_card_v + the transitive-ownership RLS policies depend on).
  * Business tables are fully ingestion-owned (authenticated clients are
- * SELECT-only on deals per 0008); category is the AI category here, distinct
- * from the user's deal_user_overrides.manual_category. main_contact_* are NOT
- * on deals (they live on email_thread_evaluations); only `brand` (= contact
- * company) is denormalized onto deals. created_at/updated_at are DB-managed.
+ * SELECT-only on deals per 0008 — no INSERT/UPDATE/DELETE policies exist).
+ * `category` here is the AI classification; it IS included in the upsert body
+ * even though Story 4.9 AC2 listed it as "user-mutable excluded". That AC was
+ * written against a pre-schema model where users could write deals directly.
+ * In the applied schema, user-mutable category state lives exclusively in
+ * deal_user_overrides.manual_category — ingestion cannot clobber user state.
+ * main_contact_* are NOT on deals (they live on email_thread_evaluations);
+ * only `brand` (= contact company) is denormalized onto deals.
+ * created_at/updated_at are DB-managed.
  *
  * @param {Array<{threadId: string, userId: string, category: string|null, dealName: string|null, dealType: string|null, value: number, currency: string, brand: string|null, isAiSorted: boolean}>} deals
  */
@@ -221,7 +251,7 @@ export async function writeDeals(deals) {
         deal_name: dealName || null,
         deal_type: dealType || null,
         category: category || null,
-        value: typeof value === 'number' ? value : 0,
+        value: Number.isFinite(value) ? value : 0,
         currency: currency || 'USD',
         brand: brand || null,
         is_ai_sorted: isAiSorted !== false,

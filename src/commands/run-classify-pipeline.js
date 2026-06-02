@@ -58,8 +58,23 @@ export async function runClassifyPipeline() {
   const flushIntervalMs = parseInt(core.getInput('pipeline-flush-interval-ms') || '5000', 10)
   const flushThreshold = parseInt(core.getInput('pipeline-flush-threshold') || '5', 10)
   const writeTarget = core.getInput('ingest-write-target') || 'sxt'
+  if (!['sxt', 'supabase', 'both'].includes(writeTarget)) {
+    throw new Error(
+      `[run-classify-pipeline] invalid ingest-write-target: "${writeTarget}" (expected sxt | supabase | both)`,
+    )
+  }
   const writeSxt = writeTarget === 'sxt' || writeTarget === 'both'
   const writeSupabase = writeTarget === 'supabase' || writeTarget === 'both'
+  // Fail fast at startup (not per-batch, where the error would be swallowed by
+  // the non-fatal Supabase try/catch and silently write nothing every tick).
+  if (
+    writeSupabase &&
+    (!core.getInput('supabase-url') || !core.getInput('supabase-service-role-key'))
+  ) {
+    throw new Error(
+      `[run-classify-pipeline] ingest-write-target=${writeTarget} requires supabase-url and supabase-service-role-key`,
+    )
+  }
 
   console.log(
     `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs}, writeTarget=${writeTarget})`,
@@ -813,7 +828,7 @@ export async function runClassifyPipeline() {
     // deal-state progression (mirrors the non-fatal contacts handling above).
     if (writeSupabase) {
       const t0Supa = Date.now()
-      const batchUserId = rows[0].USER_ID || ''
+      const batchUserId = rows[0]?.USER_ID ? sanitizeId(rows[0].USER_ID) : ''
       const userIdFor = (threadId) =>
         userByThread[threadId] ? sanitizeId(userByThread[threadId]) : batchUserId
 
@@ -838,30 +853,16 @@ export async function runClassifyPipeline() {
           aiEvaluation: { threads },
         })
 
-        // 2. Evals for ALL threads (deal + non-deal). main_contact_* only for
-        //    deal threads with a resolved usable contact.
-        await writeEvals(
-          threads.map((thread) => {
-            const threadId = sanitizeId(thread.thread_id)
-            return {
-              threadId,
-              auditId: batchId,
-              aiInsight: thread.category || null,
-              aiSummary: thread.ai_summary || null,
-              isDeal: !!thread.is_deal,
-              likelyScam: (thread.category || '').toLowerCase() === 'likely_scam',
-              aiScore: typeof thread.ai_score === 'number' ? thread.ai_score : 0,
-              mainContact: mcByThread.get(threadId) || null,
-            }
-          }),
-        )
-
-        // 3. Delete deal rows for threads re-classified as non-deal.
+        // 2. Delete deal rows for threads re-classified as non-deal.
         if (notDealThreadIds.length > 0) {
           await deleteDeals(notDealThreadIds)
         }
 
-        // 4. Upsert deal rows.
+        // 3. Upsert deal rows + contacts BEFORE evals. A deal renders on its own
+        //    through deal_card_v (LEFT JOIN ete), so if a partial failure stops
+        //    the sequence before the evals write, the user still sees a (detail-
+        //    degraded) deal rather than an RLS-invisible eval — the eval read
+        //    policy requires an owning deal row. Deals-first = partial-write safe.
         if (dealThreads.length > 0) {
           await writeDeals(
             dealThreads.map((thread) => {
@@ -873,22 +874,31 @@ export async function runClassifyPipeline() {
                 category: thread.category || null,
                 dealName: thread.deal_name || null,
                 dealType: thread.deal_type || null,
-                value:
-                  typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0,
-                currency: thread.currency || 'USD',
+                // parseAndValidate emits deal_value (Number(), may be NaN) and
+                // deal_currency — NOT `currency`. Guard NaN/Infinity with
+                // Number.isFinite, and read the correct currency field (the old
+                // thread.currency was always undefined → every deal forced to USD).
+                value: Number.isFinite(thread.deal_value) ? thread.deal_value : 0,
+                currency: thread.deal_currency || 'USD',
                 brand: mc?.company || null,
                 isAiSorted: true,
               }
             }),
           )
 
-          // 5. Upsert contacts (one per deal thread with a usable contact).
-          const contactRows = []
+          // Upsert contacts (one per deal thread with a usable contact), deduped
+          // by (userId, lowercased email) to match the contacts ON CONFLICT
+          // (user_id, email) target and avoid an intra-statement cardinality
+          // violation when two threads in the batch share a contact.
+          const contactRowsMap = new Map()
           for (const thread of dealThreads) {
             const threadId = sanitizeId(thread.thread_id)
             const mc = mcByThread.get(threadId)
             if (!mc) continue
-            contactRows.push({
+            const email = (mc.email || '').trim().toLowerCase()
+            if (!email) continue
+            const key = `${userIdFor(threadId)}::${email}`
+            contactRowsMap.set(key, {
               userId: userIdFor(threadId),
               email: mc.email,
               name: mc.name || null,
@@ -897,15 +907,45 @@ export async function runClassifyPipeline() {
               phone: mc.phone_number || null,
             })
           }
-          await writeContacts(contactRows)
+          await writeContacts([...contactRowsMap.values()])
         }
+
+        // 4. Evals for ALL threads (deal + non-deal), written LAST so a partial
+        //    failure leaves a renderable deal rather than an orphan eval. Carries
+        //    the denormalized main_contact_* (deal threads with a resolved usable
+        //    contact only) and the audit linkage (ai_evaluation_audit_id = batchId).
+        await writeEvals(
+          threads.map((thread) => {
+            const threadId = sanitizeId(thread.thread_id)
+            return {
+              threadId,
+              auditId: batchId,
+              // Write the AI's insight text. parseAndValidate emits ai_insight and
+              // category as separate fields; category already lives on deals.category
+              // (ETE has no category column), so storing it here would needlessly
+              // drop the insight. Carry the real insight.
+              aiInsight: thread.ai_insight || null,
+              aiSummary: thread.ai_summary || null,
+              isDeal: !!thread.is_deal,
+              // parseAndValidate already folds the category check into the
+              // likely_scam boolean (Boolean(r.likely_scam) || category===scam),
+              // so carry that field directly instead of recomputing category-only
+              // (which dropped the AI's standalone scam flag).
+              likelyScam: !!thread.likely_scam,
+              aiScore: typeof thread.ai_score === 'number' ? thread.ai_score : 0,
+              mainContact: mcByThread.get(threadId) || null,
+            }
+          }),
+        )
 
         console.log(
           `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
             `(${threads.length} evals, ${dealThreads.length} deals, ${notDealThreadIds.length} deletes)`,
         )
       } catch (err) {
-        console.error(`[run-classify-pipeline] supabase writes failed (non-fatal): ${err.message}`)
+        console.error(
+          `[run-classify-pipeline] supabase writes failed (non-fatal): ${err?.message ?? String(err)}`,
+        )
       }
     }
 

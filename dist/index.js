@@ -27399,7 +27399,7 @@ const MAX_RETRIES = parseInt(coreExports.getInput('db-max-retries') || '6', 10);
 let cachedJwt = null;
 let reauthPromise = null;
 
-function withTimeout(ms = SQL_TIMEOUT_MS) {
+function withTimeout$1(ms = SQL_TIMEOUT_MS) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ms);
   return { signal: controller.signal, clear: () => clearTimeout(timeout) }
@@ -27414,7 +27414,7 @@ async function authenticate(authUrl, authSecret, badToken) {
     try {
       const headers = { 'x-shared-secret': authSecret };
       if (badToken) headers['x-bad-token'] = badToken;
-      const { signal, clear } = withTimeout(AUTH_TIMEOUT_MS);
+      const { signal, clear } = withTimeout$1(AUTH_TIMEOUT_MS);
       try {
         const resp = await fetch(authUrl, { method: 'GET', headers, signal });
         if (!resp.ok) throw new Error(`Auth failed: ${resp.status}`)
@@ -27566,7 +27566,7 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
   const queryStart = Date.now();
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const { signal, clear } = withTimeout();
+    const { signal, clear } = withTimeout$1();
     try {
       const resp = await fetch(`${apiUrl}/v1/sql`, {
         method: 'POST',
@@ -35276,7 +35276,7 @@ async function fetchEmailsFromService(messageIds, metaByMessageId, opts) {
 
     for (let attempt = 0; attempt < maxRetries && pendingIds.length > 0; attempt++) {
       try {
-        const { signal, clear } = withTimeout(fetchTimeoutMs);
+        const { signal, clear } = withTimeout$1(fetchTimeoutMs);
         try {
           // Group message IDs by user_id from metadata (batch can have mixed users)
           const byUser = {};
@@ -35436,7 +35436,7 @@ async function fetchEmails(messageIds, metaByMessageId, opts) {
 
     for (let attempt = 0; attempt < maxRetries && pendingIds.length > 0; attempt++) {
       try {
-        const { signal, clear } = withTimeout(fetchTimeoutMs);
+        const { signal, clear } = withTimeout$1(fetchTimeoutMs);
         try {
           const body = {
             userId,
@@ -39396,6 +39396,17 @@ function normEmail(email) {
   return (email || '').trim().toLowerCase() || null
 }
 
+// AbortController + cleared timer (mirrors src/lib/db.js withTimeout). Preferred
+// over AbortSignal.timeout() so the timer is explicitly cleared on the success
+// path — no dangling 30s handle keeping a short-lived Action process (or a Jest
+// worker) alive after the fetch resolves.
+const REQUEST_TIMEOUT_MS = 30000;
+function withTimeout(ms = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, clear: () => clearTimeout(timeout) }
+}
+
 /**
  * POST rows to a Supabase table via PostgREST.
  *
@@ -39409,16 +39420,23 @@ async function upsert(table, rows, onConflict, ignoreDuplicates = false) {
   const { url, key } = getConfig();
   const resolution = ignoreDuplicates ? 'ignore-duplicates' : 'merge-duplicates';
   const conflictParam = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
-  const resp = await fetch(`${url}/rest/v1/${table}${conflictParam}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      apikey: key,
-      'Content-Type': 'application/json',
-      Prefer: `return=minimal,resolution=${resolution}`,
-    },
-    body: JSON.stringify(rows),
-  });
+  const { signal, clear } = withTimeout();
+  let resp;
+  try {
+    resp = await fetch(`${url}/rest/v1/${table}${conflictParam}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        apikey: key,
+        'Content-Type': 'application/json',
+        Prefer: `return=minimal, resolution=${resolution}`,
+      },
+      body: JSON.stringify(rows),
+      signal,
+    });
+  } finally {
+    clear();
+  }
   if (!resp.ok) {
     const body = await resp.text();
     throw new Error(`Supabase ${table} upsert failed: ${resp.status} ${body}`)
@@ -39436,14 +39454,21 @@ async function deleteWhere(table, column, values) {
   if (!values || values.length === 0) return
   const { url, key } = getConfig();
   const inList = values.map((v) => encodeURIComponent(v)).join(',');
-  const resp = await fetch(`${url}/rest/v1/${table}?${column}=in.(${inList})`, {
-    method: 'DELETE',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      apikey: key,
-      Prefer: 'return=minimal',
-    },
-  });
+  const { signal, clear } = withTimeout();
+  let resp;
+  try {
+    resp = await fetch(`${url}/rest/v1/${table}?${column}=in.(${inList})`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        apikey: key,
+        Prefer: 'return=minimal',
+      },
+      signal,
+    });
+  } finally {
+    clear();
+  }
   if (!resp.ok) {
     const body = await resp.text();
     throw new Error(`Supabase ${table} delete failed: ${resp.status} ${body}`)
@@ -39537,10 +39562,15 @@ async function writeEvals(evals) {
  * email_thread_evaluation_id=threadId links to email_thread_evaluations.id
  * (the join key deal_card_v + the transitive-ownership RLS policies depend on).
  * Business tables are fully ingestion-owned (authenticated clients are
- * SELECT-only on deals per 0008); category is the AI category here, distinct
- * from the user's deal_user_overrides.manual_category. main_contact_* are NOT
- * on deals (they live on email_thread_evaluations); only `brand` (= contact
- * company) is denormalized onto deals. created_at/updated_at are DB-managed.
+ * SELECT-only on deals per 0008 — no INSERT/UPDATE/DELETE policies exist).
+ * `category` here is the AI classification; it IS included in the upsert body
+ * even though Story 4.9 AC2 listed it as "user-mutable excluded". That AC was
+ * written against a pre-schema model where users could write deals directly.
+ * In the applied schema, user-mutable category state lives exclusively in
+ * deal_user_overrides.manual_category — ingestion cannot clobber user state.
+ * main_contact_* are NOT on deals (they live on email_thread_evaluations);
+ * only `brand` (= contact company) is denormalized onto deals.
+ * created_at/updated_at are DB-managed.
  *
  * @param {Array<{threadId: string, userId: string, category: string|null, dealName: string|null, dealType: string|null, value: number, currency: string, brand: string|null, isAiSorted: boolean}>} deals
  */
@@ -39557,7 +39587,7 @@ async function writeDeals(deals) {
         deal_name: dealName || null,
         deal_type: dealType || null,
         category: category || null,
-        value: typeof value === 'number' ? value : 0,
+        value: Number.isFinite(value) ? value : 0,
         currency: currency || 'USD',
         brand: brand || null,
         is_ai_sorted: isAiSorted !== false,
@@ -39636,8 +39666,23 @@ async function runClassifyPipeline() {
   const flushIntervalMs = parseInt(coreExports.getInput('pipeline-flush-interval-ms') || '5000', 10);
   const flushThreshold = parseInt(coreExports.getInput('pipeline-flush-threshold') || '5', 10);
   const writeTarget = coreExports.getInput('ingest-write-target') || 'sxt';
+  if (!['sxt', 'supabase', 'both'].includes(writeTarget)) {
+    throw new Error(
+      `[run-classify-pipeline] invalid ingest-write-target: "${writeTarget}" (expected sxt | supabase | both)`,
+    )
+  }
   const writeSxt = writeTarget === 'sxt' || writeTarget === 'both';
   const writeSupabase = writeTarget === 'supabase' || writeTarget === 'both';
+  // Fail fast at startup (not per-batch, where the error would be swallowed by
+  // the non-fatal Supabase try/catch and silently write nothing every tick).
+  if (
+    writeSupabase &&
+    (!coreExports.getInput('supabase-url') || !coreExports.getInput('supabase-service-role-key'))
+  ) {
+    throw new Error(
+      `[run-classify-pipeline] ingest-write-target=${writeTarget} requires supabase-url and supabase-service-role-key`,
+    )
+  }
 
   console.log(
     `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs}, writeTarget=${writeTarget})`,
@@ -40391,7 +40436,7 @@ async function runClassifyPipeline() {
     // deal-state progression (mirrors the non-fatal contacts handling above).
     if (writeSupabase) {
       const t0Supa = Date.now();
-      const batchUserId = rows[0].USER_ID || '';
+      const batchUserId = rows[0]?.USER_ID ? sanitizeId(rows[0].USER_ID) : '';
       const userIdFor = (threadId) =>
         userByThread[threadId] ? sanitizeId(userByThread[threadId]) : batchUserId;
 
@@ -40416,30 +40461,16 @@ async function runClassifyPipeline() {
           aiEvaluation: { threads },
         });
 
-        // 2. Evals for ALL threads (deal + non-deal). main_contact_* only for
-        //    deal threads with a resolved usable contact.
-        await writeEvals(
-          threads.map((thread) => {
-            const threadId = sanitizeId(thread.thread_id);
-            return {
-              threadId,
-              auditId: batchId,
-              aiInsight: thread.category || null,
-              aiSummary: thread.ai_summary || null,
-              isDeal: !!thread.is_deal,
-              likelyScam: (thread.category || '').toLowerCase() === 'likely_scam',
-              aiScore: typeof thread.ai_score === 'number' ? thread.ai_score : 0,
-              mainContact: mcByThread.get(threadId) || null,
-            }
-          }),
-        );
-
-        // 3. Delete deal rows for threads re-classified as non-deal.
+        // 2. Delete deal rows for threads re-classified as non-deal.
         if (notDealThreadIds.length > 0) {
           await deleteDeals(notDealThreadIds);
         }
 
-        // 4. Upsert deal rows.
+        // 3. Upsert deal rows + contacts BEFORE evals. A deal renders on its own
+        //    through deal_card_v (LEFT JOIN ete), so if a partial failure stops
+        //    the sequence before the evals write, the user still sees a (detail-
+        //    degraded) deal rather than an RLS-invisible eval — the eval read
+        //    policy requires an owning deal row. Deals-first = partial-write safe.
         if (dealThreads.length > 0) {
           await writeDeals(
             dealThreads.map((thread) => {
@@ -40451,22 +40482,31 @@ async function runClassifyPipeline() {
                 category: thread.category || null,
                 dealName: thread.deal_name || null,
                 dealType: thread.deal_type || null,
-                value:
-                  typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0,
-                currency: thread.currency || 'USD',
+                // parseAndValidate emits deal_value (Number(), may be NaN) and
+                // deal_currency — NOT `currency`. Guard NaN/Infinity with
+                // Number.isFinite, and read the correct currency field (the old
+                // thread.currency was always undefined → every deal forced to USD).
+                value: Number.isFinite(thread.deal_value) ? thread.deal_value : 0,
+                currency: thread.deal_currency || 'USD',
                 brand: mc?.company || null,
                 isAiSorted: true,
               }
             }),
           );
 
-          // 5. Upsert contacts (one per deal thread with a usable contact).
-          const contactRows = [];
+          // Upsert contacts (one per deal thread with a usable contact), deduped
+          // by (userId, lowercased email) to match the contacts ON CONFLICT
+          // (user_id, email) target and avoid an intra-statement cardinality
+          // violation when two threads in the batch share a contact.
+          const contactRowsMap = new Map();
           for (const thread of dealThreads) {
             const threadId = sanitizeId(thread.thread_id);
             const mc = mcByThread.get(threadId);
             if (!mc) continue
-            contactRows.push({
+            const email = (mc.email || '').trim().toLowerCase();
+            if (!email) continue
+            const key = `${userIdFor(threadId)}::${email}`;
+            contactRowsMap.set(key, {
               userId: userIdFor(threadId),
               email: mc.email,
               name: mc.name || null,
@@ -40475,15 +40515,45 @@ async function runClassifyPipeline() {
               phone: mc.phone_number || null,
             });
           }
-          await writeContacts(contactRows);
+          await writeContacts([...contactRowsMap.values()]);
         }
+
+        // 4. Evals for ALL threads (deal + non-deal), written LAST so a partial
+        //    failure leaves a renderable deal rather than an orphan eval. Carries
+        //    the denormalized main_contact_* (deal threads with a resolved usable
+        //    contact only) and the audit linkage (ai_evaluation_audit_id = batchId).
+        await writeEvals(
+          threads.map((thread) => {
+            const threadId = sanitizeId(thread.thread_id);
+            return {
+              threadId,
+              auditId: batchId,
+              // Write the AI's insight text. parseAndValidate emits ai_insight and
+              // category as separate fields; category already lives on deals.category
+              // (ETE has no category column), so storing it here would needlessly
+              // drop the insight. Carry the real insight.
+              aiInsight: thread.ai_insight || null,
+              aiSummary: thread.ai_summary || null,
+              isDeal: !!thread.is_deal,
+              // parseAndValidate already folds the category check into the
+              // likely_scam boolean (Boolean(r.likely_scam) || category===scam),
+              // so carry that field directly instead of recomputing category-only
+              // (which dropped the AI's standalone scam flag).
+              likelyScam: !!thread.likely_scam,
+              aiScore: typeof thread.ai_score === 'number' ? thread.ai_score : 0,
+              mainContact: mcByThread.get(threadId) || null,
+            }
+          }),
+        );
 
         console.log(
           `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
             `(${threads.length} evals, ${dealThreads.length} deals, ${notDealThreadIds.length} deletes)`,
         );
       } catch (err) {
-        console.error(`[run-classify-pipeline] supabase writes failed (non-fatal): ${err.message}`);
+        console.error(
+          `[run-classify-pipeline] supabase writes failed (non-fatal): ${err?.message ?? String(err)}`,
+        );
       }
     }
 
