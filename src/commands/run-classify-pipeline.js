@@ -828,8 +828,10 @@ export async function runClassifyPipeline() {
     //   audits.id = batchId = ete.ai_evaluation_audit_id   (two-hop RLS)
     //   ete.id = deals.email_thread_evaluation_id = threadId (transitive RLS + deal_card_v)
     //   contacts.email = ete.main_contact_email (lowercased)  (contact_card_v)
-    // Best-effort: a Supabase failure must not fail the batch or block SxT /
-    // deal-state progression (mirrors the non-fatal contacts handling above).
+    // Failure handling (see the catch at the end of this block): in supabase-only
+    // mode a write failure FAILS the batch (throws) so it is retried rather than
+    // marked terminal with nothing persisted; in `both` mode it is best-effort
+    // because SxT still carries the data.
     if (writeSupabase) {
       const t0Supa = Date.now()
       // Owner of a thread, or null when the thread is not in the claimed batch.
