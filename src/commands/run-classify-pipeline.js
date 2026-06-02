@@ -619,9 +619,13 @@ export async function runClassifyPipeline() {
         const dealId = threadId
         const dealName = sanitizeString(thread.deal_name || '')
         const dealType = sanitizeString(thread.deal_type || '')
-        const dealValue =
-          typeof thread.deal_value === 'string' ? parseFloat(thread.deal_value) || 0 : 0
-        const currency = sanitizeString(thread.currency || 'USD')
+        // parseAndValidate emits deal_value (Number(), may be NaN) and
+        // deal_currency — NOT `currency`. Guard NaN/Infinity with Number.isFinite,
+        // and read the correct currency field (the old `typeof === 'string'` check
+        // never matched a number → every deal forced to value 0; thread.currency was
+        // always undefined → every deal forced to USD). Mirrors the Supabase path.
+        const dealValue = Number.isFinite(thread.deal_value) ? thread.deal_value : 0
+        const currency = sanitizeString(thread.deal_currency || 'USD')
         const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : ''
         const category = sanitizeString(thread.category || '')
         return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
