@@ -447,15 +447,26 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     expect(contacts[0].company).toBe('TestCo')
   })
 
-  it('a Supabase write failure does not throw out of the batch (non-fatal)', async () => {
-    mockInputs({ 'ingest-write-target': 'supabase' })
+  it('a Supabase write failure in `both` mode is non-fatal (SxT still carries the data)', async () => {
+    mockInputs({ 'ingest-write-target': 'both' })
     mockWriteDeals.mockRejectedValueOnce(new Error('supabase 500'))
     driveFreshBatch()
     await expect(runClassifyPipeline()).resolves.toBeDefined()
   })
 
-  it('writes deals before evals so an eval failure still leaves the deal written', async () => {
+  it('a Supabase write failure in supabase-only mode fails the batch (no silent data loss)', async () => {
     mockInputs({ 'ingest-write-target': 'supabase' })
+    mockWriteDeals.mockRejectedValueOnce(new Error('supabase 500'))
+    driveFreshBatch()
+    // Supabase is the only sink, so the worker throws instead of swallowing: the
+    // real runPool turns that into a batch retry / dead-letter (deal-states stay
+    // `classifying`), rather than marking the batch done with nothing persisted.
+    await expect(runClassifyPipeline()).rejects.toThrow(/supabase-only mode/)
+  })
+
+  it('writes deals before evals so an eval failure still leaves the deal written', async () => {
+    // `both` mode keeps the write best-effort, isolating the ordering assertion.
+    mockInputs({ 'ingest-write-target': 'both' })
     mockWriteEvals.mockRejectedValueOnce(new Error('supabase 500'))
     driveFreshBatch()
     await runClassifyPipeline()

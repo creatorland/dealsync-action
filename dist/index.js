@@ -40585,8 +40585,21 @@ async function runClassifyPipeline() {
             `(${evalRowsMap.size} evals, ${dealRowsMap.size} deals, ${claimedNonDealIds.length} deletes)`,
         );
       } catch (err) {
+        const msg = err?.message ?? String(err);
+        // In supabase-only mode Supabase is the only business-data sink, so a
+        // failed write must FAIL the batch. Throwing here skips the terminal
+        // deal-state update (Step 7) and the completion event (Step 8), leaving
+        // the batch in `classifying` for runPool to retry and the stuck-batch
+        // sweep to reclaim, rather than marking it done with nothing persisted
+        // (silent data loss). In `both` mode SxT still carries the data, so the
+        // Supabase write stays best-effort.
+        if (!writeSxt) {
+          throw new Error(
+            `[run-classify-pipeline] supabase writes failed in supabase-only mode (batch ${batchId}); failing batch for retry: ${msg}`,
+          )
+        }
         console.error(
-          `[run-classify-pipeline] supabase writes failed (non-fatal): ${err?.message ?? String(err)}`,
+          `[run-classify-pipeline] supabase writes failed (non-fatal, both mode): ${msg}`,
         );
       }
     }
