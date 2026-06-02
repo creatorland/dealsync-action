@@ -39954,11 +39954,12 @@ async function runClassifyPipeline() {
         const dealId = threadId;
         const dealName = sanitizeString(thread.deal_name || '');
         const dealType = sanitizeString(thread.deal_type || '');
-        // parseAndValidate emits deal_value (Number(), may be NaN) and
-        // deal_currency — NOT `currency`. Guard NaN/Infinity with Number.isFinite,
-        // and read the correct currency field (the old `typeof === 'string'` check
-        // never matched a number → every deal forced to value 0; thread.currency was
-        // always undefined → every deal forced to USD).
+        // parseAndValidate now clamps deal_value to number|null (never NaN/Infinity),
+        // so this Number.isFinite check is defense-in-depth at the SQL boundary: a
+        // null (or any non-finite) value becomes 0. Read deal_currency — NOT
+        // `currency`: the old mapper read thread.currency (always undefined → every
+        // deal forced to USD) and a `typeof === 'string'` check that never matched a
+        // number (→ every deal forced to value 0).
         const dealValue = Number.isFinite(thread.deal_value) ? thread.deal_value : 0;
         const currency = sanitizeString(thread.deal_currency || 'USD');
         const brand = thread.main_contact ? sanitizeString(thread.main_contact.company || '') : '';
