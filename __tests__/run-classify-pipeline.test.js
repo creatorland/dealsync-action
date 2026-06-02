@@ -1196,13 +1196,14 @@ describe('run-classify-pipeline command', () => {
     mockInputs()
 
     const rows = makeBatchRows(1)
-    // The fresh classification path (not the cached-audit path) is required here:
-    // parseAndValidate does `Number(r.deal_value)`, which yields NaN when the AI
-    // returns a non-numeric value, and `r.deal_currency || null`, which yields null
-    // when the AI omits currency. A NaN only survives to the mapper on the fresh
-    // path — the cached-audit path serializes via JSON.stringify, which maps NaN to
-    // null. This guards the Number.isFinite branch against a naive `?? 0` regression
-    // (NaN ?? 0 === NaN), which would otherwise leak "NaN" into the deal SQL.
+    // Defense-in-depth at the SQL-write boundary. parseAndValidate now clamps
+    // deal_value to number|null at the source (see ai.test.js), but the mapper
+    // keeps its own Number.isFinite guard — mirroring how the eval write guards
+    // ai_score. This test injects a NaN directly via the mocked parseAndValidate to
+    // prove that guard holds even if the source contract is ever bypassed: a
+    // non-finite value must become 0, never leak "NaN" into the INSERT. (NaN
+    // reaches the mapper only on the fresh path; the cached-audit path serializes
+    // through JSON.stringify, which maps NaN to null.)
     const threads = [
       {
         thread_id: 'thread-1',

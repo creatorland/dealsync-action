@@ -35740,6 +35740,19 @@ async function callModel(model, messages, { temperature = 0, apiUrl, apiKey } = 
 }
 
 /**
+ * Coerce a raw AI-supplied value to a finite number, or null. This keeps
+ * parseAndValidate's contract honest: deal_value is number|null — never
+ * NaN/Infinity — so consumers can trust it without re-guarding. Examples:
+ * Number('1k') → NaN → null, '1e999' → Infinity → null, null/undefined → null,
+ * 0 → 0 (a real zero is preserved, unlike a `|| null` fallback).
+ */
+function toFiniteNumberOrNull(value) {
+  if (value == null) return null
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null
+}
+
+/**
  * Layer 1: Local JSON repair — strip fences, extract array, unwrap objects, coerce schema.
  * @param {string} raw — raw AI response
  * @param {string[]} [threadOrder] — maps thread_index (1-based) to thread_id
@@ -35815,7 +35828,7 @@ function parseAndValidate(raw, threadOrder) {
         : 'other_business'
       : null,
     deal_name: r.is_deal ? r.deal_name || null : null,
-    deal_value: r.deal_value != null ? Number(r.deal_value) : null,
+    deal_value: toFiniteNumberOrNull(r.deal_value),
     deal_currency: r.deal_currency || null,
   }))
 }
