@@ -1,6 +1,10 @@
 node_modules/
 .worktrees/
+.claude/worktrees/
 .env
 .env.*
 .*.env
 .claude/settings.local.json
+
+# OS files
+.DS_Store

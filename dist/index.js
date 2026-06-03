@@ -27399,7 +27399,7 @@ const MAX_RETRIES = parseInt(coreExports.getInput('db-max-retries') || '6', 10);
 let cachedJwt = null;
 let reauthPromise = null;
 
-function withTimeout(ms = SQL_TIMEOUT_MS) {
+function withTimeout$1(ms = SQL_TIMEOUT_MS) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ms);
   return { signal: controller.signal, clear: () => clearTimeout(timeout) }
@@ -27414,7 +27414,7 @@ async function authenticate(authUrl, authSecret, badToken) {
     try {
       const headers = { 'x-shared-secret': authSecret };
       if (badToken) headers['x-bad-token'] = badToken;
-      const { signal, clear } = withTimeout(AUTH_TIMEOUT_MS);
+      const { signal, clear } = withTimeout$1(AUTH_TIMEOUT_MS);
       try {
         const resp = await fetch(authUrl, { method: 'GET', headers, signal });
         if (!resp.ok) throw new Error(`Auth failed: ${resp.status}`)
@@ -27566,7 +27566,7 @@ async function executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit = false } =
   const queryStart = Date.now();
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const { signal, clear } = withTimeout();
+    const { signal, clear } = withTimeout$1();
     try {
       const resp = await fetch(`${apiUrl}/v1/sql`, {
         method: 'POST',
@@ -35276,7 +35276,7 @@ async function fetchEmailsFromService(messageIds, metaByMessageId, opts) {
 
     for (let attempt = 0; attempt < maxRetries && pendingIds.length > 0; attempt++) {
       try {
-        const { signal, clear } = withTimeout(fetchTimeoutMs);
+        const { signal, clear } = withTimeout$1(fetchTimeoutMs);
         try {
           // Group message IDs by user_id from metadata (batch can have mixed users)
           const byUser = {};
@@ -35436,7 +35436,7 @@ async function fetchEmails(messageIds, metaByMessageId, opts) {
 
     for (let attempt = 0; attempt < maxRetries && pendingIds.length > 0; attempt++) {
       try {
-        const { signal, clear } = withTimeout(fetchTimeoutMs);
+        const { signal, clear } = withTimeout$1(fetchTimeoutMs);
         try {
           const body = {
             userId,
@@ -39354,6 +39354,323 @@ class WriteBatcher {
 }
 
 /**
+ * Supabase service-role writer for the four ingestion business tables.
+ *
+ * Uses direct fetch() against the Supabase PostgREST REST API — no
+ * @supabase/supabase-js dependency. The service-role key bypasses RLS
+ * by design; this module is a system actor only (never called from
+ * user-facing paths).
+ *
+ * SCHEMA SOURCE OF TRUTH: dealsync-v2 scheduler-service/migrations/
+ *   0001_business_tables.sql (columns), 0008_rls_policies.sql (ownership),
+ *   0009_read_views.sql (deal_card_v / contact_card_v).
+ *
+ * Ownership model (NO subject_user_id column exists on any business table):
+ *   deals                 — direct user_id; RLS: user_id = auth.jwt()->>'sub'
+ *   contacts              — direct user_id (composite PK user_id,email)
+ *   email_thread_evaluations — NO user column; ownership transitive via
+ *                           deals.email_thread_evaluation_id = ete.id
+ *   ai_evaluation_audits  — NO user column; two-hop via ete.ai_evaluation_audit_id
+ *                           = audits.id then deals.email_thread_evaluation_id = ete.id
+ *
+ * Linkage keys (load-bearing for RLS + read views):
+ *   ete.id = deals.email_thread_evaluation_id = threadId
+ *   audits.id = ete.ai_evaluation_audit_id = batchId
+ *   contacts.email = ete.main_contact_email (lowercased) — contact_card_v join
+ *
+ * Column ownership: business tables are 100% ingestion-owned (authenticated
+ * clients are SELECT-only per 0008). User-mutable state lives in separate
+ * tables (deal_user_overrides, thread_user_state). Timestamps (created_at,
+ * updated_at) are DB-managed (defaults + touch_updated_at triggers) and are
+ * never sent in the request body.
+ *
+ * Idempotency:
+ *   ai_evaluation_audits  — ON CONFLICT (id) DO NOTHING  (append-only; id=batchId)
+ *   email_thread_evaluations — ON CONFLICT (id) DO UPDATE (id=threadId, stable)
+ *   deals                 — ON CONFLICT (id) DO UPDATE  (id=threadId, stable)
+ *   contacts              — ON CONFLICT (user_id,email) DO UPDATE
+ */
+
+
+let _config = null;
+
+function getConfig() {
+  if (_config) return _config
+  const url = (coreExports.getInput('supabase-url') || '').replace(/\/$/, '');
+  const key = coreExports.getInput('supabase-service-role-key');
+  if (!url || !key) {
+    throw new Error('supabase-url and supabase-service-role-key are required for Supabase writes')
+  }
+  _config = { url, key };
+  return _config
+}
+
+function normEmail(email) {
+  return (email || '').trim().toLowerCase() || null
+}
+
+// AbortController + cleared timer (mirrors src/lib/db.js withTimeout). Preferred
+// over AbortSignal.timeout() so the timer is explicitly cleared on the success
+// path — no dangling 30s handle keeping a short-lived Action process (or a Jest
+// worker) alive after the fetch resolves.
+const REQUEST_TIMEOUT_MS = 30000;
+function withTimeout(ms = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ms);
+  return { signal: controller.signal, clear: () => clearTimeout(timeout) }
+}
+
+// PostgREST error bodies can echo the failing row (e.g. "Key (user_id, email)=
+// (..., alice@co.com) already exists"), and the caller logs the thrown message
+// into the Action log — so the raw body must never reach it. Keep only the
+// schema-level `code` + `message` (no row data) and drop `details`/`hint`; for a
+// non-JSON body, cap the length defensively.
+function summarizeError(body) {
+  if (!body) return ''
+  try {
+    const e = JSON.parse(body);
+    const parts = [];
+    if (e.code) parts.push(`[${e.code}]`);
+    if (e.message) parts.push(e.message);
+    return parts.join(' ') || `(${body.length} bytes)`
+  } catch {
+    return body.length > 120 ? `${body.slice(0, 120)}… (${body.length} bytes)` : body
+  }
+}
+
+/**
+ * POST rows to a Supabase table via PostgREST.
+ *
+ * @param {string} table — unquoted Supabase table name
+ * @param {object[]} rows — array of plain objects; only included keys appear in DO UPDATE SET
+ * @param {string} onConflict — comma-separated conflict column(s) for ON CONFLICT target
+ * @param {boolean} ignoreDuplicates — true → DO NOTHING; false → DO UPDATE SET (merge)
+ */
+async function upsert(table, rows, onConflict, ignoreDuplicates = false) {
+  if (!rows || rows.length === 0) return
+  const { url, key } = getConfig();
+  const resolution = ignoreDuplicates ? 'ignore-duplicates' : 'merge-duplicates';
+  const conflictParam = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : '';
+  const { signal, clear } = withTimeout();
+  let resp;
+  try {
+    resp = await fetch(`${url}/rest/v1/${table}${conflictParam}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        apikey: key,
+        'Content-Type': 'application/json',
+        // missing=default: columns omitted from the payload use their DB DEFAULT
+        // (e.g. created_at / updated_at NOT NULL DEFAULT now()) instead of NULL.
+        // Without it, PostgREST (v11+) inserts NULL for missing columns, which
+        // would fail the NOT NULL timestamp defaults on first insert.
+        Prefer: `return=minimal, resolution=${resolution}, missing=default`,
+      },
+      body: JSON.stringify(rows),
+      signal,
+    });
+  } finally {
+    clear();
+  }
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Supabase ${table} upsert failed: ${resp.status} ${summarizeError(body)}`)
+  }
+}
+
+/**
+ * DELETE rows from a Supabase table via PostgREST.
+ *
+ * @param {string} table
+ * @param {string} column — column to match on
+ * @param {string[]} values — values to match (OR'd with `in.(...)`)
+ */
+async function deleteWhere(table, column, values) {
+  if (!values || values.length === 0) return
+  const { url, key } = getConfig();
+  const inList = values.map((v) => encodeURIComponent(v)).join(',');
+  const { signal, clear } = withTimeout();
+  let resp;
+  try {
+    resp = await fetch(`${url}/rest/v1/${table}?${column}=in.(${inList})`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        apikey: key,
+        Prefer: 'return=minimal',
+      },
+      signal,
+    });
+  } finally {
+    clear();
+  }
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`Supabase ${table} delete failed: ${resp.status} ${summarizeError(body)}`)
+  }
+}
+
+/**
+ * Write one ai_evaluation_audits row. id=batchId for stable idempotency.
+ * Append-only: ON CONFLICT (id) DO NOTHING — a re-run of the same batch
+ * sees the existing audit row and skips, matching the SxT behaviour.
+ * `aiEvaluation` is written to a jsonb column — pass the raw object/array,
+ * NOT a stringified/escaped value.
+ *
+ * @param {object} p
+ * @param {string} p.batchId
+ * @param {number} p.threadCount
+ * @param {number} p.emailCount
+ * @param {number} p.cost
+ * @param {number} p.inputTokens
+ * @param {number} p.outputTokens
+ * @param {string} p.model
+ * @param {object|Array} p.aiEvaluation — parsed AI output (jsonb), e.g. { threads: [...] }
+ */
+async function writeAudit({
+  batchId,
+  threadCount,
+  emailCount,
+  cost,
+  inputTokens,
+  outputTokens,
+  model,
+  aiEvaluation,
+}) {
+  await upsert(
+    'ai_evaluation_audits',
+    [
+      {
+        id: batchId,
+        batch_id: batchId,
+        thread_count: threadCount,
+        email_count: emailCount,
+        inference_cost: cost,
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        model_used: model,
+        ai_evaluation: aiEvaluation,
+      },
+    ],
+    'id',
+    true,
+  );
+}
+
+/**
+ * Upsert email_thread_evaluations rows. id=threadId for stable idempotency.
+ * Carries the AI-eval result columns AND the denormalized main_contact_*
+ * columns (which live on THIS table, not on deals — per 0001 + 0009).
+ * ai_evaluation_audit_id links to ai_evaluation_audits.id (= batchId) for the
+ * two-hop ownership RLS policy. updated_at is trigger-managed (omitted).
+ *
+ * @param {Array<{threadId: string, auditId: string|null, aiInsight: string|null, aiSummary: string|null, isDeal: boolean, likelyScam: boolean, aiScore: number, mainContact: object|null}>} evals
+ */
+async function writeEvals(evals) {
+  if (!evals || evals.length === 0) return
+  await upsert(
+    'email_thread_evaluations',
+    evals.map(
+      ({ threadId, auditId, aiInsight, aiSummary, isDeal, likelyScam, aiScore, mainContact }) => ({
+        id: threadId,
+        thread_id: threadId,
+        ai_evaluation_audit_id: auditId || null,
+        ai_insight: aiInsight || null,
+        ai_summary: aiSummary || null,
+        is_deal: isDeal,
+        likely_scam: likelyScam,
+        ai_score: typeof aiScore === 'number' ? aiScore : 0,
+        main_contact_name: mainContact?.name || null,
+        main_contact_email: normEmail(mainContact?.email),
+        main_contact_title: mainContact?.title || null,
+        main_contact_company: mainContact?.company || null,
+        main_contact_phone_number: mainContact?.phone_number || null,
+      }),
+    ),
+    'id',
+    false,
+  );
+}
+
+/**
+ * Upsert deals rows. id=threadId for stable idempotency.
+ * email_thread_evaluation_id=threadId links to email_thread_evaluations.id
+ * (the join key deal_card_v + the transitive-ownership RLS policies depend on).
+ * Business tables are fully ingestion-owned (authenticated clients are
+ * SELECT-only on deals per 0008 — no INSERT/UPDATE/DELETE policies exist).
+ * `category` here is the AI classification; it IS included in the upsert body
+ * even though Story 4.9 AC2 listed it as "user-mutable excluded". That AC was
+ * written against a pre-schema model where users could write deals directly.
+ * In the applied schema, user-mutable category state lives exclusively in
+ * deal_user_overrides.manual_category — ingestion cannot clobber user state.
+ * main_contact_* are NOT on deals (they live on email_thread_evaluations);
+ * only `brand` (= contact company) is denormalized onto deals.
+ * created_at/updated_at are DB-managed.
+ *
+ * @param {Array<{threadId: string, userId: string, category: string|null, dealName: string|null, dealType: string|null, value: number, currency: string, brand: string|null, isAiSorted: boolean}>} deals
+ */
+async function writeDeals(deals) {
+  if (!deals || deals.length === 0) return
+  await upsert(
+    'deals',
+    deals.map(
+      ({ threadId, userId, category, dealName, dealType, value, currency, brand, isAiSorted }) => ({
+        id: threadId,
+        user_id: userId,
+        thread_id: threadId,
+        email_thread_evaluation_id: threadId,
+        deal_name: dealName || null,
+        deal_type: dealType || null,
+        category: category || null,
+        value: Number.isFinite(value) ? value : 0,
+        currency: currency || 'USD',
+        brand: brand || null,
+        is_ai_sorted: isAiSorted !== false,
+      }),
+    ),
+    'id',
+    false,
+  );
+}
+
+/**
+ * Delete deals rows for threads re-classified as non-deal.
+ * Service-role bypasses RLS — correct for a system actor.
+ *
+ * @param {string[]} threadIds
+ */
+async function deleteDeals(threadIds) {
+  await deleteWhere('deals', 'id', threadIds);
+}
+
+/**
+ * Upsert contacts rows. Composite PK (user_id, email) — no surrogate id.
+ * ON CONFLICT (user_id, email) DO UPDATE SET ingestion-owned columns only.
+ * email is lowercased so it matches email_thread_evaluations.main_contact_email
+ * (the contact_card_v join key). updated_at is trigger-managed (omitted).
+ *
+ * Upserts ONE row at a time so null/absent optional fields can be OMITTED from
+ * the body. With merge-duplicates PostgREST only updates the columns present in
+ * the payload, so an omitted name/company/title/phone is left intact on conflict
+ * (the SxT COALESCE behaviour) instead of blanking a previously-populated value
+ * on a later sparse re-ingestion. A bulk insert can't do this — PostgREST
+ * requires a uniform key set across every row in the batch.
+ *
+ * @param {Array<{userId: string, email: string, name: string|null, company: string|null, title: string|null, phone: string|null}>} contacts
+ */
+async function writeContacts(contacts) {
+  if (!contacts || contacts.length === 0) return
+  for (const { userId, email, name, company, title, phone } of contacts) {
+    const row = { user_id: userId, email: normEmail(email) };
+    if (name) row.name = name;
+    if (company) row.company_name = company;
+    if (title) row.title = title;
+    if (phone) row.phone_number = phone;
+    await upsert('contacts', [row], 'user_id,email', false);
+  }
+}
+
+/**
  * Orchestrator that claims and processes classify batches concurrently,
  * with in-memory audit passing through eval upserts, deal upserts,
  * contact inserts, and terminal state updates.
@@ -39385,22 +39702,40 @@ async function runClassifyPipeline() {
   const fetchTimeoutMs = parseInt(coreExports.getInput('pipeline-fetch-timeout-ms') || '120000', 10);
   const flushIntervalMs = parseInt(coreExports.getInput('pipeline-flush-interval-ms') || '5000', 10);
   const flushThreshold = parseInt(coreExports.getInput('pipeline-flush-threshold') || '5', 10);
+  const writeTarget = coreExports.getInput('ingest-write-target') || 'sxt';
+  if (!['sxt', 'supabase', 'both'].includes(writeTarget)) {
+    throw new Error(
+      `[run-classify-pipeline] invalid ingest-write-target: "${writeTarget}" (expected sxt | supabase | both)`,
+    )
+  }
+  const writeSxt = writeTarget === 'sxt' || writeTarget === 'both';
+  const writeSupabase = writeTarget === 'supabase' || writeTarget === 'both';
+  // Fail fast at startup (not per-batch, where the error would be swallowed by
+  // the non-fatal Supabase try/catch and silently write nothing every tick).
+  if (
+    writeSupabase &&
+    (!coreExports.getInput('supabase-url') || !coreExports.getInput('supabase-service-role-key'))
+  ) {
+    throw new Error(
+      `[run-classify-pipeline] ingest-write-target=${writeTarget} requires supabase-url and supabase-service-role-key`,
+    )
+  }
 
   console.log(
-    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
+    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs}, writeTarget=${writeTarget})`,
   );
   console.log(
     `[run-classify-pipeline] config: primaryModel=${primaryModel}, fallbackModel=${fallbackModel}, aiApiUrl=${aiApiUrl ? aiApiUrl.substring(0, 40) : '(empty)'}, schema=${schema}, emailProvider=${emailProvider || '(empty)'}, apiKey=${hyperbolicKey ? hyperbolicKey.substring(0, 10) + '...' : '(empty)'}`,
   );
 
-  // 1. Authenticate to SxT once at start
+  // 1. Authenticate to SxT once at start (always needed — pipeline reads deal_states from SxT)
   const jwt = await authenticate(authUrl, authSecret);
 
   // 2. Create bound exec helpers
   const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql);
   const execNoRL = (sql) => executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit: true });
 
-  // 3. Create write batcher (uses execNoRL — tokens acquired in bulk by workers)
+  // 3. Create write batcher (pipeline machinery: stateUpdates + batchEvents always go to SxT)
   const batcher = new WriteBatcher(execNoRL, schema, {
     flushIntervalMs,
     flushThreshold,
@@ -39573,6 +39908,19 @@ async function runClassifyPipeline() {
     const alreadyEvaluatedThreadIds = new Set();
     const batchStart = Date.now();
     const timings = {};
+
+    // A "usable" contact: non-empty email, not the creator, not a blocked /
+    // automated sender. Hoisted to batch scope so both Step 6 (main_contact
+    // fallback) and Step 6.5 (Supabase writes) share one definition.
+    const creatorLower = creatorEmail.trim().toLowerCase();
+    const isUsableContact = (mc) => {
+      if (!mc) return false
+      const email = (mc.email || '').trim().toLowerCase();
+      if (!email) return false
+      if (creatorLower && email === creatorLower) return false
+      if (isBlockedSenderAddress(email)) return false
+      return true
+    };
 
     console.log(`[run-classify-pipeline] processing batch ${batchId} (${rows.length} rows)`);
 
@@ -39865,57 +40213,68 @@ async function runClassifyPipeline() {
 
       timings.aiTotal = Date.now() - t0;
 
-      // d. Save audit checkpoint
+      // d. Save audit checkpoint (SxT). Supabase audit is written in the
+      // consolidated Supabase block (Step 6.5) keyed by batchId.
       t0 = Date.now();
       const auditId = v7();
       const aiOutput = { threads };
       const evaluation = sanitizeString(JSON.stringify(aiOutput));
-      try {
-        await execNoRL(
-          audits.insert(schema, {
-            id: auditId,
-            batchId,
-            threadCount: threads.length,
-            emailCount: rows.length,
-            cost: 0,
-            inputTokens: 0,
-            outputTokens: 0,
-            model: modelUsed,
-            evaluation,
-          }),
-        );
-        timings.auditSave = Date.now() - t0;
+      if (writeSxt) {
+        try {
+          await execNoRL(
+            audits.insert(schema, {
+              id: auditId,
+              batchId,
+              threadCount: threads.length,
+              emailCount: rows.length,
+              cost: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              model: modelUsed,
+              evaluation,
+            }),
+          );
+        } catch (err) {
+          if (
+            err.message.includes('integrity constraint') ||
+            err.message.includes('unique') ||
+            err.message.includes('duplicate')
+          ) {
+            console.log(
+              `[run-classify-pipeline] audit already exists for batch (concurrent run), continuing`,
+            );
+          } else {
+            throw err
+          }
+        }
+      }
+      timings.auditSave = Date.now() - t0;
+      if (writeSxt) {
         console.log(
           `[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`,
         );
-      } catch (err) {
-        if (
-          err.message.includes('integrity constraint') ||
-          err.message.includes('unique') ||
-          err.message.includes('duplicate')
-        ) {
-          console.log(
-            `[run-classify-pipeline] audit already exists for batch (concurrent run), continuing`,
-          );
-        } else {
-          throw err
-        }
       }
     }
 
     // -----------------------------------------------------------------------
-    // Step 4: Save evals via batcher
+    // Step 4: Save evals via batcher (SxT). Supabase evals are written in the
+    // consolidated Supabase block (Step 6.5), after main_contact resolution so
+    // the denormalized main_contact_* columns on email_thread_evaluations are
+    // populated with the resolved contact.
     // -----------------------------------------------------------------------
 
     t0 = Date.now();
-    const evalValues = threads.map((thread) => {
-      const threadId = sanitizeId(thread.thread_id);
-      return `('${v7()}', '${threadId}', '', '${sanitizeString(thread.category || '')}', '${sanitizeString(thread.ai_summary || '')}', ${thread.is_deal ? 'true' : 'false'}, ${(thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'}, ${typeof thread.ai_score === 'number' ? thread.ai_score : 0}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-    });
+    if (writeSxt) {
+      const evalValues = threads.map((thread) => {
+        const threadId = sanitizeId(thread.thread_id);
+        return `('${v7()}', '${threadId}', '', '${sanitizeString(thread.category || '')}', '${sanitizeString(thread.ai_summary || '')}', ${thread.is_deal ? 'true' : 'false'}, ${(thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'}, ${typeof thread.ai_score === 'number' ? thread.ai_score : 0}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      });
+      await batcher.pushEvals(evalValues);
+    }
 
-    await batcher.pushEvals(evalValues);
-
-    console.log(`[run-classify-pipeline] upserted ${threads.length} thread evaluations`);
+    if (writeSxt) {
+      console.log(`[run-classify-pipeline] upserted ${threads.length} thread evaluations`);
+    }
 
     // -----------------------------------------------------------------------
     // Step 5: Save deals via batcher
@@ -39939,15 +40298,19 @@ async function runClassifyPipeline() {
       }
     }
 
-    // Batch DELETE non-deal threads via batcher
+    // Batch DELETE non-deal threads via batcher (SxT). Supabase deal-deletes
+    // happen in the consolidated Supabase block (Step 6.5).
     if (notDealThreadIds.length > 0) {
-      const quoted = notDealThreadIds.map((id) => `'${id}'`);
-      await batcher.pushDealDeletes(quoted);
-      console.log(`[run-classify-pipeline] deleted ${notDealThreadIds.length} non-deal threads`);
+      if (writeSxt) {
+        const quoted = notDealThreadIds.map((id) => `'${id}'`);
+        await batcher.pushDealDeletes(quoted);
+        console.log(`[run-classify-pipeline] deleted ${notDealThreadIds.length} non-deal threads`);
+      }
     }
 
-    // Batch upsert deals via batcher
-    if (dealThreads.length > 0) {
+    // Batch upsert deals via batcher (SxT). Supabase deal upserts happen in the
+    // consolidated Supabase block (Step 6.5), after main_contact resolution.
+    if (dealThreads.length > 0 && writeSxt) {
       const dealValues = dealThreads.map((thread) => {
         const threadId = sanitizeId(thread.thread_id);
         const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
@@ -39966,7 +40329,6 @@ async function runClassifyPipeline() {
         const category = sanitizeString(thread.category || '');
         return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
       });
-
       await batcher.pushDeals(dealValues);
 
       console.log(`[run-classify-pipeline] ${dealThreads.length} deals upserted`);
@@ -39983,16 +40345,6 @@ async function runClassifyPipeline() {
       // A "usable" contact still must be: non-empty email, not the creator,
       // and not a blocked/automated sender (mailer-daemon, no-reply, etc.).
       // ---------------------------------------------------------------------
-
-      const creatorLower = (creatorEmail || '').trim().toLowerCase();
-      const isUsableContact = (mc) => {
-        if (!mc) return false
-        const email = (mc.email || '').trim().toLowerCase();
-        if (!email) return false
-        if (creatorLower && email === creatorLower) return false
-        if (isBlockedSenderAddress(email)) return false
-        return true
-      };
 
       const fallbackCandidates = dealThreads.filter((t) => !isUsableContact(t.main_contact));
 
@@ -40068,30 +40420,32 @@ async function runClassifyPipeline() {
       const coreContactValues = [];
       const dealContactValues = [];
 
-      for (const thread of dealThreads) {
-        const mc = thread.main_contact;
-        // Same bar as Step 6a (creator, blocked/automated senders, empty email)
-        if (!isUsableContact(mc)) continue
+      if (writeSxt) {
+        for (const thread of dealThreads) {
+          const mc = thread.main_contact;
+          // Same bar as Step 6a (creator, blocked/automated senders, empty email)
+          if (!isUsableContact(mc)) continue
 
-        const email = (mc.email || '').trim().toLowerCase();
+          const email = (mc.email || '').trim().toLowerCase();
 
-        const threadId = sanitizeId(thread.thread_id);
-        const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
-        const contactEmail = sanitizeString(email);
-        const nameVal = toSqlNullable(mc.name);
-        const companyVal = toSqlNullable(mc.company);
-        const titleVal = toSqlNullable(mc.title);
-        const phoneVal = toSqlNullable(mc.phone_number);
+          const threadId = sanitizeId(thread.thread_id);
+          const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : '';
+          const contactEmail = sanitizeString(email);
+          const nameVal = toSqlNullable(mc.name);
+          const companyVal = toSqlNullable(mc.company);
+          const titleVal = toSqlNullable(mc.title);
+          const phoneVal = toSqlNullable(mc.phone_number);
 
-        // Core contacts — COALESCE preserves existing non-null values
-        coreContactValues.push(
-          `('${userId}', '${contactEmail}', ${nameVal}, ${companyVal}, ${titleVal}, ${phoneVal}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        );
+          // Core contacts — COALESCE preserves existing non-null values
+          coreContactValues.push(
+            `('${userId}', '${contactEmail}', ${nameVal}, ${companyVal}, ${titleVal}, ${phoneVal}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          );
 
-        // Deal contacts — simplified 4-column relationship upsert
-        dealContactValues.push(
-          `('${threadId}', '${userId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        );
+          // Deal contacts — simplified 4-column relationship upsert
+          dealContactValues.push(
+            `('${threadId}', '${userId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          );
+        }
       }
 
       if (coreContactValues.length > 0) {
@@ -40108,9 +40462,166 @@ async function runClassifyPipeline() {
         await batcher.pushContacts(dealContactValues);
       }
 
-      console.log(
-        `[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`,
-      );
+      if (writeSxt) {
+        console.log(
+          `[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`,
+        );
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 6.5: Supabase business-table writes (consolidated, post-resolution)
+    // -----------------------------------------------------------------------
+    // Single pass after main_contact resolution so email_thread_evaluations'
+    // denormalized main_contact_* columns carry the resolved contact. Ownership
+    // graph (per dealsync-v2 migrations 0001/0008/0009):
+    //   audits.id = batchId = ete.ai_evaluation_audit_id   (two-hop RLS)
+    //   ete.id = deals.email_thread_evaluation_id = threadId (transitive RLS + deal_card_v)
+    //   contacts.email = ete.main_contact_email (lowercased)  (contact_card_v)
+    // Failure handling (see the catch at the end of this block): in supabase-only
+    // mode a write failure FAILS the batch (throws) so it is retried rather than
+    // marked terminal with nothing persisted; in `both` mode it is best-effort
+    // because SxT still carries the data.
+    if (writeSupabase) {
+      const t0Supa = Date.now();
+      // Owner of a thread, or null when the thread is not in the claimed batch.
+      // A null owner means the AI returned a thread_id/index that maps to no
+      // claimed row (hallucination / coercion artifact); such threads are SKIPPED
+      // from every Supabase write rather than attributed to a fallback user —
+      // writing them under rows[0].USER_ID would create a deal for the wrong user.
+      const userIdFor = (threadId) =>
+        userByThread[threadId] ? sanitizeId(userByThread[threadId]) : null;
+
+      // Resolved usable main_contact per deal thread (set during Step 6a).
+      const mcByThread = new Map();
+      for (const t of dealThreads) {
+        const tid = sanitizeId(t.thread_id);
+        if (isUsableContact(t.main_contact)) mcByThread.set(tid, t.main_contact);
+      }
+
+      try {
+        // 1. Audit checkpoint (idempotent DO NOTHING on id=batchId). ai_evaluation
+        //    is a jsonb column — pass the raw object, not a stringified value.
+        await writeAudit({
+          batchId,
+          threadCount: threads.length,
+          emailCount: rows.length,
+          cost: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          model: modelUsed,
+          aiEvaluation: { threads },
+        });
+
+        // 2. Delete deal rows for threads re-classified as non-deal, but only for
+        //    threads actually in this claimed batch. deleteDeals matches by id and
+        //    bypasses RLS (service-role), so an unclaimed/hallucinated thread_id
+        //    that happens to match an existing deal could remove another user's row.
+        const claimedNonDealIds = notDealThreadIds.filter((tid) => userByThread[tid]);
+        if (claimedNonDealIds.length > 0) {
+          await deleteDeals(claimedNonDealIds);
+        }
+
+        // 3. Upsert deal rows + contacts BEFORE evals. A deal renders on its own
+        //    through deal_card_v (LEFT JOIN ete), so if a partial failure stops the
+        //    sequence before the evals write the user still sees a (detail-degraded)
+        //    deal rather than an RLS-invisible eval. Built in one pass that skips any
+        //    thread with no claimed owner (never attribute a deal to a fallback user),
+        //    dedupes deals by sanitized thread id (a duplicate id would trip the
+        //    ON CONFLICT cardinality violation and drop the whole batch), and dedupes
+        //    contacts by (userId, lowercased email) to match the contacts conflict key.
+        const dealRowsMap = new Map();
+        const contactRowsMap = new Map();
+        for (const thread of dealThreads) {
+          const threadId = sanitizeId(thread.thread_id);
+          const userId = userIdFor(threadId);
+          if (!userId) continue
+          const mc = mcByThread.get(threadId) || null;
+          dealRowsMap.set(threadId, {
+            threadId,
+            userId,
+            category: thread.category || null,
+            dealName: thread.deal_name || null,
+            dealType: thread.deal_type || null,
+            // parseAndValidate emits deal_value (Number(), may be NaN) and
+            // deal_currency — NOT `currency`. Guard NaN/Infinity with
+            // Number.isFinite, and read the correct currency field (the old
+            // thread.currency was always undefined → every deal forced to USD).
+            value: Number.isFinite(thread.deal_value) ? thread.deal_value : 0,
+            currency: thread.deal_currency || 'USD',
+            brand: mc?.company || null,
+            isAiSorted: true,
+          });
+          if (!mc) continue
+          const email = (mc.email || '').trim().toLowerCase();
+          if (!email) continue
+          // Merge, don't overwrite: when two threads in the batch share a contact
+          // and the later one is sparser, keep each field's non-null value from
+          // either thread so the contact card isn't created with less data.
+          const ckey = `${userId}::${email}`;
+          const prevContact = contactRowsMap.get(ckey);
+          contactRowsMap.set(ckey, {
+            userId,
+            email: mc.email,
+            name: mc.name || prevContact?.name || null,
+            company: mc.company || prevContact?.company || null,
+            title: mc.title || prevContact?.title || null,
+            phone: mc.phone_number || prevContact?.phone || null,
+          });
+        }
+        await writeDeals([...dealRowsMap.values()]);
+        await writeContacts([...contactRowsMap.values()]);
+
+        // 4. Evals for all CLAIMED threads (deal + non-deal), written LAST so a
+        //    partial failure leaves a renderable deal rather than an orphan eval.
+        //    Threads not in the claimed batch are skipped (same reason as deals);
+        //    carries the denormalized main_contact_* (deal threads with a resolved
+        //    usable contact only) and the audit linkage (ai_evaluation_audit_id).
+        const evalRowsMap = new Map();
+        for (const thread of threads) {
+          const threadId = sanitizeId(thread.thread_id);
+          if (!userIdFor(threadId)) continue
+          evalRowsMap.set(threadId, {
+            threadId,
+            auditId: batchId,
+            // Write the AI's insight text. parseAndValidate emits ai_insight and
+            // category separately; category already lives on deals.category (ETE
+            // has no category column), so storing it here would drop the insight.
+            aiInsight: thread.ai_insight || null,
+            aiSummary: thread.ai_summary || null,
+            isDeal: !!thread.is_deal,
+            // parseAndValidate already folds the category check into the
+            // likely_scam boolean (Boolean(r.likely_scam) || category===scam),
+            // so carry that field directly instead of recomputing category-only.
+            likelyScam: !!thread.likely_scam,
+            aiScore: typeof thread.ai_score === 'number' ? thread.ai_score : 0,
+            mainContact: mcByThread.get(threadId) || null,
+          });
+        }
+        await writeEvals([...evalRowsMap.values()]);
+
+        console.log(
+          `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
+            `(${evalRowsMap.size} evals, ${dealRowsMap.size} deals, ${claimedNonDealIds.length} deletes)`,
+        );
+      } catch (err) {
+        const msg = err?.message ?? String(err);
+        // In supabase-only mode Supabase is the only business-data sink, so a
+        // failed write must FAIL the batch. Throwing here skips the terminal
+        // deal-state update (Step 7) and the completion event (Step 8), leaving
+        // the batch in `classifying` for runPool to retry and the stuck-batch
+        // sweep to reclaim, rather than marking it done with nothing persisted
+        // (silent data loss). In `both` mode SxT still carries the data, so the
+        // Supabase write stays best-effort.
+        if (!writeSxt) {
+          throw new Error(
+            `[run-classify-pipeline] supabase writes failed in supabase-only mode (batch ${batchId}); failing batch for retry: ${msg}`,
+          )
+        }
+        console.error(
+          `[run-classify-pipeline] supabase writes failed (non-fatal, both mode): ${msg}`,
+        );
+      }
     }
 
     // -----------------------------------------------------------------------

@@ -6,6 +6,13 @@ import { fetchEmails, deriveFallbackMainContact, isBlockedSenderAddress } from '
 import { runPool, insertBatchEvent, sweepStuckRows, sweepOrphanedRows } from '../lib/pipeline.js'
 import { WriteBatcher } from '../lib/batcher.js'
 import {
+  writeAudit,
+  writeEvals,
+  writeDeals,
+  deleteDeals,
+  writeContacts,
+} from '../lib/supabase-writer.js'
+import {
   sanitizeSchema,
   sanitizeId,
   sanitizeString,
@@ -50,22 +57,40 @@ export async function runClassifyPipeline() {
   const fetchTimeoutMs = parseInt(core.getInput('pipeline-fetch-timeout-ms') || '120000', 10)
   const flushIntervalMs = parseInt(core.getInput('pipeline-flush-interval-ms') || '5000', 10)
   const flushThreshold = parseInt(core.getInput('pipeline-flush-threshold') || '5', 10)
+  const writeTarget = core.getInput('ingest-write-target') || 'sxt'
+  if (!['sxt', 'supabase', 'both'].includes(writeTarget)) {
+    throw new Error(
+      `[run-classify-pipeline] invalid ingest-write-target: "${writeTarget}" (expected sxt | supabase | both)`,
+    )
+  }
+  const writeSxt = writeTarget === 'sxt' || writeTarget === 'both'
+  const writeSupabase = writeTarget === 'supabase' || writeTarget === 'both'
+  // Fail fast at startup (not per-batch, where the error would be swallowed by
+  // the non-fatal Supabase try/catch and silently write nothing every tick).
+  if (
+    writeSupabase &&
+    (!core.getInput('supabase-url') || !core.getInput('supabase-service-role-key'))
+  ) {
+    throw new Error(
+      `[run-classify-pipeline] ingest-write-target=${writeTarget} requires supabase-url and supabase-service-role-key`,
+    )
+  }
 
   console.log(
-    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs})`,
+    `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs}, writeTarget=${writeTarget})`,
   )
   console.log(
     `[run-classify-pipeline] config: primaryModel=${primaryModel}, fallbackModel=${fallbackModel}, aiApiUrl=${aiApiUrl ? aiApiUrl.substring(0, 40) : '(empty)'}, schema=${schema}, emailProvider=${emailProvider || '(empty)'}, apiKey=${hyperbolicKey ? hyperbolicKey.substring(0, 10) + '...' : '(empty)'}`,
   )
 
-  // 1. Authenticate to SxT once at start
+  // 1. Authenticate to SxT once at start (always needed — pipeline reads deal_states from SxT)
   const jwt = await authenticate(authUrl, authSecret)
 
   // 2. Create bound exec helpers
   const exec = (sql) => executeSql(apiUrl, jwt, biscuit, sql)
   const execNoRL = (sql) => executeSql(apiUrl, jwt, biscuit, sql, { skipRateLimit: true })
 
-  // 3. Create write batcher (uses execNoRL — tokens acquired in bulk by workers)
+  // 3. Create write batcher (pipeline machinery: stateUpdates + batchEvents always go to SxT)
   const batcher = new WriteBatcher(execNoRL, schema, {
     flushIntervalMs,
     flushThreshold,
@@ -238,6 +263,19 @@ export async function runClassifyPipeline() {
     const alreadyEvaluatedThreadIds = new Set()
     const batchStart = Date.now()
     const timings = {}
+
+    // A "usable" contact: non-empty email, not the creator, not a blocked /
+    // automated sender. Hoisted to batch scope so both Step 6 (main_contact
+    // fallback) and Step 6.5 (Supabase writes) share one definition.
+    const creatorLower = creatorEmail.trim().toLowerCase()
+    const isUsableContact = (mc) => {
+      if (!mc) return false
+      const email = (mc.email || '').trim().toLowerCase()
+      if (!email) return false
+      if (creatorLower && email === creatorLower) return false
+      if (isBlockedSenderAddress(email)) return false
+      return true
+    }
 
     console.log(`[run-classify-pipeline] processing batch ${batchId} (${rows.length} rows)`)
 
@@ -530,57 +568,68 @@ export async function runClassifyPipeline() {
 
       timings.aiTotal = Date.now() - t0
 
-      // d. Save audit checkpoint
+      // d. Save audit checkpoint (SxT). Supabase audit is written in the
+      // consolidated Supabase block (Step 6.5) keyed by batchId.
       t0 = Date.now()
       const auditId = uuidv7()
       const aiOutput = { threads }
       const evaluation = sanitizeString(JSON.stringify(aiOutput))
-      try {
-        await execNoRL(
-          auditsSql.insert(schema, {
-            id: auditId,
-            batchId,
-            threadCount: threads.length,
-            emailCount: rows.length,
-            cost: 0,
-            inputTokens: 0,
-            outputTokens: 0,
-            model: modelUsed,
-            evaluation,
-          }),
-        )
-        timings.auditSave = Date.now() - t0
+      if (writeSxt) {
+        try {
+          await execNoRL(
+            auditsSql.insert(schema, {
+              id: auditId,
+              batchId,
+              threadCount: threads.length,
+              emailCount: rows.length,
+              cost: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              model: modelUsed,
+              evaluation,
+            }),
+          )
+        } catch (err) {
+          if (
+            err.message.includes('integrity constraint') ||
+            err.message.includes('unique') ||
+            err.message.includes('duplicate')
+          ) {
+            console.log(
+              `[run-classify-pipeline] audit already exists for batch (concurrent run), continuing`,
+            )
+          } else {
+            throw err
+          }
+        }
+      }
+      timings.auditSave = Date.now() - t0
+      if (writeSxt) {
         console.log(
           `[run-classify-pipeline] audit saved: ${auditId} (model: ${modelUsed}) in ${timings.auditSave}ms`,
         )
-      } catch (err) {
-        if (
-          err.message.includes('integrity constraint') ||
-          err.message.includes('unique') ||
-          err.message.includes('duplicate')
-        ) {
-          console.log(
-            `[run-classify-pipeline] audit already exists for batch (concurrent run), continuing`,
-          )
-        } else {
-          throw err
-        }
       }
     }
 
     // -----------------------------------------------------------------------
-    // Step 4: Save evals via batcher
+    // Step 4: Save evals via batcher (SxT). Supabase evals are written in the
+    // consolidated Supabase block (Step 6.5), after main_contact resolution so
+    // the denormalized main_contact_* columns on email_thread_evaluations are
+    // populated with the resolved contact.
     // -----------------------------------------------------------------------
 
     t0 = Date.now()
-    const evalValues = threads.map((thread) => {
-      const threadId = sanitizeId(thread.thread_id)
-      return `('${uuidv7()}', '${threadId}', '', '${sanitizeString(thread.category || '')}', '${sanitizeString(thread.ai_summary || '')}', ${thread.is_deal ? 'true' : 'false'}, ${(thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'}, ${typeof thread.ai_score === 'number' ? thread.ai_score : 0}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-    })
+    if (writeSxt) {
+      const evalValues = threads.map((thread) => {
+        const threadId = sanitizeId(thread.thread_id)
+        return `('${uuidv7()}', '${threadId}', '', '${sanitizeString(thread.category || '')}', '${sanitizeString(thread.ai_summary || '')}', ${thread.is_deal ? 'true' : 'false'}, ${(thread.category || '').toLowerCase() === 'likely_scam' ? 'true' : 'false'}, ${typeof thread.ai_score === 'number' ? thread.ai_score : 0}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+      })
+      await batcher.pushEvals(evalValues)
+    }
 
-    await batcher.pushEvals(evalValues)
-
-    console.log(`[run-classify-pipeline] upserted ${threads.length} thread evaluations`)
+    if (writeSxt) {
+      console.log(`[run-classify-pipeline] upserted ${threads.length} thread evaluations`)
+    }
 
     // -----------------------------------------------------------------------
     // Step 5: Save deals via batcher
@@ -604,15 +653,19 @@ export async function runClassifyPipeline() {
       }
     }
 
-    // Batch DELETE non-deal threads via batcher
+    // Batch DELETE non-deal threads via batcher (SxT). Supabase deal-deletes
+    // happen in the consolidated Supabase block (Step 6.5).
     if (notDealThreadIds.length > 0) {
-      const quoted = notDealThreadIds.map((id) => `'${id}'`)
-      await batcher.pushDealDeletes(quoted)
-      console.log(`[run-classify-pipeline] deleted ${notDealThreadIds.length} non-deal threads`)
+      if (writeSxt) {
+        const quoted = notDealThreadIds.map((id) => `'${id}'`)
+        await batcher.pushDealDeletes(quoted)
+        console.log(`[run-classify-pipeline] deleted ${notDealThreadIds.length} non-deal threads`)
+      }
     }
 
-    // Batch upsert deals via batcher
-    if (dealThreads.length > 0) {
+    // Batch upsert deals via batcher (SxT). Supabase deal upserts happen in the
+    // consolidated Supabase block (Step 6.5), after main_contact resolution.
+    if (dealThreads.length > 0 && writeSxt) {
       const dealValues = dealThreads.map((thread) => {
         const threadId = sanitizeId(thread.thread_id)
         const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
@@ -631,7 +684,6 @@ export async function runClassifyPipeline() {
         const category = sanitizeString(thread.category || '')
         return `('${dealId}', '${userId}', '${threadId}', '', '${dealName}', '${dealType}', '${category}', ${dealValue}, '${currency}', '${brand}', true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
       })
-
       await batcher.pushDeals(dealValues)
 
       console.log(`[run-classify-pipeline] ${dealThreads.length} deals upserted`)
@@ -648,16 +700,6 @@ export async function runClassifyPipeline() {
       // A "usable" contact still must be: non-empty email, not the creator,
       // and not a blocked/automated sender (mailer-daemon, no-reply, etc.).
       // ---------------------------------------------------------------------
-
-      const creatorLower = (creatorEmail || '').trim().toLowerCase()
-      const isUsableContact = (mc) => {
-        if (!mc) return false
-        const email = (mc.email || '').trim().toLowerCase()
-        if (!email) return false
-        if (creatorLower && email === creatorLower) return false
-        if (isBlockedSenderAddress(email)) return false
-        return true
-      }
 
       const fallbackCandidates = dealThreads.filter((t) => !isUsableContact(t.main_contact))
 
@@ -733,30 +775,32 @@ export async function runClassifyPipeline() {
       const coreContactValues = []
       const dealContactValues = []
 
-      for (const thread of dealThreads) {
-        const mc = thread.main_contact
-        // Same bar as Step 6a (creator, blocked/automated senders, empty email)
-        if (!isUsableContact(mc)) continue
+      if (writeSxt) {
+        for (const thread of dealThreads) {
+          const mc = thread.main_contact
+          // Same bar as Step 6a (creator, blocked/automated senders, empty email)
+          if (!isUsableContact(mc)) continue
 
-        const email = (mc.email || '').trim().toLowerCase()
+          const email = (mc.email || '').trim().toLowerCase()
 
-        const threadId = sanitizeId(thread.thread_id)
-        const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
-        const contactEmail = sanitizeString(email)
-        const nameVal = toSqlNullable(mc.name)
-        const companyVal = toSqlNullable(mc.company)
-        const titleVal = toSqlNullable(mc.title)
-        const phoneVal = toSqlNullable(mc.phone_number)
+          const threadId = sanitizeId(thread.thread_id)
+          const userId = userByThread[threadId] ? sanitizeId(userByThread[threadId]) : ''
+          const contactEmail = sanitizeString(email)
+          const nameVal = toSqlNullable(mc.name)
+          const companyVal = toSqlNullable(mc.company)
+          const titleVal = toSqlNullable(mc.title)
+          const phoneVal = toSqlNullable(mc.phone_number)
 
-        // Core contacts — COALESCE preserves existing non-null values
-        coreContactValues.push(
-          `('${userId}', '${contactEmail}', ${nameVal}, ${companyVal}, ${titleVal}, ${phoneVal}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        )
+          // Core contacts — COALESCE preserves existing non-null values
+          coreContactValues.push(
+            `('${userId}', '${contactEmail}', ${nameVal}, ${companyVal}, ${titleVal}, ${phoneVal}, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          )
 
-        // Deal contacts — simplified 4-column relationship upsert
-        dealContactValues.push(
-          `('${threadId}', '${userId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
-        )
+          // Deal contacts — simplified 4-column relationship upsert
+          dealContactValues.push(
+            `('${threadId}', '${userId}', '${contactEmail}', 'primary', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+          )
+        }
       }
 
       if (coreContactValues.length > 0) {
@@ -773,9 +817,166 @@ export async function runClassifyPipeline() {
         await batcher.pushContacts(dealContactValues)
       }
 
-      console.log(
-        `[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`,
-      )
+      if (writeSxt) {
+        console.log(
+          `[run-classify-pipeline] ${dealContactValues.length} contacts saved (core + deal)`,
+        )
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 6.5: Supabase business-table writes (consolidated, post-resolution)
+    // -----------------------------------------------------------------------
+    // Single pass after main_contact resolution so email_thread_evaluations'
+    // denormalized main_contact_* columns carry the resolved contact. Ownership
+    // graph (per dealsync-v2 migrations 0001/0008/0009):
+    //   audits.id = batchId = ete.ai_evaluation_audit_id   (two-hop RLS)
+    //   ete.id = deals.email_thread_evaluation_id = threadId (transitive RLS + deal_card_v)
+    //   contacts.email = ete.main_contact_email (lowercased)  (contact_card_v)
+    // Failure handling (see the catch at the end of this block): in supabase-only
+    // mode a write failure FAILS the batch (throws) so it is retried rather than
+    // marked terminal with nothing persisted; in `both` mode it is best-effort
+    // because SxT still carries the data.
+    if (writeSupabase) {
+      const t0Supa = Date.now()
+      // Owner of a thread, or null when the thread is not in the claimed batch.
+      // A null owner means the AI returned a thread_id/index that maps to no
+      // claimed row (hallucination / coercion artifact); such threads are SKIPPED
+      // from every Supabase write rather than attributed to a fallback user —
+      // writing them under rows[0].USER_ID would create a deal for the wrong user.
+      const userIdFor = (threadId) =>
+        userByThread[threadId] ? sanitizeId(userByThread[threadId]) : null
+
+      // Resolved usable main_contact per deal thread (set during Step 6a).
+      const mcByThread = new Map()
+      for (const t of dealThreads) {
+        const tid = sanitizeId(t.thread_id)
+        if (isUsableContact(t.main_contact)) mcByThread.set(tid, t.main_contact)
+      }
+
+      try {
+        // 1. Audit checkpoint (idempotent DO NOTHING on id=batchId). ai_evaluation
+        //    is a jsonb column — pass the raw object, not a stringified value.
+        await writeAudit({
+          batchId,
+          threadCount: threads.length,
+          emailCount: rows.length,
+          cost: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          model: modelUsed,
+          aiEvaluation: { threads },
+        })
+
+        // 2. Delete deal rows for threads re-classified as non-deal, but only for
+        //    threads actually in this claimed batch. deleteDeals matches by id and
+        //    bypasses RLS (service-role), so an unclaimed/hallucinated thread_id
+        //    that happens to match an existing deal could remove another user's row.
+        const claimedNonDealIds = notDealThreadIds.filter((tid) => userByThread[tid])
+        if (claimedNonDealIds.length > 0) {
+          await deleteDeals(claimedNonDealIds)
+        }
+
+        // 3. Upsert deal rows + contacts BEFORE evals. A deal renders on its own
+        //    through deal_card_v (LEFT JOIN ete), so if a partial failure stops the
+        //    sequence before the evals write the user still sees a (detail-degraded)
+        //    deal rather than an RLS-invisible eval. Built in one pass that skips any
+        //    thread with no claimed owner (never attribute a deal to a fallback user),
+        //    dedupes deals by sanitized thread id (a duplicate id would trip the
+        //    ON CONFLICT cardinality violation and drop the whole batch), and dedupes
+        //    contacts by (userId, lowercased email) to match the contacts conflict key.
+        const dealRowsMap = new Map()
+        const contactRowsMap = new Map()
+        for (const thread of dealThreads) {
+          const threadId = sanitizeId(thread.thread_id)
+          const userId = userIdFor(threadId)
+          if (!userId) continue
+          const mc = mcByThread.get(threadId) || null
+          dealRowsMap.set(threadId, {
+            threadId,
+            userId,
+            category: thread.category || null,
+            dealName: thread.deal_name || null,
+            dealType: thread.deal_type || null,
+            // parseAndValidate emits deal_value (Number(), may be NaN) and
+            // deal_currency — NOT `currency`. Guard NaN/Infinity with
+            // Number.isFinite, and read the correct currency field (the old
+            // thread.currency was always undefined → every deal forced to USD).
+            value: Number.isFinite(thread.deal_value) ? thread.deal_value : 0,
+            currency: thread.deal_currency || 'USD',
+            brand: mc?.company || null,
+            isAiSorted: true,
+          })
+          if (!mc) continue
+          const email = (mc.email || '').trim().toLowerCase()
+          if (!email) continue
+          // Merge, don't overwrite: when two threads in the batch share a contact
+          // and the later one is sparser, keep each field's non-null value from
+          // either thread so the contact card isn't created with less data.
+          const ckey = `${userId}::${email}`
+          const prevContact = contactRowsMap.get(ckey)
+          contactRowsMap.set(ckey, {
+            userId,
+            email: mc.email,
+            name: mc.name || prevContact?.name || null,
+            company: mc.company || prevContact?.company || null,
+            title: mc.title || prevContact?.title || null,
+            phone: mc.phone_number || prevContact?.phone || null,
+          })
+        }
+        await writeDeals([...dealRowsMap.values()])
+        await writeContacts([...contactRowsMap.values()])
+
+        // 4. Evals for all CLAIMED threads (deal + non-deal), written LAST so a
+        //    partial failure leaves a renderable deal rather than an orphan eval.
+        //    Threads not in the claimed batch are skipped (same reason as deals);
+        //    carries the denormalized main_contact_* (deal threads with a resolved
+        //    usable contact only) and the audit linkage (ai_evaluation_audit_id).
+        const evalRowsMap = new Map()
+        for (const thread of threads) {
+          const threadId = sanitizeId(thread.thread_id)
+          if (!userIdFor(threadId)) continue
+          evalRowsMap.set(threadId, {
+            threadId,
+            auditId: batchId,
+            // Write the AI's insight text. parseAndValidate emits ai_insight and
+            // category separately; category already lives on deals.category (ETE
+            // has no category column), so storing it here would drop the insight.
+            aiInsight: thread.ai_insight || null,
+            aiSummary: thread.ai_summary || null,
+            isDeal: !!thread.is_deal,
+            // parseAndValidate already folds the category check into the
+            // likely_scam boolean (Boolean(r.likely_scam) || category===scam),
+            // so carry that field directly instead of recomputing category-only.
+            likelyScam: !!thread.likely_scam,
+            aiScore: typeof thread.ai_score === 'number' ? thread.ai_score : 0,
+            mainContact: mcByThread.get(threadId) || null,
+          })
+        }
+        await writeEvals([...evalRowsMap.values()])
+
+        console.log(
+          `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
+            `(${evalRowsMap.size} evals, ${dealRowsMap.size} deals, ${claimedNonDealIds.length} deletes)`,
+        )
+      } catch (err) {
+        const msg = err?.message ?? String(err)
+        // In supabase-only mode Supabase is the only business-data sink, so a
+        // failed write must FAIL the batch. Throwing here skips the terminal
+        // deal-state update (Step 7) and the completion event (Step 8), leaving
+        // the batch in `classifying` for runPool to retry and the stuck-batch
+        // sweep to reclaim, rather than marking it done with nothing persisted
+        // (silent data loss). In `both` mode SxT still carries the data, so the
+        // Supabase write stays best-effort.
+        if (!writeSxt) {
+          throw new Error(
+            `[run-classify-pipeline] supabase writes failed in supabase-only mode (batch ${batchId}); failing batch for retry: ${msg}`,
+          )
+        }
+        console.error(
+          `[run-classify-pipeline] supabase writes failed (non-fatal, both mode): ${msg}`,
+        )
+      }
     }
 
     // -----------------------------------------------------------------------
