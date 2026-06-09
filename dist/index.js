@@ -40647,15 +40647,25 @@ async function runClassifyPipeline() {
       // identity helper) is treated the same way — skipped, not thrown — so one
       // corrupt row cannot abort the per-thread loop and silently drop every
       // later thread's writes (in `both` mode the outer catch would swallow it).
+      // Threads dropped because their claimed owner uid is unusable (fails
+      // sanitizeId, or blank/whitespace per the identity helper). Tracked as a
+      // Set so (a) the per-batch summary can surface a count for monitoring and
+      // (b) a thread is warned about exactly once even though userIdFor runs in
+      // both the deal/contact and the eval build loops.
+      const skippedOwnerThreads = new Set();
       const userIdFor = (threadId) => {
         const firestoreUid = userByThread[threadId];
         if (!firestoreUid) return null
         try {
           return deriveSupabaseUserId(sanitizeId(firestoreUid))
         } catch (err) {
-          console.warn(
-            `[run-classify-pipeline] skipping thread ${threadId}: unusable owner uid (${err?.message ?? err})`,
-          );
+          if (!skippedOwnerThreads.has(threadId)) {
+            skippedOwnerThreads.add(threadId);
+            console.warn(
+              `[run-classify-pipeline] skipping thread ${threadId}: unusable owner uid ` +
+                `(batch ${batchId}, ${err?.message ?? err})`,
+            );
+          }
           return null
         }
       };
@@ -40770,7 +40780,8 @@ async function runClassifyPipeline() {
 
         console.log(
           `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
-            `(${evalRowsMap.size} evals, ${dealRowsMap.size} deals, ${claimedNonDealIds.length} deletes)`,
+            `(${evalRowsMap.size} evals, ${dealRowsMap.size} deals, ${claimedNonDealIds.length} deletes` +
+            `${skippedOwnerThreads.size ? `, ${skippedOwnerThreads.size} skipped-bad-owner` : ''})`,
         );
       } catch (err) {
         const msg = err?.message ?? String(err);

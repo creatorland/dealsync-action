@@ -519,6 +519,7 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     // failed the whole batch; now userIdFor catches it, skips only that thread,
     // and the valid thread-1 still lands. One corrupt row can't poison the batch.
     const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {})
     try {
       const rows = [ROWS[0], { ...ROWS[1], USER_ID: 'bad uid!' }]
       const threads = [THREADS[0], { ...THREADS[0], thread_id: 'thread-2' }]
@@ -533,10 +534,19 @@ describe('INGEST_WRITE_TARGET wiring', () => {
       const evals = mockWriteEvals.mock.calls[0][0]
       expect(evals.map((e) => e.threadId)).toEqual(['thread-1'])
 
-      // The skip is surfaced (not silent) for the malformed thread.
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('thread-2'))
+      // The skip is surfaced (not silent) and deduped: warned exactly once even
+      // though userIdFor runs in both the deal loop and the eval loop.
+      const badOwnerWarns = warnSpy.mock.calls.filter((c) => String(c[0]).includes('thread-2'))
+      expect(badOwnerWarns).toHaveLength(1)
+
+      // The per-batch summary surfaces a dropped-owner count for monitoring.
+      const summary = logSpy.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('supabase writes done'))
+      expect(summary).toContain('1 skipped-bad-owner')
     } finally {
       warnSpy.mockRestore()
+      logSpy.mockRestore()
     }
   })
 })
