@@ -12,6 +12,7 @@ import {
   deleteDeals,
   writeContacts,
 } from '../lib/supabase-writer.js'
+import { deriveSupabaseUserId } from '../lib/identity.js'
 import {
   sanitizeSchema,
   sanitizeId,
@@ -844,8 +845,10 @@ export async function runClassifyPipeline() {
       // claimed row (hallucination / coercion artifact); such threads are SKIPPED
       // from every Supabase write rather than attributed to a fallback user —
       // writing them under rows[0].USER_ID would create a deal for the wrong user.
-      const userIdFor = (threadId) =>
-        userByThread[threadId] ? sanitizeId(userByThread[threadId]) : null
+      const userIdFor = (threadId) => {
+        const firestoreUid = userByThread[threadId]
+        return firestoreUid ? deriveSupabaseUserId(sanitizeId(firestoreUid)) : null
+      }
 
       // Resolved usable main_contact per deal thread (set during Step 6a).
       const mcByThread = new Map()

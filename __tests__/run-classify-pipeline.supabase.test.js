@@ -23,6 +23,9 @@ jest.unstable_mockModule('uuid', () => ({
     uuidCallCount++
     return `test-uuid-${uuidCallCount}`
   }),
+  // Predictable v5 mock so userIdFor assertions can target a known derived value.
+  // Identity tests (identity.test.js) use the real uuid implementation.
+  v5: jest.fn((name, _ns) => `derived-${name}`),
 }))
 
 const mockAuthenticate = jest.fn()
@@ -350,7 +353,9 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     const deals = mockWriteDeals.mock.calls[0][0]
     expect(deals).toHaveLength(1)
     expect(deals[0].threadId).toBe('thread-1')
-    expect(deals[0].userId).toBe('user-1')
+    // Post-4.11: userId is the derived UUID, not the raw Firestore uid.
+    // v5 mock returns 'derived-{name}'; real derivation verified in identity.test.js.
+    expect(deals[0].userId).toBe('derived-user-1')
     expect(deals[0].category).toBe('new')
     expect(deals[0].value).toBe(5000)
     // currency must come from deal_currency (the field parseAndValidate emits),
@@ -442,7 +447,7 @@ describe('INGEST_WRITE_TARGET wiring', () => {
 
     const contacts = mockWriteContacts.mock.calls[0][0]
     expect(contacts).toHaveLength(1)
-    expect(contacts[0].userId).toBe('user-1')
+    expect(contacts[0].userId).toBe('derived-user-1') // derived UUID, not raw Firestore uid
     expect(contacts[0].email).toBe('Alice@CO.com') // writer lowercases
     expect(contacts[0].company).toBe('TestCo')
   })
