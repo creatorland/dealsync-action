@@ -568,4 +568,27 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     // i.e. identical to the un-padded uid (not a skip, not a different key).
     expect(deals[0].userId).toBe('derived-user-1')
   })
+
+  it('excludes a malformed-owner non-deal thread from deleteDeals (uniform skip)', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    // thread-2 is a non-deal whose claimed owner uid is malformed. The deletes
+    // filter gates on userIdFor (not raw userByThread truthiness), so it is
+    // treated as unclaimed here too — deleteDeals (which bypasses RLS and matches
+    // by thread id) must not act on a thread we've decided to skip everywhere else.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const rows = [ROWS[0], { ...ROWS[1], USER_ID: 'bad uid!' }]
+      // THREADS[1] is thread-2 with is_deal:false → the only non-deal thread.
+      const threads = [THREADS[0], THREADS[1]]
+      driveFreshBatch(threads, rows)
+
+      await runClassifyPipeline()
+
+      // Its only non-deal thread has a malformed owner → claimedNonDealIds is
+      // empty → deleteDeals is never called (pre-fix it ran with ['thread-2']).
+      expect(mockDeleteDeals).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
 })

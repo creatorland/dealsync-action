@@ -40699,7 +40699,12 @@ async function runClassifyPipeline() {
         //    threads actually in this claimed batch. deleteDeals matches by id and
         //    bypasses RLS (service-role), so an unclaimed/hallucinated thread_id
         //    that happens to match an existing deal could remove another user's row.
-        const claimedNonDealIds = notDealThreadIds.filter((tid) => userByThread[tid]);
+        //    Gate on userIdFor (not a raw userByThread truthiness check) so a
+        //    malformed-owner thread is treated as unclaimed here too — uniform with
+        //    the upsert loops, and it also warns/counts the skip. (Clearing the
+        //    userByThread entry inside userIdFor wouldn't work: this filter runs
+        //    before userIdFor is first called in the loops below.)
+        const claimedNonDealIds = notDealThreadIds.filter((tid) => userIdFor(tid));
         if (claimedNonDealIds.length > 0) {
           await deleteDeals(claimedNonDealIds);
         }
