@@ -26,11 +26,14 @@ describe('deriveSupabaseUserId', () => {
     )
   })
 
-  it('trims leading/trailing whitespace before hashing — padded uid === trimmed uid', () => {
-    // A padded Firestore uid must hash to the same value as its trimmed form,
-    // otherwise the row lands under a UUID no session can reproduce (RLS orphan).
+  it('trims leading/trailing whitespace before hashing — padded uid === golden vector', () => {
+    // Pin the trimmed result to the external golden literal (not just helper-to-
+    // helper): a padded Firestore uid must derive the SAME canonical value as the
+    // trimmed sub, otherwise the row lands under a UUID no session can reproduce
+    // (RLS orphan). Asserting against the literal also catches a regression that
+    // swaps trim for some other (still symmetric) normalization.
     expect(deriveSupabaseUserId('  38Jeic1UdHYI8wwJQyrPu  ')).toBe(
-      deriveSupabaseUserId('38Jeic1UdHYI8wwJQyrPu'),
+      '216139fd-5fca-5375-8b38-6352cb35d12a',
     )
   })
 
@@ -40,6 +43,14 @@ describe('deriveSupabaseUserId', () => {
 
   it('throws on whitespace-only string — must not hash "" into a phantom tenant', () => {
     expect(() => deriveSupabaseUserId('   ')).toThrow('non-blank')
+  })
+
+  it('throws a TypeError with a type-specific message on non-string input', () => {
+    // A null/undefined/numeric uid is a caller type error, not a blank string —
+    // the message must name the real fault rather than misreport "non-blank".
+    expect(() => deriveSupabaseUserId(null)).toThrow(TypeError)
+    expect(() => deriveSupabaseUserId(undefined)).toThrow('must be a string')
+    expect(() => deriveSupabaseUserId(123)).toThrow('got number')
   })
 
   it('is deterministic — same uid always yields same UUID', () => {

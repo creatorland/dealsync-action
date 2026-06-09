@@ -18,7 +18,12 @@ export const DEALSYNC_IDENTITY_NAMESPACE = '5ced37e1-0ede-40a0-98aa-ae066dac4ce1
  * @returns {string} lowercase UUID string matching the derived sub in the Supabase JWT
  */
 export function deriveSupabaseUserId(firestoreUid) {
-  const uid = typeof firestoreUid === 'string' ? firestoreUid.trim() : ''
+  if (typeof firestoreUid !== 'string') {
+    throw new TypeError(
+      `deriveSupabaseUserId: firestore_uid must be a string, got ${typeof firestoreUid}`,
+    )
+  }
+  const uid = firestoreUid.trim()
   if (!uid) throw new Error('deriveSupabaseUserId: firestore_uid must be non-blank')
   return uuidv5(uid, DEALSYNC_IDENTITY_NAMESPACE)
 }

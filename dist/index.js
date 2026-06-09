@@ -39814,7 +39814,12 @@ const DEALSYNC_IDENTITY_NAMESPACE = '5ced37e1-0ede-40a0-98aa-ae066dac4ce1';
  * @returns {string} lowercase UUID string matching the derived sub in the Supabase JWT
  */
 function deriveSupabaseUserId(firestoreUid) {
-  const uid = typeof firestoreUid === 'string' ? firestoreUid.trim() : '';
+  if (typeof firestoreUid !== 'string') {
+    throw new TypeError(
+      `deriveSupabaseUserId: firestore_uid must be a string, got ${typeof firestoreUid}`,
+    )
+  }
+  const uid = firestoreUid.trim();
   if (!uid) throw new Error('deriveSupabaseUserId: firestore_uid must be non-blank')
   return v5(uid, DEALSYNC_IDENTITY_NAMESPACE)
 }
@@ -40638,9 +40643,21 @@ async function runClassifyPipeline() {
       // claimed row (hallucination / coercion artifact); such threads are SKIPPED
       // from every Supabase write rather than attributed to a fallback user —
       // writing them under rows[0].USER_ID would create a deal for the wrong user.
+      // A malformed owner uid (fails sanitizeId, or blank/whitespace per the
+      // identity helper) is treated the same way — skipped, not thrown — so one
+      // corrupt row cannot abort the per-thread loop and silently drop every
+      // later thread's writes (in `both` mode the outer catch would swallow it).
       const userIdFor = (threadId) => {
         const firestoreUid = userByThread[threadId];
-        return firestoreUid ? deriveSupabaseUserId(sanitizeId(firestoreUid)) : null
+        if (!firestoreUid) return null
+        try {
+          return deriveSupabaseUserId(sanitizeId(firestoreUid))
+        } catch (err) {
+          console.warn(
+            `[run-classify-pipeline] skipping thread ${threadId}: unusable owner uid (${err?.message ?? err})`,
+          );
+          return null
+        }
       };
 
       // Resolved usable main_contact per deal thread (set during Step 6a).

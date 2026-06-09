@@ -205,11 +205,11 @@ const THREADS = [
 ]
 
 /** Drives one fresh-classification batch through runPool with the given write target. */
-function driveFreshBatch(threadsOverride = THREADS) {
+function driveFreshBatch(threadsOverride = THREADS, rowsOverride = ROWS) {
   mockRunPool.mockImplementation(async (claimFn, workerFn) => {
     mockExecuteSql
       .mockResolvedValueOnce([]) // claim UPDATE
-      .mockResolvedValueOnce(ROWS) // claim SELECT
+      .mockResolvedValueOnce(rowsOverride) // claim SELECT
     const batch = await claimFn()
 
     mockExecuteSql
@@ -510,5 +510,33 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     // Its contact never leaks in under the batch's first user.
     const contacts = mockWriteContacts.mock.calls[0][0]
     expect(contacts.map((c) => c.email)).toEqual(['Alice@CO.com'])
+  })
+
+  it('skips a thread whose owner uid is malformed (sanitizeId reject) without aborting the batch', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    // thread-2's claimed owner is a malformed uid (space + '!' fail sanitizeId's
+    // ^[a-zA-Z0-9_:-]+$). Pre-patch this threw and — in supabase-only mode —
+    // failed the whole batch; now userIdFor catches it, skips only that thread,
+    // and the valid thread-1 still lands. One corrupt row can't poison the batch.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const rows = [ROWS[0], { ...ROWS[1], USER_ID: 'bad uid!' }]
+      const threads = [THREADS[0], { ...THREADS[0], thread_id: 'thread-2' }]
+      driveFreshBatch(threads, rows)
+
+      // Must NOT throw even though Supabase is the only sink.
+      await expect(runClassifyPipeline()).resolves.toBeDefined()
+
+      // Only the well-formed owner's thread is written.
+      const deals = mockWriteDeals.mock.calls[0][0]
+      expect(deals.map((d) => d.threadId)).toEqual(['thread-1'])
+      const evals = mockWriteEvals.mock.calls[0][0]
+      expect(evals.map((e) => e.threadId)).toEqual(['thread-1'])
+
+      // The skip is surfaced (not silent) for the malformed thread.
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('thread-2'))
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })
