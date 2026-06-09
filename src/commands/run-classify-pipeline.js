@@ -12,6 +12,7 @@ import {
   deleteDeals,
   writeContacts,
 } from '../lib/supabase-writer.js'
+import { deriveSupabaseUserId } from '../lib/identity.js'
 import {
   sanitizeSchema,
   sanitizeId,
@@ -844,8 +845,36 @@ export async function runClassifyPipeline() {
       // claimed row (hallucination / coercion artifact); such threads are SKIPPED
       // from every Supabase write rather than attributed to a fallback user —
       // writing them under rows[0].USER_ID would create a deal for the wrong user.
-      const userIdFor = (threadId) =>
-        userByThread[threadId] ? sanitizeId(userByThread[threadId]) : null
+      // A genuinely malformed owner uid (bad chars after trim, or blank) is
+      // treated the same way — skipped, not thrown — so one corrupt row cannot
+      // abort the per-thread loop and silently drop every later thread's writes
+      // (in `both` mode the outer catch would swallow it). Tracked in a Set so
+      // (a) the per-batch summary can surface a count for monitoring and (b) a
+      // thread is warned about exactly once even though userIdFor runs in both
+      // the deal/contact and the eval build loops.
+      const skippedOwnerThreads = new Set()
+      const userIdFor = (threadId) => {
+        const firestoreUid = userByThread[threadId]
+        if (!firestoreUid) return null
+        try {
+          // Trim BEFORE sanitizeId: sanitizeId rejects whitespace, so a padded
+          // uid like '  uid  ' would otherwise be dropped as malformed. Trimming
+          // first normalizes it to the SAME value its Supabase sub derives from
+          // (the identity helper's load-bearing trim invariant — a padded uid
+          // must not mint an RLS-orphaned row). deriveSupabaseUserId re-trims
+          // defensively for callers that don't pre-trim.
+          return deriveSupabaseUserId(sanitizeId(firestoreUid.trim()))
+        } catch (err) {
+          if (!skippedOwnerThreads.has(threadId)) {
+            skippedOwnerThreads.add(threadId)
+            console.warn(
+              `[run-classify-pipeline] skipping thread ${threadId}: unusable owner uid ` +
+                `(batch ${batchId}, ${err?.message ?? err})`,
+            )
+          }
+          return null
+        }
+      }
 
       // Resolved usable main_contact per deal thread (set during Step 6a).
       const mcByThread = new Map()
@@ -872,7 +901,12 @@ export async function runClassifyPipeline() {
         //    threads actually in this claimed batch. deleteDeals matches by id and
         //    bypasses RLS (service-role), so an unclaimed/hallucinated thread_id
         //    that happens to match an existing deal could remove another user's row.
-        const claimedNonDealIds = notDealThreadIds.filter((tid) => userByThread[tid])
+        //    Gate on userIdFor (not a raw userByThread truthiness check) so a
+        //    malformed-owner thread is treated as unclaimed here too — uniform with
+        //    the upsert loops, and it also warns/counts the skip. (Clearing the
+        //    userByThread entry inside userIdFor wouldn't work: this filter runs
+        //    before userIdFor is first called in the loops below.)
+        const claimedNonDealIds = notDealThreadIds.filter((tid) => userIdFor(tid))
         if (claimedNonDealIds.length > 0) {
           await deleteDeals(claimedNonDealIds)
         }
@@ -957,7 +991,8 @@ export async function runClassifyPipeline() {
 
         console.log(
           `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
-            `(${evalRowsMap.size} evals, ${dealRowsMap.size} deals, ${claimedNonDealIds.length} deletes)`,
+            `(${evalRowsMap.size} evals, ${dealRowsMap.size} deals, ${claimedNonDealIds.length} deletes` +
+            `${skippedOwnerThreads.size ? `, ${skippedOwnerThreads.size} skipped-bad-owner` : ''})`,
         )
       } catch (err) {
         const msg = err?.message ?? String(err)

@@ -23,6 +23,9 @@ jest.unstable_mockModule('uuid', () => ({
     uuidCallCount++
     return `test-uuid-${uuidCallCount}`
   }),
+  // Predictable v5 mock so userIdFor assertions can target a known derived value.
+  // Identity tests (identity.test.js) use the real uuid implementation.
+  v5: jest.fn((name, _ns) => `derived-${name}`),
 }))
 
 const mockAuthenticate = jest.fn()
@@ -202,11 +205,11 @@ const THREADS = [
 ]
 
 /** Drives one fresh-classification batch through runPool with the given write target. */
-function driveFreshBatch(threadsOverride = THREADS) {
+function driveFreshBatch(threadsOverride = THREADS, rowsOverride = ROWS) {
   mockRunPool.mockImplementation(async (claimFn, workerFn) => {
     mockExecuteSql
       .mockResolvedValueOnce([]) // claim UPDATE
-      .mockResolvedValueOnce(ROWS) // claim SELECT
+      .mockResolvedValueOnce(rowsOverride) // claim SELECT
     const batch = await claimFn()
 
     mockExecuteSql
@@ -350,7 +353,9 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     const deals = mockWriteDeals.mock.calls[0][0]
     expect(deals).toHaveLength(1)
     expect(deals[0].threadId).toBe('thread-1')
-    expect(deals[0].userId).toBe('user-1')
+    // Post-4.11: userId is the derived UUID, not the raw Firestore uid.
+    // v5 mock returns 'derived-{name}'; real derivation verified in identity.test.js.
+    expect(deals[0].userId).toBe('derived-user-1')
     expect(deals[0].category).toBe('new')
     expect(deals[0].value).toBe(5000)
     // currency must come from deal_currency (the field parseAndValidate emits),
@@ -442,7 +447,7 @@ describe('INGEST_WRITE_TARGET wiring', () => {
 
     const contacts = mockWriteContacts.mock.calls[0][0]
     expect(contacts).toHaveLength(1)
-    expect(contacts[0].userId).toBe('user-1')
+    expect(contacts[0].userId).toBe('derived-user-1') // derived UUID, not raw Firestore uid
     expect(contacts[0].email).toBe('Alice@CO.com') // writer lowercases
     expect(contacts[0].company).toBe('TestCo')
   })
@@ -505,5 +510,85 @@ describe('INGEST_WRITE_TARGET wiring', () => {
     // Its contact never leaks in under the batch's first user.
     const contacts = mockWriteContacts.mock.calls[0][0]
     expect(contacts.map((c) => c.email)).toEqual(['Alice@CO.com'])
+  })
+
+  it('skips a thread whose owner uid is malformed (sanitizeId reject) without aborting the batch', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    // thread-2's claimed owner is a malformed uid (space + '!' fail sanitizeId's
+    // ^[a-zA-Z0-9_:-]+$). Pre-patch this threw and — in supabase-only mode —
+    // failed the whole batch; now userIdFor catches it, skips only that thread,
+    // and the valid thread-1 still lands. One corrupt row can't poison the batch.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const rows = [ROWS[0], { ...ROWS[1], USER_ID: 'bad uid!' }]
+      const threads = [THREADS[0], { ...THREADS[0], thread_id: 'thread-2' }]
+      driveFreshBatch(threads, rows)
+
+      // Must NOT throw even though Supabase is the only sink.
+      await expect(runClassifyPipeline()).resolves.toBeDefined()
+
+      // Only the well-formed owner's thread is written.
+      const deals = mockWriteDeals.mock.calls[0][0]
+      expect(deals.map((d) => d.threadId)).toEqual(['thread-1'])
+      const evals = mockWriteEvals.mock.calls[0][0]
+      expect(evals.map((e) => e.threadId)).toEqual(['thread-1'])
+
+      // The skip is surfaced (not silent) and deduped: warned exactly once even
+      // though userIdFor runs in both the deal loop and the eval loop.
+      const badOwnerWarns = warnSpy.mock.calls.filter((c) => String(c[0]).includes('thread-2'))
+      expect(badOwnerWarns).toHaveLength(1)
+
+      // The per-batch summary surfaces a dropped-owner count for monitoring.
+      const summary = logSpy.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('supabase writes done'))
+      expect(summary).toContain('1 skipped-bad-owner')
+    } finally {
+      warnSpy.mockRestore()
+      logSpy.mockRestore()
+    }
+  })
+
+  it('trims a whitespace-padded owner uid (writes it; does not drop it as malformed)', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    // A padded Firestore uid must derive the SAME tenant key as its trimmed
+    // Supabase sub (identity trim invariant). Pre-fix, sanitizeId rejected the
+    // surrounding spaces and the thread was dropped — an RLS-orphan risk; now
+    // userIdFor trims before sanitizeId so the row lands under the right owner.
+    const rows = [{ ...ROWS[0], USER_ID: '  user-1  ' }]
+    const threads = [THREADS[0]]
+    driveFreshBatch(threads, rows)
+
+    await runClassifyPipeline()
+
+    const deals = mockWriteDeals.mock.calls[0][0]
+    expect(deals).toHaveLength(1)
+    // v5 mock is (name) => `derived-${name}`; trimmed 'user-1' → derived-user-1,
+    // i.e. identical to the un-padded uid (not a skip, not a different key).
+    expect(deals[0].userId).toBe('derived-user-1')
+  })
+
+  it('excludes a malformed-owner non-deal thread from deleteDeals (uniform skip)', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    // thread-2 is a non-deal whose claimed owner uid is malformed. The deletes
+    // filter gates on userIdFor (not raw userByThread truthiness), so it is
+    // treated as unclaimed here too — deleteDeals (which bypasses RLS and matches
+    // by thread id) must not act on a thread we've decided to skip everywhere else.
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const rows = [ROWS[0], { ...ROWS[1], USER_ID: 'bad uid!' }]
+      // THREADS[1] is thread-2 with is_deal:false → the only non-deal thread.
+      const threads = [THREADS[0], THREADS[1]]
+      driveFreshBatch(threads, rows)
+
+      await runClassifyPipeline()
+
+      // Its only non-deal thread has a malformed owner → claimedNonDealIds is
+      // empty → deleteDeals is never called (pre-fix it ran with ['thread-2']).
+      expect(mockDeleteDeals).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })

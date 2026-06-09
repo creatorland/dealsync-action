@@ -22,6 +22,7 @@ jest.unstable_mockModule('uuid', () => ({
     uuidCallCount++
     return `test-uuid-${uuidCallCount}`
   }),
+  v5: jest.fn((name, _ns) => `derived-${name}`),
 }))
 
 // Mock sxt-client

@@ -21694,11 +21694,11 @@ function requireUtil$1 () {
 	return util$1;
 }
 
-var parse;
+var parse$1;
 var hasRequiredParse;
 
 function requireParse () {
-	if (hasRequiredParse) return parse;
+	if (hasRequiredParse) return parse$1;
 	hasRequiredParse = 1;
 
 	const { maxNameValuePairSize, maxAttributeValueSize } = requireConstants$1();
@@ -22012,11 +22012,11 @@ function requireParse () {
 	  return parseUnparsedAttributes(unparsedAttributes, cookieAttributeList)
 	}
 
-	parse = {
+	parse$1 = {
 	  parseSetCookie,
 	  parseUnparsedAttributes
 	};
-	return parse;
+	return parse$1;
 }
 
 var cookies;
@@ -27259,6 +27259,20 @@ function requireCore () {
 
 var coreExports = requireCore();
 
+var REGEX = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/i;
+
+function validate(uuid) {
+    return typeof uuid === 'string' && REGEX.test(uuid);
+}
+
+function parse(uuid) {
+    if (!validate(uuid)) {
+        throw TypeError('Invalid UUID');
+    }
+    let v;
+    return Uint8Array.of((v = parseInt(uuid.slice(0, 8), 16)) >>> 24, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff, (v = parseInt(uuid.slice(9, 13), 16)) >>> 8, v & 0xff, (v = parseInt(uuid.slice(14, 18), 16)) >>> 8, v & 0xff, (v = parseInt(uuid.slice(19, 23), 16)) >>> 8, v & 0xff, ((v = parseInt(uuid.slice(24, 36), 16)) / 0x10000000000) & 0xff, (v / 0x100000000) & 0xff, (v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff);
+}
+
 const byteToHex = [];
 for (let i = 0; i < 256; ++i) {
     byteToHex.push((i + 0x100).toString(16).slice(1));
@@ -27297,6 +27311,117 @@ function rng() {
     }
     return getRandomValues(rnds8);
 }
+
+function stringToBytes(str) {
+    str = unescape(encodeURIComponent(str));
+    const bytes = new Uint8Array(str.length);
+    for (let i = 0; i < str.length; ++i) {
+        bytes[i] = str.charCodeAt(i);
+    }
+    return bytes;
+}
+const DNS = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+const URL$1 = '6ba7b811-9dad-11d1-80b4-00c04fd430c8';
+function v35(version, hash, value, namespace, buf, offset) {
+    const valueBytes = typeof value === 'string' ? stringToBytes(value) : value;
+    const namespaceBytes = typeof namespace === 'string' ? parse(namespace) : namespace;
+    if (typeof namespace === 'string') {
+        namespace = parse(namespace);
+    }
+    if (namespace?.length !== 16) {
+        throw TypeError('Namespace must be array-like (16 iterable integer values, 0-255)');
+    }
+    let bytes = new Uint8Array(16 + valueBytes.length);
+    bytes.set(namespaceBytes);
+    bytes.set(valueBytes, namespaceBytes.length);
+    bytes = hash(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | version;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    if (buf) {
+        offset = offset || 0;
+        for (let i = 0; i < 16; ++i) {
+            buf[offset + i] = bytes[i];
+        }
+        return buf;
+    }
+    return unsafeStringify(bytes);
+}
+
+function f(s, x, y, z) {
+    switch (s) {
+        case 0:
+            return (x & y) ^ (~x & z);
+        case 1:
+            return x ^ y ^ z;
+        case 2:
+            return (x & y) ^ (x & z) ^ (y & z);
+        case 3:
+            return x ^ y ^ z;
+    }
+}
+function ROTL(x, n) {
+    return (x << n) | (x >>> (32 - n));
+}
+function sha1(bytes) {
+    const K = [0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6];
+    const H = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
+    const newBytes = new Uint8Array(bytes.length + 1);
+    newBytes.set(bytes);
+    newBytes[bytes.length] = 0x80;
+    bytes = newBytes;
+    const l = bytes.length / 4 + 2;
+    const N = Math.ceil(l / 16);
+    const M = new Array(N);
+    for (let i = 0; i < N; ++i) {
+        const arr = new Uint32Array(16);
+        for (let j = 0; j < 16; ++j) {
+            arr[j] =
+                (bytes[i * 64 + j * 4] << 24) |
+                    (bytes[i * 64 + j * 4 + 1] << 16) |
+                    (bytes[i * 64 + j * 4 + 2] << 8) |
+                    bytes[i * 64 + j * 4 + 3];
+        }
+        M[i] = arr;
+    }
+    M[N - 1][14] = ((bytes.length - 1) * 8) / Math.pow(2, 32);
+    M[N - 1][14] = Math.floor(M[N - 1][14]);
+    M[N - 1][15] = ((bytes.length - 1) * 8) & 0xffffffff;
+    for (let i = 0; i < N; ++i) {
+        const W = new Uint32Array(80);
+        for (let t = 0; t < 16; ++t) {
+            W[t] = M[i][t];
+        }
+        for (let t = 16; t < 80; ++t) {
+            W[t] = ROTL(W[t - 3] ^ W[t - 8] ^ W[t - 14] ^ W[t - 16], 1);
+        }
+        let a = H[0];
+        let b = H[1];
+        let c = H[2];
+        let d = H[3];
+        let e = H[4];
+        for (let t = 0; t < 80; ++t) {
+            const s = Math.floor(t / 20);
+            const T = (ROTL(a, 5) + f(s, b, c, d) + e + K[s] + W[t]) >>> 0;
+            e = d;
+            d = c;
+            c = ROTL(b, 30) >>> 0;
+            b = a;
+            a = T;
+        }
+        H[0] = (H[0] + a) >>> 0;
+        H[1] = (H[1] + b) >>> 0;
+        H[2] = (H[2] + c) >>> 0;
+        H[3] = (H[3] + d) >>> 0;
+        H[4] = (H[4] + e) >>> 0;
+    }
+    return Uint8Array.of(H[0] >> 24, H[0] >> 16, H[0] >> 8, H[0], H[1] >> 24, H[1] >> 16, H[1] >> 8, H[1], H[2] >> 24, H[2] >> 16, H[2] >> 8, H[2], H[3] >> 24, H[3] >> 16, H[3] >> 8, H[3], H[4] >> 24, H[4] >> 16, H[4] >> 8, H[4]);
+}
+
+function v5(value, namespace, buf, offset) {
+    return v35(0x50, sha1, value, namespace, buf, offset);
+}
+v5.DNS = DNS;
+v5.URL = URL$1;
 
 const _state = {};
 function v7(options, buf, offset) {
@@ -29133,7 +29258,7 @@ const unicodeEscapedSequence_ = token((t) => t.name === 'unicode' ? String.fromC
 const escapedSequence_ = token((t) => t.name === 'escape' ? t.text.slice(1) : undefined);
 const anyChar_ = token((t) => t.name === 'any' ? t.text : undefined);
 const escapedString_ = map(many(choice(unicodeEscapedSequence_, escapedSequence_, anyChar_)), (cs) => cs.join(''));
-function unescape(escapedString) {
+function unescape$1(escapedString) {
     const lexerResult = lexEscapedString(escapedString);
     const result = escapedString_({ tokens: lexerResult.tokens, options: undefined }, 0);
     return result.value;
@@ -29146,9 +29271,9 @@ const optionalWhitespace_ = option(whitespace_, null);
 function optionallySpaced(parser) {
     return middle(optionalWhitespace_, parser, optionalWhitespace_);
 }
-const identifier_ = token((t) => t.name === 'ident' ? unescape(t.text) : undefined);
-const hashId_ = token((t) => t.name === 'hash' ? unescape(t.text.slice(1)) : undefined);
-const string_ = token((t) => t.name.startsWith('str') ? unescape(t.text.slice(1, -1)) : undefined);
+const identifier_ = token((t) => t.name === 'ident' ? unescape$1(t.text) : undefined);
+const hashId_ = token((t) => t.name === 'hash' ? unescape$1(t.text.slice(1)) : undefined);
+const string_ = token((t) => t.name.startsWith('str') ? unescape$1(t.text.slice(1, -1)) : undefined);
 const namespace_ = left(option(identifier_, ''), literal('|'));
 const qualifiedName_ = otherwise(ab(namespace_, identifier_, (ns, name) => ({ name: name, namespace: ns })), map(identifier_, (name) => ({ name: name, namespace: null })));
 const uniSelector_ = otherwise(ab(namespace_, literal('*'), (ns) => ({ type: 'universal', namespace: ns, specificity: [0, 0, 0] })), map(literal('*'), () => ({ type: 'universal', namespace: null, specificity: [0, 0, 0] })));
@@ -39670,6 +39795,35 @@ async function writeContacts(contacts) {
   }
 }
 
+// ADR-008 identity derivation — headless Supabase UUID from Firestore uid.
+// Source: dealsync-v2/_bmad-output/planning-artifacts/Architecture-Dealsync-2-Data-Architecture.md
+
+// Canonical namespace for UUIDv5 tenant-key derivation per ADR-008.
+// Hard-coded constant — never env-sourced; pinned by Story 2.11 Task 1.
+const DEALSYNC_IDENTITY_NAMESPACE = '5ced37e1-0ede-40a0-98aa-ae066dac4ce1';
+
+/**
+ * Derive the Supabase tenant key (deals.user_id / contacts.user_id) from a
+ * Firestore uid. Runs headless with no session and no mapping-table lookup.
+ *
+ * Arg order: name (uid) first — Node uuid is v5(name, namespace), the reverse
+ * of Postgres uuid_generate_v5(namespace, name). Trim is applied before hashing
+ * so a padded uid derives the same UUID as its trimmed form.
+ *
+ * @param {string} firestoreUid — the Firestore user ID (USER_ID on the SxT batch)
+ * @returns {string} lowercase UUID string matching the derived sub in the Supabase JWT
+ */
+function deriveSupabaseUserId(firestoreUid) {
+  if (typeof firestoreUid !== 'string') {
+    throw new TypeError(
+      `deriveSupabaseUserId: firestore_uid must be a string, got ${typeof firestoreUid}`,
+    )
+  }
+  const uid = firestoreUid.trim();
+  if (!uid) throw new Error('deriveSupabaseUserId: firestore_uid must be non-blank')
+  return v5(uid, DEALSYNC_IDENTITY_NAMESPACE)
+}
+
 /**
  * Orchestrator that claims and processes classify batches concurrently,
  * with in-memory audit passing through eval upserts, deal upserts,
@@ -40489,8 +40643,36 @@ async function runClassifyPipeline() {
       // claimed row (hallucination / coercion artifact); such threads are SKIPPED
       // from every Supabase write rather than attributed to a fallback user —
       // writing them under rows[0].USER_ID would create a deal for the wrong user.
-      const userIdFor = (threadId) =>
-        userByThread[threadId] ? sanitizeId(userByThread[threadId]) : null;
+      // A genuinely malformed owner uid (bad chars after trim, or blank) is
+      // treated the same way — skipped, not thrown — so one corrupt row cannot
+      // abort the per-thread loop and silently drop every later thread's writes
+      // (in `both` mode the outer catch would swallow it). Tracked in a Set so
+      // (a) the per-batch summary can surface a count for monitoring and (b) a
+      // thread is warned about exactly once even though userIdFor runs in both
+      // the deal/contact and the eval build loops.
+      const skippedOwnerThreads = new Set();
+      const userIdFor = (threadId) => {
+        const firestoreUid = userByThread[threadId];
+        if (!firestoreUid) return null
+        try {
+          // Trim BEFORE sanitizeId: sanitizeId rejects whitespace, so a padded
+          // uid like '  uid  ' would otherwise be dropped as malformed. Trimming
+          // first normalizes it to the SAME value its Supabase sub derives from
+          // (the identity helper's load-bearing trim invariant — a padded uid
+          // must not mint an RLS-orphaned row). deriveSupabaseUserId re-trims
+          // defensively for callers that don't pre-trim.
+          return deriveSupabaseUserId(sanitizeId(firestoreUid.trim()))
+        } catch (err) {
+          if (!skippedOwnerThreads.has(threadId)) {
+            skippedOwnerThreads.add(threadId);
+            console.warn(
+              `[run-classify-pipeline] skipping thread ${threadId}: unusable owner uid ` +
+                `(batch ${batchId}, ${err?.message ?? err})`,
+            );
+          }
+          return null
+        }
+      };
 
       // Resolved usable main_contact per deal thread (set during Step 6a).
       const mcByThread = new Map();
@@ -40517,7 +40699,12 @@ async function runClassifyPipeline() {
         //    threads actually in this claimed batch. deleteDeals matches by id and
         //    bypasses RLS (service-role), so an unclaimed/hallucinated thread_id
         //    that happens to match an existing deal could remove another user's row.
-        const claimedNonDealIds = notDealThreadIds.filter((tid) => userByThread[tid]);
+        //    Gate on userIdFor (not a raw userByThread truthiness check) so a
+        //    malformed-owner thread is treated as unclaimed here too — uniform with
+        //    the upsert loops, and it also warns/counts the skip. (Clearing the
+        //    userByThread entry inside userIdFor wouldn't work: this filter runs
+        //    before userIdFor is first called in the loops below.)
+        const claimedNonDealIds = notDealThreadIds.filter((tid) => userIdFor(tid));
         if (claimedNonDealIds.length > 0) {
           await deleteDeals(claimedNonDealIds);
         }
@@ -40602,7 +40789,8 @@ async function runClassifyPipeline() {
 
         console.log(
           `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
-            `(${evalRowsMap.size} evals, ${dealRowsMap.size} deals, ${claimedNonDealIds.length} deletes)`,
+            `(${evalRowsMap.size} evals, ${dealRowsMap.size} deals, ${claimedNonDealIds.length} deletes` +
+            `${skippedOwnerThreads.size ? `, ${skippedOwnerThreads.size} skipped-bad-owner` : ''})`,
         );
       } catch (err) {
         const msg = err?.message ?? String(err);
