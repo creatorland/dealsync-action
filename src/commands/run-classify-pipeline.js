@@ -845,21 +845,25 @@ export async function runClassifyPipeline() {
       // claimed row (hallucination / coercion artifact); such threads are SKIPPED
       // from every Supabase write rather than attributed to a fallback user —
       // writing them under rows[0].USER_ID would create a deal for the wrong user.
-      // A malformed owner uid (fails sanitizeId, or blank/whitespace per the
-      // identity helper) is treated the same way — skipped, not thrown — so one
-      // corrupt row cannot abort the per-thread loop and silently drop every
-      // later thread's writes (in `both` mode the outer catch would swallow it).
-      // Threads dropped because their claimed owner uid is unusable (fails
-      // sanitizeId, or blank/whitespace per the identity helper). Tracked as a
-      // Set so (a) the per-batch summary can surface a count for monitoring and
-      // (b) a thread is warned about exactly once even though userIdFor runs in
-      // both the deal/contact and the eval build loops.
+      // A genuinely malformed owner uid (bad chars after trim, or blank) is
+      // treated the same way — skipped, not thrown — so one corrupt row cannot
+      // abort the per-thread loop and silently drop every later thread's writes
+      // (in `both` mode the outer catch would swallow it). Tracked in a Set so
+      // (a) the per-batch summary can surface a count for monitoring and (b) a
+      // thread is warned about exactly once even though userIdFor runs in both
+      // the deal/contact and the eval build loops.
       const skippedOwnerThreads = new Set()
       const userIdFor = (threadId) => {
         const firestoreUid = userByThread[threadId]
         if (!firestoreUid) return null
         try {
-          return deriveSupabaseUserId(sanitizeId(firestoreUid))
+          // Trim BEFORE sanitizeId: sanitizeId rejects whitespace, so a padded
+          // uid like '  uid  ' would otherwise be dropped as malformed. Trimming
+          // first normalizes it to the SAME value its Supabase sub derives from
+          // (the identity helper's load-bearing trim invariant — a padded uid
+          // must not mint an RLS-orphaned row). deriveSupabaseUserId re-trims
+          // defensively for callers that don't pre-trim.
+          return deriveSupabaseUserId(sanitizeId(firestoreUid.trim()))
         } catch (err) {
           if (!skippedOwnerThreads.has(threadId)) {
             skippedOwnerThreads.add(threadId)

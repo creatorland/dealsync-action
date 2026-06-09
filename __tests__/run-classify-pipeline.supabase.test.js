@@ -549,4 +549,23 @@ describe('INGEST_WRITE_TARGET wiring', () => {
       logSpy.mockRestore()
     }
   })
+
+  it('trims a whitespace-padded owner uid (writes it; does not drop it as malformed)', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' })
+    // A padded Firestore uid must derive the SAME tenant key as its trimmed
+    // Supabase sub (identity trim invariant). Pre-fix, sanitizeId rejected the
+    // surrounding spaces and the thread was dropped — an RLS-orphan risk; now
+    // userIdFor trims before sanitizeId so the row lands under the right owner.
+    const rows = [{ ...ROWS[0], USER_ID: '  user-1  ' }]
+    const threads = [THREADS[0]]
+    driveFreshBatch(threads, rows)
+
+    await runClassifyPipeline()
+
+    const deals = mockWriteDeals.mock.calls[0][0]
+    expect(deals).toHaveLength(1)
+    // v5 mock is (name) => `derived-${name}`; trimmed 'user-1' → derived-user-1,
+    // i.e. identical to the un-padded uid (not a skip, not a different key).
+    expect(deals[0].userId).toBe('derived-user-1')
+  })
 })
