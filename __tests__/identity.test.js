@@ -16,11 +16,14 @@ describe('DEALSYNC_IDENTITY_NAMESPACE', () => {
 // ===========================================================================
 
 describe('deriveSupabaseUserId', () => {
-  it('golden vector: UUIDv5(NS, "38Jeic1UdHYI8wwJQyrPu") matches ADR-008 shared value (AC4)', () => {
-    // Expected is a hardcoded literal — NOT recomputed through the same helper.
-    // A self-referential test (helper on both sides) passes even when arg order
-    // is swapped; the literal catches that class of bug. Canonical value is
-    // pinned by ADR-008 and Story 2.11 (shared across Stories 1.10, 4.11, 6.2).
+  it('golden vector: deriveSupabaseUserId("38Jeic1UdHYI8wwJQyrPu") matches the ADR-008 shared value (AC4)', () => {
+    // Notation: ADR-008/Postgres write this as UUIDv5(namespace, name); the Node
+    // `uuid` lib (and this helper) call it v5(name, namespace) — same value,
+    // reversed arg order (see identity.js). The expected is a hardcoded literal —
+    // NOT recomputed through the same helper. A self-referential test (helper on
+    // both sides) passes even when the arg order is swapped; the literal catches
+    // that class of bug. Canonical value pinned by ADR-008 and Story 2.11 (shared
+    // across Stories 1.10, 4.11, 6.2).
     expect(deriveSupabaseUserId('38Jeic1UdHYI8wwJQyrPu')).toBe(
       '216139fd-5fca-5375-8b38-6352cb35d12a',
     )
