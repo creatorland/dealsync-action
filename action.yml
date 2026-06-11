@@ -13,6 +13,8 @@ inputs:
     description: 'Supabase project URL (required when ingest-write-target=supabase|both)'
   supabase-service-role-key:
     description: 'Supabase service-role key — server-side only, never NEXT_PUBLIC_* (required when ingest-write-target=supabase|both)'
+  heartbeat-node:
+    description: 'W3 node this run executes on: testnet | betanet. Stamped on the classify true-success heartbeat row (Story 8.1) so the dashboard separates per-node ingestion health. Omit on non-classify commands; an absent/invalid value just skips the heartbeat.'
   sxt-auth-url:
     description: 'SxT auth proxy URL'
   sxt-auth-secret:

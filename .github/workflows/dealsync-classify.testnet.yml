@@ -22,6 +22,7 @@ jobs:
         with:
           command: run-classify-pipeline
           ingest-write-target: ${{ secrets.INGEST_WRITE_TARGET || 'supabase' }}
+          heartbeat-node: testnet
           supabase-url: ${{ secrets.SUPABASE_URL }}
           supabase-service-role-key: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}

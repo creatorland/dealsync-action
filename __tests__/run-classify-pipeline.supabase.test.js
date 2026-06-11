@@ -93,13 +93,18 @@ const mockWriteEvals = jest.fn().mockResolvedValue(undefined)
 const mockWriteDeals = jest.fn().mockResolvedValue(undefined)
 const mockDeleteDeals = jest.fn().mockResolvedValue(undefined)
 const mockWriteContacts = jest.fn().mockResolvedValue(undefined)
+const mockWriteClassifyHeartbeat = jest.fn().mockResolvedValue(undefined)
 jest.unstable_mockModule('../src/lib/supabase-writer.js', () => ({
   writeAudit: mockWriteAudit,
   writeEvals: mockWriteEvals,
   writeDeals: mockWriteDeals,
   deleteDeals: mockDeleteDeals,
   writeContacts: mockWriteContacts,
+  writeClassifyHeartbeat: mockWriteClassifyHeartbeat,
 }))
+// buildHeartbeatRow (../src/lib/classify-heartbeat.js) is intentionally NOT
+// mocked — it is pure, unit-tested in classify-heartbeat.test.js, and the
+// integration test asserts on the real row it builds.
 
 const core = await import('@actions/core')
 const { runClassifyPipeline } = await import('../src/commands/run-classify-pipeline.js')
@@ -248,6 +253,7 @@ beforeEach(() => {
     mockWriteDeals,
     mockDeleteDeals,
     mockWriteContacts,
+    mockWriteClassifyHeartbeat,
   ]) {
     fn.mockReset().mockResolvedValue(undefined)
   }
@@ -589,6 +595,98 @@ describe('INGEST_WRITE_TARGET wiring', () => {
       expect(mockDeleteDeals).not.toHaveBeenCalled()
     } finally {
       warnSpy.mockRestore()
+    }
+  })
+})
+
+// ===========================================================================
+// Classify true-success heartbeat (Story 8.1, Task 5.3)
+//
+// One heartbeat row per run, written AFTER the pool drains, only in a
+// Supabase-writing mode and only with a valid node. Aggregates per-table rows
+// actually written across the run and honestly downgrades status when a `both`-
+// mode Supabase write was swallowed (the run-state-overstates-health trap).
+// ===========================================================================
+
+describe('classify heartbeat (Task 5.3)', () => {
+  const ORIGINAL_RUN_ID = process.env.GITHUB_RUN_ID
+
+  beforeEach(() => {
+    process.env.GITHUB_RUN_ID = 'gha-run-777'
+  })
+  afterEach(() => {
+    if (ORIGINAL_RUN_ID === undefined) delete process.env.GITHUB_RUN_ID
+    else process.env.GITHUB_RUN_ID = ORIGINAL_RUN_ID
+  })
+
+  it('writes one success heartbeat with per-table counts in supabase mode', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase', 'heartbeat-node': 'testnet' })
+    driveFreshBatch()
+    await runClassifyPipeline()
+
+    expect(mockWriteClassifyHeartbeat).toHaveBeenCalledTimes(1)
+    const row = mockWriteClassifyHeartbeat.mock.calls[0][0]
+    expect(row).toMatchObject({
+      run_id: 'gha-run-777',
+      node: 'testnet',
+      status: 'success',
+      ingest_write_target: 'supabase',
+      rows_written_total: 5, // 1 audit + 1 deal + 1 contact + 2 evals
+      rows_by_table: {
+        ai_evaluation_audits: 1,
+        deals: 1,
+        contacts: 1,
+        email_thread_evaluations: 2,
+      },
+    })
+  })
+
+  it('downgrades to partial when a `both`-mode Supabase write is swallowed', async () => {
+    mockInputs({ 'ingest-write-target': 'both', 'heartbeat-node': 'betanet' })
+    // Evals are written LAST, so audit+deals+contacts already landed (3 rows)
+    // before this throw is caught non-fatally — a partial run, not a clean one.
+    mockWriteEvals.mockRejectedValueOnce(new Error('supabase 500'))
+    driveFreshBatch()
+    await runClassifyPipeline()
+
+    const row = mockWriteClassifyHeartbeat.mock.calls[0][0]
+    expect(row.node).toBe('betanet')
+    expect(row.status).toBe('partial')
+    expect(row.rows_written_total).toBe(3)
+    expect(row.rows_by_table).toEqual({ ai_evaluation_audits: 1, deals: 1, contacts: 1 })
+    expect(row.ingest_write_target).toBe('both')
+  })
+
+  it('does not write a heartbeat in SxT-only mode (no service-role creds in play)', async () => {
+    mockInputs({ 'heartbeat-node': 'testnet' }) // ingest-write-target defaults to sxt
+    driveFreshBatch()
+    await runClassifyPipeline()
+
+    expect(mockWriteClassifyHeartbeat).not.toHaveBeenCalled()
+  })
+
+  it('skips the heartbeat (without failing the run) when node is missing/invalid', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase' }) // heartbeat-node absent
+    driveFreshBatch()
+    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await expect(runClassifyPipeline()).resolves.toBeDefined()
+      expect(mockWriteClassifyHeartbeat).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('a heartbeat write failure is non-fatal (telemetry never fails the run)', async () => {
+    mockInputs({ 'ingest-write-target': 'supabase', 'heartbeat-node': 'testnet' })
+    mockWriteClassifyHeartbeat.mockRejectedValueOnce(new Error('heartbeat 500'))
+    driveFreshBatch()
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(runClassifyPipeline()).resolves.toBeDefined()
+      expect(mockWriteClassifyHeartbeat).toHaveBeenCalledTimes(1)
+    } finally {
+      errSpy.mockRestore()
     }
   })
 })
