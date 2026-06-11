@@ -320,3 +320,44 @@ export async function writeContacts(contacts) {
     await upsert('contacts', [row], 'user_id,email', false)
   }
 }
+
+/**
+ * Insert ONE classify-cron heartbeat row (Story 8.1, Task 5.3) into
+ * public.classify_heartbeat (dealsync-v2 migration 0014). Append-only — a plain
+ * INSERT, NOT an upsert (the run's id is server-generated; we never conflict).
+ * RLS-enabled + service-role only, so this reuses the same service-role creds as
+ * the business-table writes. The caller (run-classify-pipeline) treats a throw
+ * here as NON-FATAL: a telemetry write must never fail the classify run.
+ *
+ * @param {{run_id: string, node: string, status: string, rows_written_total: number, rows_by_table: object, ingest_write_target: string|null}} row
+ *   — built by classify-heartbeat.js buildHeartbeatRow.
+ */
+export async function writeClassifyHeartbeat(row) {
+  if (!row) return
+  const { url, key } = getConfig()
+  const { signal, clear } = withTimeout()
+  let resp
+  try {
+    resp = await fetch(`${url}/rest/v1/classify_heartbeat`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        apikey: key,
+        'Content-Type': 'application/json',
+        // missing=default lets id/created_at fall to their DB DEFAULTs (the row
+        // carries neither). No resolution= — this is a plain append, not a merge.
+        Prefer: 'return=minimal, missing=default',
+      },
+      body: JSON.stringify([row]),
+      signal,
+    })
+  } finally {
+    clear()
+  }
+  if (!resp.ok) {
+    const body = await resp.text()
+    throw new Error(
+      `Supabase classify_heartbeat insert failed: ${resp.status} ${summarizeError(body)}`,
+    )
+  }
+}

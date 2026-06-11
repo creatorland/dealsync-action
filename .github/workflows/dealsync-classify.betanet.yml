@@ -17,6 +17,7 @@ jobs:
         uses: creatorland/dealsync-action@e4ad709
         with:
           command: run-classify-pipeline
+          heartbeat-node: betanet
           sxt-auth-url: ${{ secrets.SXT_AUTH_URL }}
           sxt-auth-secret: ${{ secrets.SXT_AUTH_SECRET }}
           sxt-api-url: ${{ secrets.SXT_API_URL }}

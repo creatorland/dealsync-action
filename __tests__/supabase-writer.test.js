@@ -539,6 +539,54 @@ describe('writeContacts', () => {
 })
 
 // ===========================================================================
+// writeClassifyHeartbeat (Story 8.1, Task 5.3)
+// ===========================================================================
+
+describe('writeClassifyHeartbeat', () => {
+  const ROW = {
+    run_id: 'gha-run-1',
+    node: 'testnet',
+    status: 'success',
+    rows_written_total: 5,
+    rows_by_table: { deals: 1, contacts: 1, email_thread_evaluations: 2, ai_evaluation_audits: 1 },
+    ingest_write_target: 'supabase',
+  }
+
+  it('POSTs one row to classify_heartbeat with service-role headers, no on_conflict', async () => {
+    await writer.writeClassifyHeartbeat(ROW)
+
+    const call = lastFetch()
+    expect(call.url).toBe(`${SUPABASE_URL}/rest/v1/classify_heartbeat`)
+    expect(call.opts.method).toBe('POST')
+    expect(call.url).not.toContain('on_conflict')
+    expect(call.opts.headers.Authorization).toBe(`Bearer ${SERVICE_ROLE_KEY}`)
+    expect(call.opts.headers.apikey).toBe(SERVICE_ROLE_KEY)
+    // Append-only insert — missing=default (id/created_at fall to DB defaults),
+    // and NO resolution= (it is not a merge).
+    expect(call.opts.headers.Prefer).toContain('missing=default')
+    expect(call.opts.headers.Prefer).not.toContain('resolution=')
+    // PostgREST wants an array body even for a single row.
+    expect(parsedBody(call)).toEqual([ROW])
+  })
+
+  it('is a no-op when row is null/undefined', async () => {
+    await writer.writeClassifyHeartbeat(null)
+    expect(capturedFetches).toHaveLength(0)
+  })
+
+  it('throws a sanitized error on a non-ok response', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: false,
+      status: 422,
+      text: async () => '{"code":"23514","message":"violates check constraint"}',
+    }))
+    await expect(writer.writeClassifyHeartbeat(ROW)).rejects.toThrow(
+      'Supabase classify_heartbeat insert failed: 422 [23514] violates check constraint',
+    )
+  })
+})
+
+// ===========================================================================
 // Config validation
 // ===========================================================================
 

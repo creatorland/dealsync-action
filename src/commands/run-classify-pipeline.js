@@ -11,7 +11,9 @@ import {
   writeDeals,
   deleteDeals,
   writeContacts,
+  writeClassifyHeartbeat,
 } from '../lib/supabase-writer.js'
+import { buildHeartbeatRow } from '../lib/classify-heartbeat.js'
 import { deriveSupabaseUserId } from '../lib/identity.js'
 import {
   sanitizeSchema,
@@ -76,6 +78,22 @@ export async function runClassifyPipeline() {
       `[run-classify-pipeline] ingest-write-target=${writeTarget} requires supabase-url and supabase-service-role-key`,
     )
   }
+
+  // Story 8.1 (Task 5.3): classify-cron true-success heartbeat. The W3 node
+  // (testnet | betanet) is the one thing the action cannot self-derive, so it is
+  // passed literally per workflow file; an absent/invalid value just skips the
+  // heartbeat (never fails the run). Per-table rows actually written this run are
+  // accumulated across all batches' Step 6.5 writes and `both`-mode Supabase
+  // failures (the silent-write-loss case the heartbeat exists to surface) are
+  // tallied, then one row is written after the pool drains.
+  const heartbeatNode = core.getInput('heartbeat-node') || ''
+  const heartbeatCounts = {
+    deals: 0,
+    contacts: 0,
+    email_thread_evaluations: 0,
+    ai_evaluation_audits: 0,
+  }
+  let heartbeatBothModeFailures = 0
 
   console.log(
     `[run-classify-pipeline] starting (maxConcurrent=${maxConcurrent}, batchSize=${classifyBatchSize}, claimSize=${claimSize}, maxRetries=${maxRetries}, fetchChunkSize=${fetchChunkSize}, fetchTimeoutMs=${fetchTimeoutMs}, writeTarget=${writeTarget})`,
@@ -896,6 +914,7 @@ export async function runClassifyPipeline() {
           model: modelUsed,
           aiEvaluation: { threads },
         })
+        heartbeatCounts.ai_evaluation_audits += 1
 
         // 2. Delete deal rows for threads re-classified as non-deal, but only for
         //    threads actually in this claimed batch. deleteDeals matches by id and
@@ -958,8 +977,12 @@ export async function runClassifyPipeline() {
             phone: mc.phone_number || prevContact?.phone || null,
           })
         }
-        await writeDeals([...dealRowsMap.values()])
-        await writeContacts([...contactRowsMap.values()])
+        const dealRows = [...dealRowsMap.values()]
+        const contactRows = [...contactRowsMap.values()]
+        await writeDeals(dealRows)
+        heartbeatCounts.deals += dealRows.length
+        await writeContacts(contactRows)
+        heartbeatCounts.contacts += contactRows.length
 
         // 4. Evals for all CLAIMED threads (deal + non-deal), written LAST so a
         //    partial failure leaves a renderable deal rather than an orphan eval.
@@ -987,7 +1010,9 @@ export async function runClassifyPipeline() {
             mainContact: mcByThread.get(threadId) || null,
           })
         }
-        await writeEvals([...evalRowsMap.values()])
+        const evalRows = [...evalRowsMap.values()]
+        await writeEvals(evalRows)
+        heartbeatCounts.email_thread_evaluations += evalRows.length
 
         console.log(
           `[run-classify-pipeline] supabase writes done in ${Date.now() - t0Supa}ms ` +
@@ -1011,6 +1036,12 @@ export async function runClassifyPipeline() {
         console.error(
           `[run-classify-pipeline] supabase writes failed (non-fatal, both mode): ${msg}`,
         )
+        // Heartbeat: a swallowed `both`-mode write is exactly the silent
+        // Supabase data loss the heartbeat surfaces (SxT still has the data, but
+        // the Supabase sink missed it). supabase-only failures rethrow instead
+        // and are reflected post-pool via poolResults.failed (dead-letters),
+        // so transient retries that recover are not counted as failures.
+        heartbeatBothModeFailures += 1
       }
     }
 
@@ -1143,6 +1174,39 @@ export async function runClassifyPipeline() {
   console.log(
     `[run-classify-pipeline] done — batches_processed=${poolResults.processed}, batches_failed=${poolResults.failed}, stuck_failed=${stuckFailed}, orphan_failed=${orphanFailed}`,
   )
+
+  // Story 8.1 (Task 5.3): write the true-success heartbeat once per run. Only in
+  // a Supabase-writing mode (the action holds service-role creds then) and only
+  // with a valid node. A dead-lettered batch (poolResults.failed) means data
+  // never persisted anywhere, so it folds into the failure tally alongside the
+  // swallowed `both`-mode write failures. The write is NON-FATAL — telemetry must
+  // never fail the classify run.
+  if (writeSupabase) {
+    if (heartbeatNode !== 'testnet' && heartbeatNode !== 'betanet') {
+      console.warn(
+        `[run-classify-pipeline] skipping heartbeat: heartbeat-node="${heartbeatNode}" not in {testnet, betanet}`,
+      )
+    } else {
+      try {
+        const row = buildHeartbeatRow({
+          runId: process.env.GITHUB_RUN_ID || `local-${Date.now()}`,
+          node: heartbeatNode,
+          rowsByTable: heartbeatCounts,
+          ingestWriteTarget: writeTarget,
+          failureCount: heartbeatBothModeFailures + poolResults.failed,
+        })
+        await writeClassifyHeartbeat(row)
+        console.log(
+          `[run-classify-pipeline] heartbeat written: node=${row.node} status=${row.status} ` +
+            `rows=${row.rows_written_total} ${JSON.stringify(row.rows_by_table)}`,
+        )
+      } catch (err) {
+        console.error(
+          `[run-classify-pipeline] heartbeat write failed (non-fatal): ${err?.message ?? err}`,
+        )
+      }
+    }
+  }
 
   return {
     batches_processed: poolResults.processed,
